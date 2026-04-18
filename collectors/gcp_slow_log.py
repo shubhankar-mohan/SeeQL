@@ -51,19 +51,24 @@ class GCPSlowLogCollector(BaseCollector):
 
     def _get_client(self):
         if self._client is None:
-            gcp_config = get_config()["gcp"]
-            self._client = cloud_logging.Client(
-                project=gcp_config["project_id"],
-                credentials=get_monitoring_credentials(),
-            )
+            gcp_config = get_config().get("gcp") or {}
+            project_id = gcp_config.get("project_id")
+            creds = get_monitoring_credentials()
+            if not project_id or creds is None:
+                return None
+            self._client = cloud_logging.Client(project=project_id, credentials=creds)
         return self._client
 
     def collect(self, now: datetime, ctx: ServerContext) -> dict:
-        gcp_config = ctx.gcp_config
-        project_id = gcp_config["project_id"]
-        instance_id = gcp_config["cloud_sql_instance_id"]
+        gcp_config = ctx.gcp_config or {}
+        project_id = gcp_config.get("project_id")
+        instance_id = gcp_config.get("cloud_sql_instance_id")
+        if not project_id or not instance_id:
+            return {"slow_queries": []}
 
         client = self._get_client()
+        if client is None:
+            return {"slow_queries": []}
 
         # Look back 10 minutes to catch entries since last medium loop run
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=10)

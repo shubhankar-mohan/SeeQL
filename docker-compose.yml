@@ -1,42 +1,52 @@
+# =============================================================================
+# SeeQL — generic docker-compose for any MySQL 8.0+ instance.
+#
+# For GCP Cloud SQL users, use docker-compose.gcp.yml (adds Cloud Monitoring,
+# Cloud Logging, and Vertex AI wiring).
+#
+# Required env (set in .env or the shell):
+#   PROD_DB_HOST, PROD_DB_PASSWORD, PROD_DB_DATABASE
+#
+# Optional:
+#   ANTHROPIC_API_KEY     — enables Claude for LLM root-cause analysis
+#   SLACK_WEBHOOK_URL     — enables Slack alerts
+#
+# Quickstart:
+#   docker compose up -d
+#   open http://localhost:8080
+#
+# Dev MySQL for local testing:
+#   docker compose --profile dev up
+# =============================================================================
+
 services:
   seeql:
-    build: .
-    image: seeql:latest
+    image: ghcr.io/shubhankar-mohan/seeql:latest
+    # To build from source, uncomment:
+    # build:
+    #   context: .
+    #   args:
+    #     INSTALL_EXTRAS: api
     container_name: seeql
     ports:
       - "${SEEQL_API_PORT:-8080}:8080"
     volumes:
-      # Persistent data — SQLite DB lives here
-      - ${SEEQL_DATA_DIR:-./seeql-data}:/app/data
-      # Persistent logs
-      - ${SEEQL_LOG_DIR:-./seeql-logs}:/app/logs
-      # GCP service account (read-only)
-      - ${GOOGLE_APPLICATION_CREDENTIALS:-./vertex-sa.json}:/app/gcp-sa.json:ro
+      - seeql-data:/app/data
+      - seeql-logs:/app/logs
     environment:
-      # --- Required ---
+      # --- MySQL (required) ---
       PROD_DB_HOST: ${PROD_DB_HOST}
       PROD_DB_PORT: ${PROD_DB_PORT:-3306}
       PROD_DB_USER: ${PROD_DB_USER:-dba_agent}
       PROD_DB_PASSWORD: ${PROD_DB_PASSWORD}
       PROD_DB_DATABASE: ${PROD_DB_DATABASE}
 
-      # --- GCP ---
-      GOOGLE_APPLICATION_CREDENTIALS: /app/gcp-sa.json
-      GCP_PROJECT_ID: ${GCP_PROJECT_ID}
-      GCP_REGION: ${GCP_REGION:-asia-south1}
-      GCP_CLOUD_SQL_INSTANCE: ${GCP_CLOUD_SQL_INSTANCE}
-
-      # --- Limits ---
-      SEEQL_DB_MAX_SIZE_MB: ${SEEQL_DB_MAX_SIZE_MB:-5000}
-      SEEQL_LOG_MAX_SIZE_MB: ${SEEQL_LOG_MAX_SIZE_MB:-500}
-      SEEQL_RETENTION_DAYS: ${SEEQL_RETENTION_DAYS:-90}
-
-      # --- Agent ---
-      SEEQL_AGENT_ENABLED: ${SEEQL_AGENT_ENABLED:-true}
-      SEEQL_AGENT_MODEL: ${SEEQL_AGENT_MODEL:-gemini-2.0-flash}
+      # --- LLM Agent (optional — Claude via Anthropic API) ---
+      SEEQL_AGENT_ENABLED: ${SEEQL_AGENT_ENABLED:-false}
+      SEEQL_AGENT_MODEL: ${SEEQL_AGENT_MODEL:-claude-sonnet-4-6}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
 
-      # --- Alerting ---
+      # --- Alerting (optional) ---
       SEEQL_ALERTING_ENABLED: ${SEEQL_ALERTING_ENABLED:-false}
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
 
@@ -45,30 +55,36 @@ services:
       SEEQL_MEDIUM_INTERVAL: ${SEEQL_MEDIUM_INTERVAL:-300}
       SEEQL_SLOW_INTERVAL: ${SEEQL_SLOW_INTERVAL:-1800}
 
-      # --- Prometheus ---
-      SEEQL_PROM_CACHE_TTL: ${SEEQL_PROM_CACHE_TTL:-10}
+      # --- Storage limits ---
+      SEEQL_DB_MAX_SIZE_MB: ${SEEQL_DB_MAX_SIZE_MB:-5000}
+      SEEQL_LOG_MAX_SIZE_MB: ${SEEQL_LOG_MAX_SIZE_MB:-500}
+      SEEQL_RETENTION_DAYS: ${SEEQL_RETENTION_DAYS:-90}
 
       # --- Logging ---
       SEEQL_LOG_LEVEL: ${SEEQL_LOG_LEVEL:-INFO}
       SEEQL_API_PORT: "8080"
       SEEQL_ENV: production
     restart: unless-stopped
-    networks:
-      - monitoring
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   # ---------- Dev-only MySQL for local testing ----------
+  # Bring up with: docker compose --profile dev up
   mysql-dev:
-    image: mysql:8.0.43
+    image: mysql:8.0
     container_name: seeql-mysql-dev
-    profiles:
-      - dev
+    profiles: [dev]
     ports:
       - "3307:3306"
     environment:
       MYSQL_ROOT_PASSWORD: devroot
       MYSQL_USER: dba_agent
       MYSQL_PASSWORD: devpassword
-      MYSQL_DATABASE: mydb
+      MYSQL_DATABASE: shop
     command:
       - --performance-schema=ON
       - --slow-query-log=ON
@@ -77,13 +93,8 @@ services:
     volumes:
       - mysql-dev-data:/var/lib/mysql
       - ./tests/fixtures/init_test_mysql.sql:/docker-entrypoint-initdb.d/init.sql:ro
-    networks:
-      - monitoring
 
 volumes:
+  seeql-data:
+  seeql-logs:
   mysql-dev-data:
-
-networks:
-  monitoring:
-    name: monitoring
-    external: true

@@ -1,0 +1,56 @@
+name: Docker — build test
+
+on:
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'pyproject.toml'
+      - 'main.py'
+      - 'agent/**'
+      - 'api/**'
+      - 'alerting/**'
+      - 'collectors/**'
+      - 'config/**'
+      - 'parsers/**'
+      - 'scheduler/**'
+      - 'storage/**'
+      - 'seeql/**'
+      - 'templates/**'
+      - 'static/**'
+      - '.github/workflows/docker-*.yml'
+
+concurrency:
+  group: docker-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.variant }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: generic
+            extras: api
+          - variant: gcp
+            extras: 'api,gcp'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build (multi-arch, no push)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          tags: seeql:pr-${{ matrix.variant }}
+          build-args: |
+            SEEQL_VERSION=pr-${{ github.event.pull_request.number || github.sha }}
+            VCS_REF=${{ github.sha }}
+            INSTALL_EXTRAS=${{ matrix.extras }}
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}

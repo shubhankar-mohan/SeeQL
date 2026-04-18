@@ -204,26 +204,64 @@ class GlobalStatusCollector(BaseCollector):
 
 _global_status_collector = GlobalStatusCollector()
 
-# GCP collectors — imported here to keep all medium-loop collectors together
-from collectors.gcp_metrics import _gcp_metric_collector
-from collectors.gcp_slow_log import _gcp_slow_log_collector
+# GCP collectors are optional — only registered when the [gcp] extra is
+# installed AND gcp.project_id is configured. The default image runs
+# against any MySQL without google-cloud-* dependencies.
+try:
+    from collectors.gcp_metrics import _gcp_metric_collector
+    from collectors.gcp_slow_log import _gcp_slow_log_collector
+    _GCP_COLLECTORS_AVAILABLE = True
+except ImportError:
+    _GCP_COLLECTORS_AVAILABLE = False
+    logger.info(
+        "GCP collectors not installed (install the [gcp] extra to enable "
+        "Cloud Monitoring and Cloud Logging collection)"
+    )
+
 from collectors.innodb_status import _innodb_status_collector
 from collectors.execution_stages import _execution_stage_collector
 from collectors.explain_capture import _explain_capture_collector
 
-MEDIUM_COLLECTORS = [
-    QueryDigestCollector(),
-    WaitEventCollector(),
-    TableIOCollector(),
-    InnoDBMetricCollector(),
-    BufferPoolCollector(),
-    _global_status_collector,
-    _gcp_metric_collector,
-    _gcp_slow_log_collector,
-    _innodb_status_collector,
-    _execution_stage_collector,
-    _explain_capture_collector,
-]
+
+def _build_medium_collectors() -> list[BaseCollector]:
+    """Assemble the medium-loop collector list.
+
+    GCP collectors register only when:
+      - the [gcp] extra is installed (imports above succeeded), AND
+      - gcp.project_id is set to a real value (not empty, not the
+        ``your-gcp-project-id`` placeholder shipped in settings.yaml).
+    """
+    collectors: list[BaseCollector] = [
+        QueryDigestCollector(),
+        WaitEventCollector(),
+        TableIOCollector(),
+        InnoDBMetricCollector(),
+        BufferPoolCollector(),
+        _global_status_collector,
+    ]
+
+    if _GCP_COLLECTORS_AVAILABLE:
+        try:
+            from config import get_config
+            gcp = get_config().get("gcp") or {}
+        except Exception:
+            gcp = {}
+        project_id = (gcp.get("project_id") or "").strip()
+        if project_id and not project_id.startswith("your-"):
+            collectors.append(_gcp_metric_collector)
+            collectors.append(_gcp_slow_log_collector)
+        else:
+            logger.debug("GCP collectors skipped: no gcp.project_id configured")
+
+    collectors.extend([
+        _innodb_status_collector,
+        _execution_stage_collector,
+        _explain_capture_collector,
+    ])
+    return collectors
+
+
+MEDIUM_COLLECTORS = _build_medium_collectors()
 
 
 def run_medium_loop(ctx: ServerContext | None = None) -> dict[str, bool]:

@@ -1,0 +1,84 @@
+# =============================================================================
+# SeeQL — GCP Cloud SQL variant.
+#
+# Adds Cloud Monitoring + Cloud Logging collectors and wires Vertex AI for
+# the LLM agent. Use this when your MySQL lives on GCP Cloud SQL.
+#
+# Prerequisites:
+#   - Cloud SQL instance reachable from this host (private IP, VPC peering,
+#     or Cloud SQL Auth Proxy on the side).
+#   - A GCP service account JSON with:
+#       roles/monitoring.viewer
+#       roles/logging.viewer
+#       roles/aiplatform.user    (only if using Vertex AI for the LLM)
+#     Mount it at ./vertex-sa.json (or set GOOGLE_APPLICATION_CREDENTIALS
+#     to a different path).
+#
+# Required env:
+#   PROD_DB_HOST, PROD_DB_PASSWORD, PROD_DB_DATABASE
+#   GCP_PROJECT_ID, GCP_CLOUD_SQL_INSTANCE
+#
+# Quickstart:
+#   docker compose -f docker-compose.gcp.yml up -d
+# =============================================================================
+
+services:
+  seeql:
+    image: ghcr.io/shubhankar-mohan/seeql:latest-gcp
+    # To build from source:
+    # build:
+    #   context: .
+    #   args:
+    #     INSTALL_EXTRAS: api,gcp
+    container_name: seeql
+    ports:
+      - "${SEEQL_API_PORT:-8080}:8080"
+    volumes:
+      - seeql-data:/app/data
+      - seeql-logs:/app/logs
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-./vertex-sa.json}:/app/gcp-sa.json:ro
+    environment:
+      # --- MySQL ---
+      PROD_DB_HOST: ${PROD_DB_HOST}
+      PROD_DB_PORT: ${PROD_DB_PORT:-3306}
+      PROD_DB_USER: ${PROD_DB_USER:-dba_agent}
+      PROD_DB_PASSWORD: ${PROD_DB_PASSWORD}
+      PROD_DB_DATABASE: ${PROD_DB_DATABASE}
+
+      # --- GCP ---
+      GOOGLE_APPLICATION_CREDENTIALS: /app/gcp-sa.json
+      GCP_PROJECT_ID: ${GCP_PROJECT_ID}
+      GCP_REGION: ${GCP_REGION:-us-central1}
+      GCP_CLOUD_SQL_INSTANCE: ${GCP_CLOUD_SQL_INSTANCE}
+
+      # --- LLM Agent (Vertex AI — Claude or Gemini) ---
+      SEEQL_AGENT_ENABLED: ${SEEQL_AGENT_ENABLED:-true}
+      SEEQL_AGENT_MODEL: ${SEEQL_AGENT_MODEL:-claude-sonnet-4-6}
+
+      # --- Alerting ---
+      SEEQL_ALERTING_ENABLED: ${SEEQL_ALERTING_ENABLED:-false}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+
+      # --- Intervals / retention ---
+      SEEQL_FAST_INTERVAL: ${SEEQL_FAST_INTERVAL:-30}
+      SEEQL_MEDIUM_INTERVAL: ${SEEQL_MEDIUM_INTERVAL:-300}
+      SEEQL_SLOW_INTERVAL: ${SEEQL_SLOW_INTERVAL:-1800}
+      SEEQL_DB_MAX_SIZE_MB: ${SEEQL_DB_MAX_SIZE_MB:-5000}
+      SEEQL_LOG_MAX_SIZE_MB: ${SEEQL_LOG_MAX_SIZE_MB:-500}
+      SEEQL_RETENTION_DAYS: ${SEEQL_RETENTION_DAYS:-90}
+
+      # --- Logging ---
+      SEEQL_LOG_LEVEL: ${SEEQL_LOG_LEVEL:-INFO}
+      SEEQL_API_PORT: "8080"
+      SEEQL_ENV: production
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  seeql-data:
+  seeql-logs:

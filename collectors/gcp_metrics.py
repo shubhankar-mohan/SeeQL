@@ -59,17 +59,22 @@ class GCPMetricCollector(BaseCollector):
 
     def _get_client(self):
         if self._client is None:
-            self._client = monitoring_v3.MetricServiceClient(
-                credentials=get_monitoring_credentials(),
-            )
+            creds = get_monitoring_credentials()
+            if creds is None:
+                return None
+            self._client = monitoring_v3.MetricServiceClient(credentials=creds)
         return self._client
 
     def collect(self, now: datetime, ctx: ServerContext) -> dict:
-        gcp_config = ctx.gcp_config
-        project_id = gcp_config["project_id"]
-        instance_id = gcp_config["cloud_sql_instance_id"]
+        gcp_config = ctx.gcp_config or {}
+        project_id = gcp_config.get("project_id")
+        instance_id = gcp_config.get("cloud_sql_instance_id")
+        if not project_id or not instance_id:
+            return {"gcp_metrics": []}
 
         client = self._get_client()
+        if client is None:
+            return {"gcp_metrics": []}
         project_name = f"projects/{project_id}"
 
         # Query last 5 minutes of data

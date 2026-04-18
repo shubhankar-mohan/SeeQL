@@ -1,0 +1,67 @@
+# Virtual envs / build artifacts
+venv/
+.venv/
+env/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Bytecode + caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Local state — never bake into image
+data/
+logs/
+reports/
+*.db
+*.db-wal
+*.db-shm
+
+# Secrets / local config
+.env
+.env.*
+settings.local.yaml
+config/settings.local.yaml
+*.pem
+*.key
+vertex-sa.json
+gcp-sa.json
+
+# Tests / fixtures — not shipped
+tests/
+
+# Internal developer docs (not required at runtime)
+CLAUDE.md
+FRONTEND_CLAUDE.md
+PLAN.md
+IMPLEMENTATION.md
+TODOS.md
+SETUP.md
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Git + CI metadata
+.git/
+.gitignore
+.github/
+
+# One-off scripts
+scripts/
+
+# Docker artifacts don't need to be inside the image
+Dockerfile
+Dockerfile.*
+docker-compose*.yml

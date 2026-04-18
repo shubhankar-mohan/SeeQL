@@ -25,8 +25,6 @@ classifiers = [
 ]
 dependencies = [
     "mysql-connector-python>=8.0.33",
-    "google-cloud-monitoring>=2.16.0",
-    "google-cloud-logging>=3.8.0",
     "apscheduler>=3.10.4",
     "pyyaml>=6.0.1",
     "python-dotenv>=1.0.0",
@@ -45,6 +43,13 @@ Issues = "https://github.com/shubhankar-mohan/SeeQL/issues"
 [project.optional-dependencies]
 dev = ["pytest>=7.4", "pytest-cov>=4.1", "pytest-mock>=3.12", "ruff>=0.1.0", "httpx>=0.25"]
 api = ["fastapi>=0.104", "uvicorn[standard]>=0.24", "jinja2>=3.1", "aiofiles>=23.0"]
+# GCP extra: Cloud Monitoring + Cloud Logging collectors, plus google-genai
+# for Gemini / Vertex AI Claude via the google SDK path.
+gcp = [
+    "google-cloud-monitoring>=2.16.0",
+    "google-cloud-logging>=3.8.0",
+    "google-genai>=0.3.0",
+]
 
 [tool.setuptools]
 # `main.py` lives at the repo root — expose it so the `seeql` script entry
