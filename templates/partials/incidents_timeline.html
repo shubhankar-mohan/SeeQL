@@ -1,0 +1,83 @@
+<!--
+  Recent Incidents widget (Phase 1.10).
+
+  Fetches /api/v1/incidents/recent via HTMX on load + every 30s and renders
+  severity-colored cards in the sketch aesthetic. aria-live ensures screen
+  readers announce new incidents (Phase 3.1).
+-->
+<div class="bg-white border-[3px] border-pencil p-5 md:p-6 shadow-hard wobbly-md"
+     style="transform: rotate(-0.3deg);">
+    <h3 class="font-heading text-2xl mb-3 flex items-center gap-2">
+        <span class="text-marker">&#9650;</span>
+        Recent Incidents
+        <span class="info-tip" data-tip="Grouped anomaly events from the last 24h. Click any card for the full replay (run `seeql replay --incident ID` in your terminal).">i</span>
+    </h3>
+
+    <div id="incidents-widget"
+         hx-get="/api/v1/incidents/recent?limit=5"
+         hx-trigger="load, every 30s"
+         hx-swap="innerHTML"
+         aria-live="polite"
+         aria-label="Recent database incidents — auto-refreshing every 30 seconds">
+        <div class="text-pencil/40 font-body">Loading incidents&hellip;</div>
+    </div>
+</div>
+
+<script>
+// HTMX lands a JSON body in the target. Render it to markup once afterSwap
+// sees our container updated.
+(function() {
+    if (window.__incidentsWidgetWired) return;
+    window.__incidentsWidgetWired = true;
+    document.body.addEventListener('htmx:afterRequest', function(evt) {
+        if (!evt.target || evt.target.id !== 'incidents-widget') return;
+        if (evt.detail.failed) {
+            evt.target.innerHTML =
+              '<div class="text-pencil/40 font-body">Couldn\'t load incidents — check server logs</div>';
+            return;
+        }
+        let data;
+        try {
+            data = JSON.parse(evt.detail.xhr.responseText);
+        } catch (e) {
+            evt.target.innerHTML =
+              '<div class="text-pencil/40 font-body">Incidents response was not JSON</div>';
+            return;
+        }
+        if (!Array.isArray(data) || data.length === 0) {
+            evt.target.innerHTML =
+              '<div class="text-pencil/40 font-body">No incidents detected. Your database is behaving.</div>';
+            return;
+        }
+        const sevClass = (s) => (s === 'critical' ? 'severity-red' : 'severity-yellow');
+        const fmt = (t) => (t || '').replace('T', ' ').slice(0, 19);
+        const rot = () => ((Math.random() * 0.8 - 0.4).toFixed(2));
+        evt.target.innerHTML = data.map(i => `
+          <div class="border-[3px] border-pencil p-3 mb-3 wobbly-sm shadow-hard-sm ${sevClass(i.severity)}"
+               style="transform: rotate(${rot()}deg)">
+            <div class="flex items-start justify-between gap-3">
+              <div>
+                <div class="font-heading text-lg">
+                  Incident #${i.id}
+                  <span class="text-xs px-2 py-0.5 ml-2 bg-pencil text-white wobbly-sm">${i.severity}</span>
+                </div>
+                <div class="text-xs text-pencil/60 font-body mt-1">
+                  ${fmt(i.start_time)} &rarr; ${fmt(i.end_time)}
+                  (${i.duration_minutes || 0} min, ${i.event_count} events)
+                </div>
+              </div>
+              <div class="text-xs text-pencil/60 font-body italic">${i.status}</div>
+            </div>
+            <div class="mt-2 flex flex-wrap gap-1">
+              ${(i.involved_metrics || []).map(m =>
+                `<span class="text-xs px-2 py-0.5 border border-pencil/40 wobbly-sm font-body">${m}</span>`
+              ).join('')}
+            </div>
+            <div class="mt-2 text-xs font-mono text-pencil/50">
+              seeql replay --incident ${i.id}
+            </div>
+          </div>
+        `).join('');
+    });
+})();
+</script>

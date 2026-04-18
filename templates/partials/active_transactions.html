@@ -1,0 +1,53 @@
+<!-- Active transactions partial — auto-refreshed via HTMX -->
+<h2 class="font-heading text-2xl mb-4" style="transform: rotate(-0.5deg);">
+    &#9201; Active Transactions
+</h2>
+
+{% if active_txns %}
+<div class="overflow-x-auto">
+    <table class="w-full sketch-table font-body">
+        <thead>
+            <tr>
+                <th class="px-4 py-2 text-left">Age (s)</th>
+                <th class="px-4 py-2 text-left">State</th>
+                <th class="px-4 py-2 text-left">PID</th>
+                <th class="px-4 py-2 text-left">Query</th>
+                <th class="px-4 py-2 text-right hidden md:table-cell">Rows Locked</th>
+                <th class="px-4 py-2 text-right hidden md:table-cell">Rows Modified</th>
+                <th class="px-4 py-2 text-left hidden lg:table-cell">Isolation</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for txn in active_txns %}
+            <tr class="{% if txn.age_sec > 120 %}severity-red{% elif txn.age_sec > 60 %}severity-yellow{% endif %}">
+                <td class="px-4 py-2">
+                    <span class="font-heading text-lg font-bold
+                                 {% if txn.age_sec > 120 %}text-marker{% elif txn.age_sec > 60 %}text-yellow-600{% endif %}">
+                        {{ txn.age_sec }}
+                    </span>
+                </td>
+                <td class="px-4 py-2">
+                    <span class="px-2 py-0.5 border border-pencil text-sm"
+                          style="border-radius: 255px 15px 225px 15px / 15px 225px 15px 255px;">
+                        {{ txn.trx_state }}
+                    </span>
+                </td>
+                <td class="px-4 py-2">{{ txn.pid }}</td>
+                <td class="px-4 py-2">
+                    <div class="truncate max-w-[200px] md:max-w-[400px]" title="{{ txn.trx_query }}">
+                        {{ txn.trx_query or '—' }}
+                    </div>
+                </td>
+                <td class="px-4 py-2 text-right hidden md:table-cell">{{ txn.rows_locked }}</td>
+                <td class="px-4 py-2 text-right hidden md:table-cell">{{ txn.rows_modified }}</td>
+                <td class="px-4 py-2 hidden lg:table-cell text-xs">{{ txn.isolation_level }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<p class="text-pencil/40 font-body text-lg" style="transform: rotate(0.3deg);">
+    No active transactions right now.
+</p>
+{% endif %}

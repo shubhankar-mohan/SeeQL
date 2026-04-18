@@ -1,0 +1,350 @@
+{% extends "base.html" %}
+{% block title %}Action Center{% endblock %}
+
+{% block content %}
+<div class="space-y-8" x-data="{ sec1: true, sec2: true, sec3: true, sec4: true }">
+
+    <div class="flex items-center gap-3">
+        <h1 class="text-4xl md:text-5xl font-heading font-bold" style="transform: rotate(-1deg);">
+            Action Center
+        </h1>
+        <span class="text-2xl bounce-gentle hidden md:inline-block">&#128736;</span>
+    </div>
+
+    <!-- Summary counts -->
+    <div class="flex flex-wrap gap-4 font-body text-lg">
+        <div class="px-4 py-2 border-2 wobbly-sm shadow-hard-sm
+                    {% if emergency_items %}border-marker bg-red-50{% else %}border-green-500 bg-green-50{% endif %}">
+            <span class="font-heading font-bold {% if emergency_items %}text-marker{% endif %}">{{ emergency_items|length }}</span> Emergency
+        </div>
+        <div class="px-4 py-2 border-2 border-yellow-500 bg-yellow-50 wobbly-sm shadow-hard-sm">
+            <span class="font-heading font-bold">{{ diagnostic_items|length }}</span> Diagnostics
+        </div>
+        <div class="px-4 py-2 border-2 border-pen bg-blue-50 wobbly-sm shadow-hard-sm">
+            <span class="font-heading font-bold text-pen">{{ queries_to_optimize|length }}</span> Queries
+            &#183;
+            <span class="font-heading font-bold text-pen">{{ index_suggestions|length }}</span> Indexes
+        </div>
+    </div>
+
+    {# ===================================================================== #}
+    {# SECTION 1: EMERGENCY                                                   #}
+    {# ===================================================================== #}
+    <section class="border-2 {% if emergency_items %}border-marker{% else %}border-green-500{% endif %} bg-white p-5 shadow-hard wobbly-sm">
+        <h2 class="font-heading text-2xl {% if emergency_items %}text-marker{% else %}text-green-600{% endif %} cursor-pointer flex items-center justify-between"
+            @click="sec1 = !sec1">
+            <span>&#128680; Emergency — Stop a Crash ({{ emergency_items|length }})</span>
+            <span class="text-lg transition-transform duration-100" :class="sec1 ? 'rotate-90' : ''">&#9654;</span>
+        </h2>
+
+        <div x-show="sec1" x-transition class="mt-4 space-y-3">
+            {% if emergency_items %}
+            {% for item in emergency_items %}
+            <div class="border-2 border-marker/50 p-3 wobbly-sm" x-data="{ open: false }">
+                <div class="flex items-start justify-between cursor-pointer" @click="open = !open">
+                    <div class="flex items-start gap-2 flex-1 min-w-0">
+                        <span class="text-lg flex-shrink-0">{{ item.icon }}</span>
+                        <div class="min-w-0">
+                            <div class="font-heading font-bold text-marker text-sm">{{ item.title }}</div>
+                            <div class="text-xs text-pencil/70">{{ item.detail }}</div>
+                            {% if item.query_preview %}<div class="text-xs text-pencil/50 truncate font-mono">{{ item.query_preview }}</div>{% endif %}
+                            {% if item.timestamp %}<div class="text-xs text-pencil/40">{{ item.timestamp }}</div>{% endif %}
+                        </div>
+                    </div>
+                    <span class="text-pencil/40 transition-transform duration-100 flex-shrink-0" :class="open ? 'rotate-90' : ''">&#9654;</span>
+                </div>
+                <div x-show="open" x-transition class="mt-2 pt-2 border-t border-dashed border-red-200 space-y-2">
+                    {% if item.diagnosis %}<p class="font-body text-xs">{{ item.diagnosis }}</p>{% endif %}
+                    {% if item.steps %}<ol class="list-decimal list-inside font-body text-xs space-y-0.5">{% for s in item.steps %}<li>{{ s }}</li>{% endfor %}</ol>{% endif %}
+                    {% for q in item.queries %}
+                    <div class="relative group">
+                        <pre class="bg-red-50 border border-dashed border-red-200 p-2 text-xs overflow-x-auto font-mono wobbly-sm" style="font-family: monospace; white-space: pre-wrap;">{{ q }}</pre>
+                        <button onclick="SeeQL.copyToClipboard(this.previousElementSibling.textContent, this)" class="copy-btn absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity p-1 border border-pencil/30 bg-white wobbly-sm" title="Copy"><svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endfor %}
+            {% else %}
+            <p class="text-green-700 font-body">All clear — no emergencies.</p>
+            {% endif %}
+        </div>
+    </section>
+
+    {# ===================================================================== #}
+    {# SECTION 2: DIAGNOSTICS                                                 #}
+    {# ===================================================================== #}
+    <section class="border-2 border-yellow-500 bg-white p-5 shadow-hard wobbly-md">
+        <h2 class="font-heading text-2xl cursor-pointer flex items-center justify-between"
+            @click="sec2 = !sec2">
+            <span>&#128269; Diagnostics & Fixes ({{ diagnostic_items|length }})</span>
+            <span class="text-lg transition-transform duration-100" :class="sec2 ? 'rotate-90' : ''">&#9654;</span>
+        </h2>
+
+        <div x-show="sec2" x-transition class="mt-4 space-y-3">
+            {% if diagnostic_items %}
+            {% for item in diagnostic_items %}
+            <div class="border border-yellow-400/50 p-3 wobbly-sm" x-data="{ open: false }">
+                <div class="flex items-start justify-between cursor-pointer" @click="open = !open">
+                    <div class="flex items-start gap-2 flex-1 min-w-0">
+                        <span class="text-lg flex-shrink-0">{{ item.icon }}</span>
+                        <div class="min-w-0">
+                            <div class="font-heading font-bold text-sm">{{ item.title }}</div>
+                            {% if item.detail %}<div class="text-xs text-pencil/70">{{ item.detail }}</div>{% endif %}
+                            <div class="flex flex-wrap gap-3 text-xs text-pencil/40">
+                                {% if item.timestamp %}<span>{{ item.timestamp }}</span>{% endif %}
+                                {% if item.frequency %}<span>{{ item.frequency }}</span>{% endif %}
+                            </div>
+                        </div>
+                    </div>
+                    <span class="text-pencil/40 transition-transform duration-100 flex-shrink-0" :class="open ? 'rotate-90' : ''">&#9654;</span>
+                </div>
+                <div x-show="open" x-transition class="mt-2 pt-2 border-t border-dashed border-yellow-200 space-y-2">
+                    {% if item.old_ddl or item.new_ddl %}
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+                        {% if item.old_ddl %}<div><div class="text-xs text-pencil/50 mb-0.5">Before</div><pre class="bg-red-50 border border-dashed border-red-200 p-2 text-xs overflow-x-auto font-mono" style="font-family: monospace; font-size: 11px;">{{ item.old_ddl }}</pre></div>{% endif %}
+                        {% if item.new_ddl %}<div><div class="text-xs text-pencil/50 mb-0.5">After</div><pre class="bg-green-50 border border-dashed border-green-200 p-2 text-xs overflow-x-auto font-mono" style="font-family: monospace; font-size: 11px;">{{ item.new_ddl }}</pre></div>{% endif %}
+                    </div>
+                    {% endif %}
+                    {% if item.anomaly %}
+                    <div class="flex items-center gap-2 text-xs font-body">
+                        <span class="w-16 text-right text-pencil/50">Baseline:</span>
+                        <div class="flex-1 h-3 border border-pencil/20 bg-white relative wobbly-sm"><div class="h-full bg-purple-200 absolute left-0 top-0 wobbly-sm" style="width:50%"></div></div>
+                        <span class="w-14 font-heading">{{ "%.2f"|format(item.anomaly.baseline_mean) }}</span>
+                    </div>
+                    <div class="flex items-center gap-2 text-xs font-body">
+                        <span class="w-16 text-right text-pencil/50">Current:</span>
+                        <div class="flex-1 h-3 border border-pencil/20 bg-white relative wobbly-sm">
+                            {% set bp = [[(item.anomaly.current / item.anomaly.baseline_mean * 50) if item.anomaly.baseline_mean > 0 else 50, 100]|min, 5]|max %}
+                            <div class="h-full bg-purple-500 absolute left-0 top-0 wobbly-sm" style="width:{{ bp }}%"></div>
+                        </div>
+                        <span class="w-14 font-heading">{{ "%.2f"|format(item.anomaly.current) }}</span>
+                    </div>
+                    {% endif %}
+                    {% if item.diagnosis %}<p class="font-body text-xs">{{ item.diagnosis }}</p>{% endif %}
+                    {% if item.steps %}<ol class="list-decimal list-inside font-body text-xs space-y-0.5">{% for s in item.steps %}<li>{{ s }}</li>{% endfor %}</ol>{% endif %}
+                    {% for q in item.queries %}
+                    <div class="relative group">
+                        <pre class="bg-paper border border-dashed border-erased p-2 text-xs overflow-x-auto font-mono wobbly-sm" style="font-family: monospace; white-space: pre-wrap;">{{ q }}</pre>
+                        <button onclick="SeeQL.copyToClipboard(this.previousElementSibling.textContent, this)" class="copy-btn absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity p-1 border border-pencil/30 bg-white wobbly-sm" title="Copy"><svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endfor %}
+            {% else %}
+            <p class="text-green-700 font-body">No diagnostic issues.</p>
+            {% endif %}
+        </div>
+    </section>
+
+    {# ===================================================================== #}
+    {# SECTION 3: OPTIMIZATION                                                #}
+    {# ===================================================================== #}
+    <section class="border-2 border-pen bg-white p-5 shadow-hard wobbly-sm">
+        <h2 class="font-heading text-2xl text-pen cursor-pointer flex items-center justify-between"
+            @click="sec3 = !sec3">
+            <span>&#128161; Optimization ({{ queries_to_optimize|length }} queries, {{ index_suggestions|length }} indexes)</span>
+            <span class="text-lg transition-transform duration-100" :class="sec3 ? 'rotate-90' : ''">&#9654;</span>
+        </h2>
+
+        <div x-show="sec3" x-transition class="mt-4 space-y-6">
+
+            {# --- Queries to Optimize --- #}
+            {% if queries_to_optimize %}
+            <div>
+                <h3 class="font-heading text-xl mb-3">Queries to Optimize</h3>
+                <div class="space-y-3">
+                    {% for q in queries_to_optimize %}
+                    <div class="border border-pen/30 p-3 wobbly-sm" x-data="{ open: false }">
+                        <div class="flex items-start justify-between cursor-pointer" @click="open = !open">
+                            <div class="flex-1 min-w-0">
+                                <div class="flex items-center gap-2 flex-wrap">
+                                    <span class="font-heading font-bold text-pen">#{{ loop.index }}</span>
+                                    <span class="text-xs px-1.5 py-0.5 border border-pencil/30 bg-postit wobbly-sm">{{ "%.1f"|format(q.total_time) }}s total</span>
+                                    <span class="text-xs px-1.5 py-0.5 border border-pencil/30 bg-paper wobbly-sm">{{ "{:,}".format(q.exec_count) }} execs</span>
+                                    {% if q.ratio > 100 %}<span class="text-xs px-1.5 py-0.5 border border-marker bg-red-50 text-marker wobbly-sm">{{ "{:,.0f}".format(q.ratio) }}x ratio</span>{% endif %}
+                                    {% if q.full_scans > 0 %}<span class="text-xs px-1.5 py-0.5 border border-marker bg-red-50 text-marker wobbly-sm">full scan</span>{% endif %}
+                                </div>
+                                <div class="text-xs text-pencil/60 truncate font-mono mt-1">{{ q.query_text }}</div>
+                                <div class="flex flex-wrap gap-3 mt-0.5 text-xs text-pencil/40">
+                                    <span>avg: {{ "%.4f"|format(q.avg_time) }}s</span>
+                                    <span>1h: {{ "{:,}".format(q.freq_1h) }}</span>
+                                    <span>24h: {{ "{:,}".format(q.freq_24h) }}</span>
+                                    <span>7d: {{ "{:,}".format(q.freq_7d) }}</span>
+                                </div>
+                            </div>
+                            <span class="text-pencil/40 transition-transform duration-100 flex-shrink-0 ml-2" :class="open ? 'rotate-90' : ''">&#9654;</span>
+                        </div>
+                        <div x-show="open" x-transition class="mt-2 pt-2 border-t border-dashed border-pen/20 space-y-2">
+                            <!-- Frequency trend chart -->
+                            <div class="bg-paper border border-dashed border-erased p-2 wobbly-sm" style="position: relative; height: 120px;">
+                                <canvas id="freq-{{ q.digest[:8] }}"></canvas>
+                            </div>
+                            <script>
+                                (function() {
+                                    fetch('/api/v1/queries/{{ q.digest }}/frequency?range=24h')
+                                        .then(r => r.json())
+                                        .then(data => {
+                                            if (!data.length) return;
+                                            SeeQL.createChart('freq-{{ q.digest[:8] }}', {
+                                                type: 'bar',
+                                                data: {
+                                                    labels: data.map(d => SeeQL.formatTime(d.hour)),
+                                                    datasets: [{
+                                                        label: 'Execs/hr',
+                                                        data: data.map(d => d.execs),
+                                                        backgroundColor: 'rgba(45,93,161,0.5)',
+                                                        borderColor: '#2d5da1',
+                                                        borderWidth: 1,
+                                                        borderRadius: 3,
+                                                    }]
+                                                },
+                                                options: SeeQL.defaultChartOptions(),
+                                            });
+                                        });
+                                })();
+                            </script>
+
+                            <div class="text-xs font-heading text-pencil/50">Recommendations</div>
+                            <ul class="font-body text-xs space-y-0.5">
+                                {% for rec in q.recommendations %}
+                                <li class="flex items-start gap-1"><span class="text-pen">&#8226;</span><span>{{ rec }}</span></li>
+                                {% endfor %}
+                            </ul>
+                            {% if q.index_sql %}
+                            <div class="text-xs font-heading text-pencil/50 mt-1">Suggested Index</div>
+                            <div class="relative group">
+                                <pre class="bg-blue-50 border-2 border-dashed border-pen/30 p-2 text-sm overflow-x-auto font-mono wobbly-sm" style="font-family: monospace; white-space: pre-wrap;">{{ q.index_sql }}</pre>
+                                <button onclick="SeeQL.copyToClipboard(this.previousElementSibling.textContent, this)" class="copy-btn absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity p-1 border border-pencil/30 bg-white wobbly-sm" title="Copy"><svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>
+                            </div>
+                            {% endif %}
+                            <div class="relative group">
+                                <pre class="bg-paper border border-dashed border-erased p-2 text-xs overflow-x-auto font-mono wobbly-sm" style="font-family: monospace; white-space: pre-wrap;">EXPLAIN {{ q.query_text[:300] }}</pre>
+                                <button onclick="SeeQL.copyToClipboard(this.previousElementSibling.textContent, this)" class="copy-btn absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity p-1 border border-pencil/30 bg-white wobbly-sm" title="Copy"><svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+
+            {# --- Create These Indexes --- #}
+            {% if index_suggestions %}
+            <div>
+                <h3 class="font-heading text-xl mb-3">Create These Indexes</h3>
+                <div class="space-y-2">
+                    {% for idx in index_suggestions %}{% if idx.create_sql %}
+                    <div class="border border-pen/30 p-3 wobbly-sm" x-data="{ open: false }">
+                        <div class="flex items-start justify-between cursor-pointer" @click="open = !open">
+                            <div class="flex-1 min-w-0">
+                                <div class="font-heading font-bold text-pen text-sm">{{ idx.table }}</div>
+                                <div class="text-xs font-body">Index on: <strong>{{ idx.columns|join(', ') }}</strong> — {{ idx.reason }}</div>
+                                <div class="text-xs text-pencil/40">{{ idx.impact }}</div>
+                            </div>
+                            <span class="text-pencil/40 transition-transform duration-100 flex-shrink-0" :class="open ? 'rotate-90' : ''">&#9654;</span>
+                        </div>
+                        <div x-show="open" x-transition class="mt-2 pt-2 border-t border-dashed border-pen/20">
+                            <div class="text-xs text-pencil/60 font-mono truncate mb-1">{{ idx.query_text }}</div>
+                            <div class="relative group">
+                                <pre class="bg-blue-50 border-2 border-dashed border-pen/30 p-3 text-sm overflow-x-auto font-mono wobbly-sm" style="font-family: monospace;">{{ idx.create_sql }}</pre>
+                                <button onclick="SeeQL.copyToClipboard(this.previousElementSibling.textContent, this)" class="copy-btn absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity p-1 border border-pencil/30 bg-white wobbly-sm" title="Copy"><svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>
+                            </div>
+                        </div>
+                    </div>
+                    {% endif %}{% endfor %}
+                </div>
+            </div>
+            {% endif %}
+
+            {# --- Drop Indexes --- #}
+            {% if unused_indexes or redundant_indexes %}
+            <div>
+                <h3 class="font-heading text-xl mb-3">Drop These Indexes</h3>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {% if unused_indexes %}
+                    <div class="border border-pencil/30 p-3 wobbly-sm">
+                        <h4 class="font-heading text-base mb-2">Unused ({{ unused_indexes|length }})</h4>
+                        <div class="space-y-1.5 text-xs max-h-[300px] overflow-y-auto">
+                            {% for idx in unused_indexes %}
+                            <div class="border border-dashed border-erased p-1.5 group relative">
+                                <span class="text-pencil/50">{{ idx.object_schema }}.{{ idx.table_name }}</span>
+                                <span class="text-marker font-bold ml-1">{{ idx.index_name }}</span>
+                                <pre class="bg-red-50 border border-red-200 p-1 font-mono mt-0.5" style="font-family: monospace; font-size: 10px;">DROP INDEX `{{ idx.index_name }}` ON `{{ idx.object_schema }}`.`{{ idx.table_name }}`;</pre>
+                                <button onclick="SeeQL.copyToClipboard(this.previousElementSibling.textContent, this)" class="copy-btn absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 border border-pencil/30 bg-white" title="Copy"><svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    {% endif %}
+                    {% if redundant_indexes %}
+                    <div class="border border-pencil/30 p-3 wobbly-sm">
+                        <h4 class="font-heading text-base mb-2">Redundant ({{ redundant_indexes|length }})</h4>
+                        <div class="space-y-1.5 text-xs max-h-[300px] overflow-y-auto">
+                            {% for idx in redundant_indexes %}
+                            <div class="border border-dashed border-erased p-1.5 group relative">
+                                <span class="text-pencil/50">{{ idx.table_schema }}.{{ idx.table_name }}</span>
+                                <span class="text-marker ml-1">{{ idx.redundant_index_name }}</span>
+                                <span class="text-pencil/40">covered by <strong class="text-pen">{{ idx.dominant_index_name }}</strong></span>
+                                {% if idx.sql_drop_index %}
+                                <pre class="bg-red-50 border border-red-200 p-1 font-mono mt-0.5" style="font-family: monospace; font-size: 10px;">{{ idx.sql_drop_index }}</pre>
+                                <button onclick="SeeQL.copyToClipboard(this.previousElementSibling.textContent, this)" class="copy-btn absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 border border-pencil/30 bg-white" title="Copy"><svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+            {% endif %}
+
+            {# --- Tables without PK --- #}
+            {% if no_pk %}
+            <div>
+                <h3 class="font-heading text-xl mb-2">Tables Without Primary Key</h3>
+                <div class="space-y-1 text-sm font-body">
+                    {% for t in no_pk %}
+                    <div class="flex items-center justify-between gap-2 border-b border-dashed border-erased pb-1">
+                        <span>{{ t.table_schema }}.{{ t.table_name }}</span>
+                        <div class="relative group flex-shrink-0">
+                            <code class="text-xs bg-blue-50 border border-pen/20 px-1">ADD PK</code>
+                            <button onclick="SeeQL.copyToClipboard('ALTER TABLE `{{ t.table_schema }}`.`{{ t.table_name }}` ADD COLUMN id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST;', this)" class="copy-btn ml-1 p-0.5 border border-pencil/30 bg-white opacity-60 hover:opacity-100" title="Copy ALTER TABLE"><svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+        </div>
+    </section>
+
+    {# ===================================================================== #}
+    {# SECTION 4: INSIGHTS                                                    #}
+    {# ===================================================================== #}
+    {% if insights %}
+    <section class="border-2 border-pencil/50 bg-white p-5 shadow-hard-subtle wobbly-md">
+        <h2 class="font-heading text-2xl cursor-pointer flex items-center justify-between"
+            @click="sec4 = !sec4">
+            <span>&#128202; System Insights</span>
+            <span class="text-lg transition-transform duration-100" :class="sec4 ? 'rotate-90' : ''">&#9654;</span>
+        </h2>
+
+        <div x-show="sec4" x-transition class="mt-4 space-y-4">
+            {% for insight in insights %}
+            <div class="border border-dashed border-erased p-3 wobbly-sm">
+                <div class="font-heading font-bold text-sm mb-1">{{ insight.icon }} {{ insight.title }}</div>
+                <div class="font-body text-xs space-y-0.5">
+                    {% for line in insight.lines %}
+                    {% if line %}<div class="text-pencil/70">{{ line }}</div>{% endif %}
+                    {% endfor %}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </section>
+    {% endif %}
+
+</div>
+{% endblock %}

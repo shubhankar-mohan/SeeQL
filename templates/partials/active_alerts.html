@@ -1,0 +1,202 @@
+<!-- Active alerts partial — refreshed via HTMX -->
+<h2 class="font-heading text-2xl mb-4" style="transform: rotate(-0.5deg);">
+    Active Alerts (24h)
+</h2>
+
+{% if zero_data|default(false) %}
+<p class="text-pencil/60 font-body text-lg" style="transform: rotate(0.2deg);">
+    &#9203; SeeQL is starting up. The agent needs a few collection cycles before it can
+    analyze your database. First baseline in ~30 seconds — this is <em>not</em> a false-positive
+    "all clear".
+</p>
+{% elif not ddl_changes and not long_txns and not long_locks and not anomalies %}
+<p class="text-pencil/40 font-body text-lg" style="transform: rotate(0.3deg);">
+    All quiet. No alerts right now &#10024;
+</p>
+{% else %}
+<div class="space-y-3">
+
+    {% for lock in long_locks %}
+    <div class="border-2 border-marker bg-red-50 wobbly-sm" style="transform: rotate({{ loop.cycle('-0.3', '0.2', '-0.1') }}deg);"
+         x-data="{ open: false }">
+        <div class="flex items-start gap-3 p-3 cursor-pointer" @click="open = !open">
+            <span class="text-xl mt-0.5">&#128680;</span>
+            <div class="font-body flex-1">
+                <div class="font-bold text-marker">Lock wait {{ lock.wait_seconds }}s</div>
+                <div class="text-sm">PID {{ lock.waiting_pid }} blocked by PID {{ lock.blocking_pid }}</div>
+                {% if lock.waiting_query %}
+                <div class="text-xs text-pencil/60 truncate max-w-[500px]">{{ lock.waiting_query }}</div>
+                {% endif %}
+            </div>
+            <span class="text-pencil/40 text-lg transition-transform duration-100"
+                  :class="open ? 'rotate-90' : ''">&#9654;</span>
+        </div>
+
+        <div x-show="open" x-transition class="px-3 pb-3 space-y-2 border-t border-dashed border-red-200 pt-2 mx-3">
+            {% if lock_rem %}
+            <div class="text-xs font-heading text-pencil/50">Diagnosis</div>
+            <p class="font-body text-sm">{{ lock_rem.diagnosis }}</p>
+            <div class="text-xs font-heading text-pencil/50 mt-2">Steps</div>
+            <ol class="list-decimal list-inside font-body text-sm space-y-0.5">
+                {% for step in lock_rem.steps %}
+                <li>{{ step }}</li>
+                {% endfor %}
+            </ol>
+            {% for q in lock_rem.queries %}
+            <div class="relative group mt-1">
+                <pre class="bg-white border border-dashed border-erased p-2 text-xs overflow-x-auto font-mono wobbly-sm"
+                     style="font-family: monospace; white-space: pre-wrap;">{{ q|replace("<blocking_pid>", lock.blocking_pid|string) }}</pre>
+                <button onclick="SeeQL.copyToClipboard(this.previousElementSibling.textContent, this)"
+                        class="copy-btn absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity p-1 border border-pencil/30 bg-white wobbly-sm"
+                        title="Copy">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                </button>
+            </div>
+            {% endfor %}
+            {% endif %}
+        </div>
+    </div>
+    {% endfor %}
+
+    {% for txn in long_txns %}
+    <div class="border-2 border-yellow-500 bg-yellow-50 wobbly-sm" style="transform: rotate({{ loop.cycle('0.3', '-0.2', '0.1') }}deg);"
+         x-data="{ open: false }">
+        <div class="flex items-start gap-3 p-3 cursor-pointer" @click="open = !open">
+            <span class="text-xl mt-0.5">&#9203;</span>
+            <div class="font-body flex-1">
+                <div class="font-bold">Long transaction: {{ txn.age_sec }}s (PID {{ txn.pid }})</div>
+                <div class="text-xs text-pencil/60 truncate max-w-[500px]">{{ txn.trx_query or 'idle — no active query (possible app bug: missing COMMIT)' }}</div>
+            </div>
+            <span class="text-pencil/40 text-lg transition-transform duration-100"
+                  :class="open ? 'rotate-90' : ''">&#9654;</span>
+        </div>
+
+        <div x-show="open" x-transition class="px-3 pb-3 space-y-2 border-t border-dashed border-yellow-300 pt-2 mx-3">
+            {% if txn_rem %}
+            <div class="text-xs font-heading text-pencil/50">Diagnosis</div>
+            <p class="font-body text-sm">{{ txn_rem.diagnosis }}</p>
+            <div class="text-xs font-heading text-pencil/50 mt-2">Steps</div>
+            <ol class="list-decimal list-inside font-body text-sm space-y-0.5">
+                {% for step in txn_rem.steps %}
+                <li>{{ step }}</li>
+                {% endfor %}
+            </ol>
+            {% for q in txn_rem.queries %}
+            <div class="relative group mt-1">
+                <pre class="bg-white border border-dashed border-erased p-2 text-xs overflow-x-auto font-mono wobbly-sm"
+                     style="font-family: monospace; white-space: pre-wrap;">{{ q|replace("<pid>", txn.pid|string) }}</pre>
+                <button onclick="SeeQL.copyToClipboard(this.previousElementSibling.textContent, this)"
+                        class="copy-btn absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity p-1 border border-pencil/30 bg-white wobbly-sm"
+                        title="Copy">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                </button>
+            </div>
+            {% endfor %}
+            {% endif %}
+        </div>
+    </div>
+    {% endfor %}
+
+    {% for change in ddl_changes %}
+    <div class="border-2 border-pen bg-blue-50 wobbly-sm" style="transform: rotate({{ loop.cycle('-0.2', '0.3', '-0.1') }}deg);"
+         x-data="{ open: false }">
+        <div class="flex items-start gap-3 p-3 cursor-pointer" @click="open = !open">
+            <span class="text-xl mt-0.5">&#128221;</span>
+            <div class="font-body flex-1">
+                <div class="font-bold text-pen">DDL change: {{ change.table_schema }}.{{ change.table_name }}</div>
+                <div class="text-sm text-pencil/60">{{ change.change_type }} — {{ change.detected_at }}</div>
+            </div>
+            <span class="text-pencil/40 text-lg transition-transform duration-100"
+                  :class="open ? 'rotate-90' : ''">&#9654;</span>
+        </div>
+
+        <div x-show="open" x-transition class="px-3 pb-3 space-y-2 border-t border-dashed border-blue-200 pt-2 mx-3">
+            {% if change.old_ddl or change.new_ddl %}
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {% if change.old_ddl %}
+                <div>
+                    <div class="text-xs font-heading text-pencil/50 mb-1">Before</div>
+                    <pre class="bg-red-50 border border-dashed border-red-200 p-2 text-xs overflow-x-auto font-mono wobbly-sm"
+                         style="font-family: monospace; font-size: 11px;">{{ change.old_ddl }}</pre>
+                </div>
+                {% endif %}
+                {% if change.new_ddl %}
+                <div>
+                    <div class="text-xs font-heading text-pencil/50 mb-1">After</div>
+                    <pre class="bg-green-50 border border-dashed border-green-200 p-2 text-xs overflow-x-auto font-mono wobbly-sm"
+                         style="font-family: monospace; font-size: 11px;">{{ change.new_ddl }}</pre>
+                </div>
+                {% endif %}
+            </div>
+            {% endif %}
+            {% if ddl_rem %}
+            <div class="text-xs font-heading text-pencil/50 mt-2">Diagnosis</div>
+            <p class="font-body text-sm">{{ ddl_rem.diagnosis }}</p>
+            <div class="text-xs font-heading text-pencil/50 mt-2">Steps</div>
+            <ol class="list-decimal list-inside font-body text-sm space-y-0.5">
+                {% for step in ddl_rem.steps %}
+                <li>{{ step }}</li>
+                {% endfor %}
+            </ol>
+            {% endif %}
+        </div>
+    </div>
+    {% endfor %}
+
+    {% for a in anomalies %}
+    <div class="border-2 border-purple-400 bg-purple-50 wobbly-sm" style="transform: rotate({{ loop.cycle('0.2', '-0.3', '0.1') }}deg);"
+         x-data="{ open: false }">
+        <div class="flex items-start gap-3 p-3 cursor-pointer" @click="open = !open">
+            <span class="text-xl mt-0.5">&#128200;</span>
+            <div class="font-body flex-1">
+                <div class="font-bold {% if a.severity == 'critical' %}text-marker{% else %}text-purple-700{% endif %}">
+                    Anomaly: {{ a.metric }}
+                    <span class="text-xs px-1.5 py-0.5 border ml-2
+                                 {% if a.severity == 'critical' %}border-marker bg-red-100{% else %}border-purple-400 bg-purple-100{% endif %}"
+                          style="border-radius: 225px 15px 255px 15px / 15px 255px 15px 225px;">
+                        {{ a.severity }}
+                    </span>
+                </div>
+                <div class="text-sm text-pencil/70">
+                    Current: {{ "%.2f"|format(a.current) }} | Baseline: {{ "%.2f"|format(a.baseline_mean) }}
+                    ({{ "%+.0f"|format(a.pct_change) }}%, z={{ "%.1f"|format(a.z_score) }})
+                </div>
+            </div>
+            <span class="text-pencil/40 text-lg transition-transform duration-100"
+                  :class="open ? 'rotate-90' : ''">&#9654;</span>
+        </div>
+
+        <div x-show="open" x-transition class="px-3 pb-3 space-y-2 border-t border-dashed border-purple-200 pt-2 mx-3">
+            <!-- Baseline vs Current bar -->
+            <div class="flex items-center gap-3 font-body text-sm">
+                <span class="w-20 text-right text-pencil/50">Baseline:</span>
+                <div class="flex-1 h-4 border border-pencil/30 bg-white relative" style="border-radius: 225px 15px 255px 15px / 15px 255px 15px 225px;">
+                    <div class="h-full bg-purple-200 absolute left-0 top-0" style="width: 50%; border-radius: 225px 15px 255px 15px / 15px 255px 15px 225px;"></div>
+                </div>
+                <span class="w-16 font-heading">{{ "%.2f"|format(a.baseline_mean) }}</span>
+            </div>
+            <div class="flex items-center gap-3 font-body text-sm">
+                <span class="w-20 text-right text-pencil/50">Current:</span>
+                <div class="flex-1 h-4 border border-pencil/30 bg-white relative" style="border-radius: 225px 15px 255px 15px / 15px 255px 15px 225px;">
+                    {% set bar_pct = [[(a.current / a.baseline_mean * 50) if a.baseline_mean > 0 else 50, 100]|min, 5]|max %}
+                    <div class="h-full absolute left-0 top-0 {% if a.severity == 'critical' %}bg-marker{% else %}bg-purple-400{% endif %}"
+                         style="width: {{ bar_pct }}%; border-radius: 225px 15px 255px 15px / 15px 255px 15px 225px;"></div>
+                </div>
+                <span class="w-16 font-heading">{{ "%.2f"|format(a.current) }}</span>
+            </div>
+            {% if anom_rem %}
+            <div class="text-xs font-heading text-pencil/50 mt-2">Diagnosis</div>
+            <p class="font-body text-sm">{{ anom_rem.diagnosis }}</p>
+            <div class="text-xs font-heading text-pencil/50 mt-2">Steps</div>
+            <ol class="list-decimal list-inside font-body text-sm space-y-0.5">
+                {% for step in anom_rem.steps %}
+                <li>{{ step }}</li>
+                {% endfor %}
+            </ol>
+            {% endif %}
+        </div>
+    </div>
+    {% endfor %}
+
+</div>
+{% endif %}

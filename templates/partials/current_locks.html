@@ -1,0 +1,50 @@
+<!-- Current locks partial — auto-refreshed via HTMX -->
+<h2 class="font-heading text-2xl mb-4" style="transform: rotate(-0.5deg);">
+    &#128274; Current Lock Waits
+</h2>
+
+{% if current_locks %}
+<div class="overflow-x-auto">
+    <table class="w-full sketch-table font-body">
+        <thead>
+            <tr>
+                <th class="px-4 py-2 text-left">Wait (s)</th>
+                <th class="px-4 py-2 text-left">Waiting PID</th>
+                <th class="px-4 py-2 text-left">Waiting Query</th>
+                <th class="px-4 py-2 text-left">Blocking PID</th>
+                <th class="px-4 py-2 text-left hidden md:table-cell">Blocking Query</th>
+                <th class="px-4 py-2 text-right hidden md:table-cell">Rows Locked</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for lock in current_locks %}
+            <tr class="{% if lock.wait_seconds > 30 %}severity-red{% elif lock.wait_seconds > 10 %}severity-yellow{% endif %}">
+                <td class="px-4 py-2">
+                    <span class="font-heading text-lg font-bold
+                                 {% if lock.wait_seconds > 30 %}text-marker{% elif lock.wait_seconds > 10 %}text-yellow-600{% endif %}">
+                        {{ lock.wait_seconds }}
+                    </span>
+                </td>
+                <td class="px-4 py-2">{{ lock.waiting_pid }}</td>
+                <td class="px-4 py-2">
+                    <div class="truncate max-w-[200px] md:max-w-[300px]" title="{{ lock.waiting_query }}">
+                        {{ lock.waiting_query or '—' }}
+                    </div>
+                </td>
+                <td class="px-4 py-2 font-bold">{{ lock.blocking_pid }}</td>
+                <td class="px-4 py-2 hidden md:table-cell">
+                    <div class="truncate max-w-[200px] md:max-w-[300px]" title="{{ lock.blocking_query }}">
+                        {{ lock.blocking_query or '—' }}
+                    </div>
+                </td>
+                <td class="px-4 py-2 text-right hidden md:table-cell">{{ lock.blocking_rows_locked }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<p class="text-pencil/40 font-body text-lg" style="transform: rotate(0.3deg);">
+    No lock waits right now. All clear! &#10003;
+</p>
+{% endif %}

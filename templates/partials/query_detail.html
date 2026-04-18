@@ -1,0 +1,156 @@
+<!-- Query detail partial — loaded on expand via HTMX -->
+{% if query_info %}
+<div class="bg-postit border-2 border-dashed border-pencil/30 p-4 wobbly-sm space-y-4" style="transform: rotate(-0.3deg);">
+
+    <!-- Full query text — prefers query_sample_text (real values) over digest_text (placeholders) -->
+    <div>
+        <div class="flex items-center justify-between mb-1">
+            <div class="text-xs font-heading text-pencil/50">Full Query</div>
+            {% if query_info.query_sample_text %}
+                <span class="text-xs px-2 py-0.5 border border-green-600 bg-green-50 wobbly-sm font-body text-green-800"
+                      title="Real query with actual parameter values — captured from performance_schema.QUERY_SAMPLE_TEXT">
+                    sample (real values)
+                </span>
+            {% else %}
+                <span class="text-xs px-2 py-0.5 border border-pencil/30 bg-erased wobbly-sm font-body text-pencil/60"
+                      title="Parameterized form with ? placeholders — no sample has been captured for this digest yet">
+                    pattern (placeholders)
+                </span>
+            {% endif %}
+        </div>
+        <div class="relative group">
+            <pre class="bg-white border border-dashed border-erased p-3 text-sm overflow-x-auto font-mono wobbly-sm"
+                 style="font-family: monospace; white-space: pre-wrap; word-break: break-all;">{{ query_info.query_sample_text or query_info.digest_text }}</pre>
+            <button onclick="SeeQL.copyToClipboard(this.previousElementSibling.textContent, this)"
+                    class="copy-btn absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity p-1 border border-pencil/30 bg-white wobbly-sm"
+                    title="Copy query">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+            </button>
+        </div>
+    </div>
+
+    <!-- Stats row -->
+    <div class="flex flex-wrap gap-4 font-body text-sm">
+        <div class="bg-white border border-pencil px-3 py-1 wobbly-sm">
+            Total execs: <strong class="font-heading">{{ "{:,}".format(query_info.exec_count or 0) }}</strong>
+        </div>
+        <div class="bg-white border border-pencil px-3 py-1 wobbly-sm">
+            Avg time: <strong class="font-heading">{{ "%.4f"|format(query_info.avg_time_sec or 0) }}s</strong>
+        </div>
+        <div class="bg-white border border-pencil px-3 py-1 wobbly-sm">
+            Total time: <strong class="font-heading">{{ "%.2f"|format(query_info.total_time_sec or 0) }}s</strong>
+        </div>
+        <div class="bg-white border border-pencil px-3 py-1 wobbly-sm">
+            Rows examined: <strong class="font-heading">{{ "{:,}".format(query_info.rows_examined or 0) }}</strong>
+        </div>
+        <div class="bg-white border border-pencil px-3 py-1 wobbly-sm">
+            Rows sent: <strong class="font-heading">{{ "{:,}".format(query_info.rows_sent or 0) }}</strong>
+        </div>
+        {% if query_info.rows_examined and query_info.rows_sent and query_info.rows_sent > 0 %}
+        <div class="bg-white border border-pencil px-3 py-1 wobbly-sm">
+            Exam/Sent ratio: <strong class="font-heading
+                {% if query_info.rows_examined / query_info.rows_sent > 100 %}text-marker{% endif %}">
+                {{ "%.0f"|format(query_info.rows_examined / query_info.rows_sent) }}x
+            </strong>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- "Why is this slow?" section -->
+    {% if explain_signals %}
+    <div>
+        <div class="text-xs font-heading text-pencil/50 mb-2">Why is this slow?</div>
+        <div class="space-y-2">
+            {% for signal in explain_signals %}
+            <div class="flex items-start gap-2 p-2 border border-dashed wobbly-sm text-sm font-body
+                        {% if signal.type == 'error' %}border-marker bg-red-50
+                        {% elif signal.type == 'warning' %}border-yellow-500 bg-yellow-50
+                        {% else %}border-green-500 bg-green-50{% endif %}">
+                <span class="text-lg">{{ signal.icon }}</span>
+                <div>
+                    <div class="font-heading font-bold text-sm">{{ signal.title }}</div>
+                    <div class="text-xs text-pencil/70">{{ signal.detail }}</div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- "How to fix" section for high exam/sent ratio -->
+    {% if query_info.rows_examined and query_info.rows_sent and query_info.rows_sent > 0 and query_info.rows_examined / query_info.rows_sent > 100 %}
+    <div>
+        <div class="text-xs font-heading text-pencil/50 mb-2">How to fix</div>
+        <div class="p-3 border-2 border-dashed border-pen/40 bg-blue-50 wobbly-sm font-body text-sm space-y-2">
+            <p><strong>High rows examined/sent ratio ({{ "%.0f"|format(query_info.rows_examined / query_info.rows_sent) }}x)</strong> indicates MySQL is scanning many rows to find few matches.</p>
+            <ol class="list-decimal list-inside space-y-1">
+                <li>Run <code class="bg-white px-1 border border-pencil/20">EXPLAIN</code> on this query to see the access method.</li>
+                <li>Check if the <code class="bg-white px-1 border border-pencil/20">key</code> column is NULL (no index used).</li>
+                <li>Add a composite index on the WHERE clause columns, most selective first.</li>
+                <li>Consider if the query can be rewritten to use a more selective filter.</li>
+            </ol>
+            <div class="relative group mt-2">
+                <pre class="bg-white border border-dashed border-erased p-2 text-xs overflow-x-auto font-mono wobbly-sm"
+                     style="font-family: monospace; white-space: pre-wrap;">-- Run EXPLAIN on this query
+EXPLAIN {{ (query_info.query_sample_text or query_info.digest_text)[:500] }}</pre>
+                <button onclick="SeeQL.copyToClipboard(this.previousElementSibling.textContent, this)"
+                        class="copy-btn absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity p-1 border border-pencil/30 bg-white wobbly-sm"
+                        title="Copy">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                </button>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Latency trend chart -->
+    <div>
+        <div class="text-xs font-heading text-pencil/50 mb-1">Latency Trend (24h)</div>
+        <div class="bg-white border border-dashed border-erased p-2 wobbly-sm" style="position: relative; height: 160px;">
+            <canvas id="trend-{{ query_info.digest[:8] }}"></canvas>
+        </div>
+        <script>
+            fetch('/api/v1/queries/{{ query_info.digest }}/trend?range=24h')
+                .then(r => r.json())
+                .then(data => {
+                    SeeQL.createChart('trend-{{ query_info.digest[:8] }}', {
+                        type: 'line',
+                        data: {
+                            labels: data.map(d => SeeQL.formatTime(d.snapshot_time)),
+                            datasets: [{
+                                label: 'avg_time_sec',
+                                data: data.map(d => d.avg_time_sec),
+                                borderColor: '#ff4d4d',
+                                borderWidth: 2,
+                                tension: 0.3,
+                                fill: { target: 'origin', above: 'rgba(255,77,77,0.1)' },
+                                pointRadius: 2,
+                            }]
+                        },
+                        options: SeeQL.defaultChartOptions(),
+                    });
+                });
+        </script>
+    </div>
+
+    <!-- EXPLAIN capture -->
+    {% if explain %}
+    <div>
+        <div class="text-xs font-heading text-pencil/50 mb-1">EXPLAIN Plan (captured {{ explain.captured_at }})</div>
+        <div class="relative group">
+            <pre class="bg-white border border-dashed border-erased p-3 text-xs overflow-x-auto font-mono wobbly-sm"
+                 style="font-family: monospace; white-space: pre-wrap;">{{ explain.explain_json }}</pre>
+            <button onclick="SeeQL.copyToClipboard(this.previousElementSibling.textContent, this)"
+                    class="copy-btn absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity p-1 border border-pencil/30 bg-white wobbly-sm"
+                    title="Copy EXPLAIN">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+            </button>
+        </div>
+    </div>
+    {% else %}
+    <div class="text-xs text-pencil/40 font-body">No EXPLAIN capture available for this query.</div>
+    {% endif %}
+</div>
+{% else %}
+<div class="text-pencil/40 font-body p-4">No detail available.</div>
+{% endif %}

@@ -1,0 +1,89 @@
+services:
+  seeql:
+    build: .
+    image: seeql:latest
+    container_name: seeql
+    ports:
+      - "${SEEQL_API_PORT:-8080}:8080"
+    volumes:
+      # Persistent data — SQLite DB lives here
+      - ${SEEQL_DATA_DIR:-./seeql-data}:/app/data
+      # Persistent logs
+      - ${SEEQL_LOG_DIR:-./seeql-logs}:/app/logs
+      # GCP service account (read-only)
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-./vertex-sa.json}:/app/gcp-sa.json:ro
+    environment:
+      # --- Required ---
+      PROD_DB_HOST: ${PROD_DB_HOST}
+      PROD_DB_PORT: ${PROD_DB_PORT:-3306}
+      PROD_DB_USER: ${PROD_DB_USER:-dba_agent}
+      PROD_DB_PASSWORD: ${PROD_DB_PASSWORD}
+      PROD_DB_DATABASE: ${PROD_DB_DATABASE}
+
+      # --- GCP ---
+      GOOGLE_APPLICATION_CREDENTIALS: /app/gcp-sa.json
+      GCP_PROJECT_ID: ${GCP_PROJECT_ID}
+      GCP_REGION: ${GCP_REGION:-asia-south1}
+      GCP_CLOUD_SQL_INSTANCE: ${GCP_CLOUD_SQL_INSTANCE}
+
+      # --- Limits ---
+      SEEQL_DB_MAX_SIZE_MB: ${SEEQL_DB_MAX_SIZE_MB:-5000}
+      SEEQL_LOG_MAX_SIZE_MB: ${SEEQL_LOG_MAX_SIZE_MB:-500}
+      SEEQL_RETENTION_DAYS: ${SEEQL_RETENTION_DAYS:-90}
+
+      # --- Agent ---
+      SEEQL_AGENT_ENABLED: ${SEEQL_AGENT_ENABLED:-true}
+      SEEQL_AGENT_MODEL: ${SEEQL_AGENT_MODEL:-gemini-2.0-flash}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+
+      # --- Alerting ---
+      SEEQL_ALERTING_ENABLED: ${SEEQL_ALERTING_ENABLED:-false}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+
+      # --- Collection intervals (seconds) ---
+      SEEQL_FAST_INTERVAL: ${SEEQL_FAST_INTERVAL:-30}
+      SEEQL_MEDIUM_INTERVAL: ${SEEQL_MEDIUM_INTERVAL:-300}
+      SEEQL_SLOW_INTERVAL: ${SEEQL_SLOW_INTERVAL:-1800}
+
+      # --- Prometheus ---
+      SEEQL_PROM_CACHE_TTL: ${SEEQL_PROM_CACHE_TTL:-10}
+
+      # --- Logging ---
+      SEEQL_LOG_LEVEL: ${SEEQL_LOG_LEVEL:-INFO}
+      SEEQL_API_PORT: "8080"
+      SEEQL_ENV: production
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  # ---------- Dev-only MySQL for local testing ----------
+  mysql-dev:
+    image: mysql:8.0.43
+    container_name: seeql-mysql-dev
+    profiles:
+      - dev
+    ports:
+      - "3307:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: devroot
+      MYSQL_USER: dba_agent
+      MYSQL_PASSWORD: devpassword
+      MYSQL_DATABASE: mydb
+    command:
+      - --performance-schema=ON
+      - --slow-query-log=ON
+      - --long-query-time=1
+      - --innodb-monitor-enable=all
+    volumes:
+      - mysql-dev-data:/var/lib/mysql
+      - ./tests/fixtures/init_test_mysql.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - monitoring
+
+volumes:
+  mysql-dev-data:
+
+networks:
+  monitoring:
+    name: monitoring
+    external: true

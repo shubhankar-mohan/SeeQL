@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block title %}Locks & Transactions{% endblock %}
+
+{% block content %}
+<div class="space-y-8">
+
+    <h1 class="text-4xl md:text-5xl font-heading font-bold" style="transform: rotate(-1deg);">
+        Locks & Transactions
+    </h1>
+
+    <!-- Current Lock Waits (auto-refresh) -->
+    <div class="bg-white border-[3px] border-pencil p-5 md:p-6 shadow-hard wobbly-md tack"
+         style="transform: rotate(0.3deg);"
+         hx-get="/dashboard/partials/current-locks" hx-trigger="every 30s" hx-swap="innerHTML">
+        {% include "partials/current_locks.html" %}
+    </div>
+
+    <!-- Lock Wait History Chart -->
+    <div class="bg-white border-2 border-pencil p-4 shadow-hard-subtle wobbly" style="transform: rotate(-0.3deg);">
+        <h3 class="font-heading text-xl mb-3" style="transform: rotate(0.5deg);">
+            Lock Wait History (24h)
+            <span class="info-tip" data-tip="Count of lock wait events over time, bucketed in 5-minute intervals. Clusters indicate contention hotspots.">i</span>
+        </h3>
+        <div style="position: relative; height: 220px;">
+            <canvas id="lock-history-chart"></canvas>
+        </div>
+    </div>
+
+    <!-- Active Transactions (auto-refresh) -->
+    <div class="bg-white border-[3px] border-pencil p-5 md:p-6 shadow-hard wobbly tape"
+         style="transform: rotate(-0.4deg);"
+         hx-get="/dashboard/partials/active-transactions" hx-trigger="every 30s" hx-swap="innerHTML">
+        {% include "partials/active_transactions.html" %}
+    </div>
+
+    <!-- Metadata Locks -->
+    {% if metadata_locks %}
+    <div class="bg-postit border-[3px] border-pencil p-5 md:p-6 shadow-hard wobbly-sm" style="transform: rotate(0.6deg);">
+        <h2 class="font-heading text-2xl mb-4" style="transform: rotate(-0.5deg);">
+            &#128274; Metadata Locks
+            <span class="info-tip" data-tip="Metadata locks protect table structure during DDL. PENDING locks mean a DDL is waiting for active queries to finish.">i</span>
+        </h2>
+        <div class="overflow-x-auto">
+            <table class="w-full sketch-table font-body">
+                <thead>
+                    <tr>
+                        <th class="px-4 py-2 text-left">Object</th>
+                        <th class="px-4 py-2 text-left">Lock Type</th>
+                        <th class="px-4 py-2 text-left">Duration</th>
+                        <th class="px-4 py-2 text-left">Status</th>
+                        <th class="px-4 py-2 text-right">Thread ID</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for ml in metadata_locks %}
+                    <tr>
+                        <td class="px-4 py-2">{{ ml.object_schema }}.{{ ml.object_name }}</td>
+                        <td class="px-4 py-2">{{ ml.lock_type }}</td>
+                        <td class="px-4 py-2">{{ ml.lock_duration }}</td>
+                        <td class="px-4 py-2">
+                            <span class="px-2 py-0.5 border border-pencil text-sm
+                                         {% if ml.lock_status == 'PENDING' %}bg-red-100 text-marker{% else %}bg-green-100{% endif %}"
+                                  style="border-radius: 255px 15px 225px 15px / 15px 225px 15px 255px;">
+                                {{ ml.lock_status }}
+                            </span>
+                        </td>
+                        <td class="px-4 py-2 text-right">{{ ml.owner_thread_id }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% endif %}
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    fetch('/api/v1/locks/history?range=24h&bucket=5m')
+        .then(r => r.json())
+        .then(data => {
+            SeeQL.createChart('lock-history-chart', {
+                type: 'bar',
+                data: {
+                    labels: data.map(d => SeeQL.formatTime(d.bucket)),
+                    datasets: [{
+                        label: 'Lock Waits',
+                        data: data.map(d => d.lock_count),
+                        backgroundColor: 'rgba(255,77,77,0.6)',
+                        borderColor: '#2d2d2d',
+                        borderWidth: 1.5,
+                        borderRadius: 4,
+                    }]
+                },
+                options: SeeQL.defaultChartOptions(),
+            });
+        });
+});
+</script>
+{% endblock %}

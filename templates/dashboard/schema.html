@@ -1,0 +1,242 @@
+{% extends "base.html" %}
+{% block title %}Schema Changes{% endblock %}
+
+{% block content %}
+<div class="space-y-8" x-data="{ tab: 'changes' }">
+
+    <h1 class="text-4xl md:text-5xl font-heading font-bold" style="transform: rotate(-1deg);">
+        Schema & Indexes
+    </h1>
+
+    <!-- Tab Navigation -->
+    <div class="flex gap-2 font-body text-lg">
+        <button @click="tab = 'changes'"
+                class="px-4 py-2 border-2 border-pencil wobbly-sm transition-all duration-100"
+                :class="tab === 'changes' ? 'bg-pencil text-white shadow-none translate-x-[2px] translate-y-[2px]' : 'bg-white shadow-hard-sm hover:bg-postit'">
+            DDL Changes
+        </button>
+        <button @click="tab = 'sizes'"
+                class="px-4 py-2 border-2 border-pencil wobbly-sm transition-all duration-100"
+                :class="tab === 'sizes' ? 'bg-pencil text-white shadow-none translate-x-[2px] translate-y-[2px]' : 'bg-white shadow-hard-sm hover:bg-postit'">
+            Table Sizes
+        </button>
+        <button @click="tab = 'indexes'"
+                class="px-4 py-2 border-2 border-pencil wobbly-sm transition-all duration-100"
+                :class="tab === 'indexes' ? 'bg-pencil text-white shadow-none translate-x-[2px] translate-y-[2px]' : 'bg-white shadow-hard-sm hover:bg-postit'">
+            Index Analysis
+        </button>
+    </div>
+
+    <!-- DDL Changes Tab -->
+    <div x-show="tab === 'changes'" x-transition>
+        {% if ddl_changes %}
+        <div class="space-y-4">
+            {% for change in ddl_changes %}
+            <div class="bg-white border-2 border-pencil p-4 shadow-hard-subtle wobbly-md"
+                 style="transform: rotate({{ [-0.5, 0.3, -0.2, 0.4]|random }}deg);"
+                 x-data="{ showDiff: false }">
+                <div class="flex items-start justify-between">
+                    <div>
+                        <span class="px-2 py-0.5 text-sm border border-pencil mr-2
+                                     {% if change.change_type == 'both' %}bg-red-100 text-marker
+                                     {% elif change.change_type == 'schema' %}bg-blue-100 text-pen
+                                     {% else %}bg-yellow-100{% endif %}"
+                              style="border-radius: 225px 15px 255px 15px / 15px 255px 15px 225px;">
+                            {{ change.change_type }}
+                        </span>
+                        <span class="font-heading text-lg font-bold">
+                            {{ change.table_schema }}.{{ change.table_name }}
+                        </span>
+                    </div>
+                    <div class="text-sm text-pencil/50">{{ change.detected_at }}</div>
+                </div>
+
+                <button @click="showDiff = !showDiff"
+                        class="mt-2 text-pen hover:text-marker font-body underline decoration-dashed">
+                    <span x-text="showDiff ? 'Hide diff' : 'Show diff'"></span>
+                </button>
+
+                <div x-show="showDiff" x-transition class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {% if change.old_ddl %}
+                    <div>
+                        <div class="text-xs font-heading text-pencil/50 mb-1">Before</div>
+                        <div class="relative group">
+                            <pre class="bg-red-50 border border-dashed border-red-300 p-3 text-sm overflow-x-auto font-mono wobbly-sm"
+                                 style="font-family: monospace;">{{ change.old_ddl }}</pre>
+                            <button onclick="SeeQL.copyToClipboard(this.previousElementSibling.textContent, this)"
+                                    class="copy-btn absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity p-1 border border-pencil/30 bg-white wobbly-sm"
+                                    title="Copy">
+                                <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                            </button>
+                        </div>
+                    </div>
+                    {% endif %}
+                    {% if change.new_ddl %}
+                    <div>
+                        <div class="text-xs font-heading text-pencil/50 mb-1">After</div>
+                        <div class="relative group">
+                            <pre class="bg-green-50 border border-dashed border-green-300 p-3 text-sm overflow-x-auto font-mono wobbly-sm"
+                                 style="font-family: monospace;">{{ change.new_ddl }}</pre>
+                            <button onclick="SeeQL.copyToClipboard(this.previousElementSibling.textContent, this)"
+                                    class="copy-btn absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity p-1 border border-pencil/30 bg-white wobbly-sm"
+                                    title="Copy">
+                                <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                            </button>
+                        </div>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="bg-white border-2 border-dashed border-erased p-8 text-center font-body text-lg text-pencil/40 wobbly">
+            No DDL changes detected yet.
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Table Sizes Tab -->
+    <div x-show="tab === 'sizes'" x-transition>
+        <div class="bg-white border-2 border-pencil shadow-hard-subtle wobbly-md overflow-hidden" style="transform: rotate(0.2deg);">
+            <div class="overflow-x-auto">
+                <table class="w-full sketch-table font-body">
+                    <thead>
+                        <tr>
+                            <th class="px-4 py-3 text-left">Table</th>
+                            <th class="px-4 py-3 text-right">
+                                Rows
+                                <span class="info-tip" data-tip="Estimated row count from InnoDB statistics. May not be exact for large tables.">i</span>
+                            </th>
+                            <th class="px-4 py-3 text-right">
+                                Data MB
+                                <span class="info-tip" data-tip="Size of the table data (clustered index). Large data sizes may benefit from partitioning.">i</span>
+                            </th>
+                            <th class="px-4 py-3 text-right">
+                                Index MB
+                                <span class="info-tip" data-tip="Size of all secondary indexes combined. High index-to-data ratio may indicate too many indexes.">i</span>
+                            </th>
+                            <th class="px-4 py-3 text-right">Total MB</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for t in table_sizes %}
+                        <tr>
+                            <td class="px-4 py-2">
+                                <span class="text-pencil/50 text-sm">{{ t.table_schema }}.</span>{{ t.table_name }}
+                            </td>
+                            <td class="px-4 py-2 text-right font-heading">{{ "{:,}".format(t.table_rows or 0) }}</td>
+                            <td class="px-4 py-2 text-right">{{ "%.1f"|format(t.data_mb or 0) }}</td>
+                            <td class="px-4 py-2 text-right">{{ "%.1f"|format(t.index_mb or 0) }}</td>
+                            <td class="px-4 py-2 text-right font-heading font-bold">{{ "%.1f"|format(t.total_mb or 0) }}</td>
+                        </tr>
+                        {% endfor %}
+                        {% if not table_sizes %}
+                        <tr>
+                            <td colspan="5" class="px-4 py-8 text-center text-pencil/40">No schema data collected yet.</td>
+                        </tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Index Analysis Tab -->
+    <div x-show="tab === 'indexes'" x-transition>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <!-- Unused Indexes -->
+            <div class="bg-white border-2 border-pencil p-5 shadow-hard wobbly tape" style="transform: rotate(-0.5deg);">
+                <h3 class="font-heading text-xl mb-3">
+                    Unused Indexes ({{ unused_total }})
+                    <span class="info-tip" data-tip="Indexes not used by any query since monitoring started. Safe to drop after verifying no infrequent batch jobs need them.">i</span>
+                </h3>
+                {% if unused_indexes %}
+                <div class="space-y-2 font-body max-h-[500px] overflow-y-auto">
+                    {% for idx in unused_indexes %}
+                    <div class="border border-dashed border-erased p-2 group relative">
+                        <span class="text-pencil/50 text-sm">{{ idx.object_schema }}.{{ idx.table_name }}</span>
+                        <div class="font-bold text-marker">{{ idx.index_name }}</div>
+                        <div class="relative mt-1">
+                            <pre class="bg-red-50 border border-dashed border-red-200 p-1 text-xs overflow-x-auto font-mono"
+                                 style="font-family: monospace;">ALTER TABLE `{{ idx.object_schema }}`.`{{ idx.table_name }}` DROP INDEX `{{ idx.index_name }}`;</pre>
+                            <button onclick="SeeQL.copyToClipboard(this.previousElementSibling.textContent, this)"
+                                    class="copy-btn absolute top-0.5 right-0.5 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 border border-pencil/30 bg-white wobbly-sm"
+                                    title="Copy DROP SQL">
+                                <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                            </button>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% if unused_pages > 1 %}
+                <div class="flex items-center justify-between mt-3 text-sm">
+                    <span class="text-pencil/50">Page {{ pg_unused }} of {{ unused_pages }}</span>
+                    <div class="flex gap-1">
+                        {% if pg_unused > 1 %}
+                        <a href="/dashboard/schema?pg_unused={{ pg_unused - 1 }}&pg_redundant={{ pg_redundant }}" class="px-2 py-0.5 border border-pencil bg-white wobbly-sm hover:bg-postit">&laquo;</a>
+                        {% endif %}
+                        {% if pg_unused < unused_pages %}
+                        <a href="/dashboard/schema?pg_unused={{ pg_unused + 1 }}&pg_redundant={{ pg_redundant }}" class="px-2 py-0.5 border border-pencil bg-white wobbly-sm hover:bg-postit">&raquo;</a>
+                        {% endif %}
+                    </div>
+                </div>
+                {% endif %}
+                {% else %}
+                <p class="text-pencil/40 font-body">No unused indexes found.</p>
+                {% endif %}
+            </div>
+
+            <!-- Redundant Indexes -->
+            <div class="bg-white border-2 border-pencil p-5 shadow-hard wobbly-md tack" style="transform: rotate(0.5deg);">
+                <h3 class="font-heading text-xl mb-3">
+                    Redundant Indexes ({{ red_total }})
+                    <span class="info-tip" data-tip="Indexes whose columns are a left-prefix of another index. The dominant index already covers these queries.">i</span>
+                </h3>
+                {% if redundant_indexes %}
+                <div class="space-y-3 font-body max-h-[500px] overflow-y-auto">
+                    {% for idx in redundant_indexes %}
+                    <div class="border border-dashed border-erased p-2 group relative">
+                        <div class="text-sm text-pencil/50">{{ idx.table_schema }}.{{ idx.table_name }}</div>
+                        <div class="text-marker">{{ idx.redundant_index_name }}</div>
+                        <div class="text-xs text-pencil/50">
+                            ({{ idx.redundant_index_columns }}) covered by
+                            <span class="text-pen font-bold">{{ idx.dominant_index_name }}</span>
+                            ({{ idx.dominant_index_columns }})
+                        </div>
+                        {% if idx.sql_drop_index %}
+                        <div class="relative mt-1">
+                            <pre class="bg-red-50 border border-dashed border-red-200 p-1 text-xs overflow-x-auto font-mono"
+                                 style="font-family: monospace;">{{ idx.sql_drop_index }}</pre>
+                            <button onclick="SeeQL.copyToClipboard(this.previousElementSibling.textContent, this)"
+                                    class="copy-btn absolute top-0.5 right-0.5 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 border border-pencil/30 bg-white wobbly-sm"
+                                    title="Copy DROP SQL">
+                                <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                            </button>
+                        </div>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                </div>
+                {% if red_pages > 1 %}
+                <div class="flex items-center justify-between mt-3 text-sm">
+                    <span class="text-pencil/50">Page {{ pg_redundant }} of {{ red_pages }}</span>
+                    <div class="flex gap-1">
+                        {% if pg_redundant > 1 %}
+                        <a href="/dashboard/schema?pg_unused={{ pg_unused }}&pg_redundant={{ pg_redundant - 1 }}" class="px-2 py-0.5 border border-pencil bg-white wobbly-sm hover:bg-postit">&laquo;</a>
+                        {% endif %}
+                        {% if pg_redundant < red_pages %}
+                        <a href="/dashboard/schema?pg_unused={{ pg_unused }}&pg_redundant={{ pg_redundant + 1 }}" class="px-2 py-0.5 border border-pencil bg-white wobbly-sm hover:bg-postit">&raquo;</a>
+                        {% endif %}
+                    </div>
+                </div>
+                {% endif %}
+                {% else %}
+                <p class="text-pencil/40 font-body">No redundant indexes found.</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+</div>
+{% endblock %}

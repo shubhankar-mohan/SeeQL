@@ -1,0 +1,12 @@
+/* SeeQL Dashboard — Custom overrides
+   Most styling is handled via Tailwind classes and inline styles in templates.
+   This file is for any edge cases. */
+
+/* Print styles */
+@media print {
+    nav, footer, button { display: none !important; }
+    body { background-image: none !important; }
+    .shadow-hard, .shadow-hard-sm, .shadow-hard-lg, .shadow-hard-subtle {
+        box-shadow: none !important;
+    }
+}

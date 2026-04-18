@@ -1,0 +1,179 @@
+{% extends "base.html" %}
+{% block title %}Server Metrics{% endblock %}
+
+{% block content %}
+<div class="space-y-8" x-data="{ range: '1h' }">
+
+    <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+        <h1 class="text-4xl md:text-5xl font-heading font-bold" style="transform: rotate(-1deg);">
+            Server Metrics
+        </h1>
+
+        <!-- Time range selector -->
+        <div class="flex border-2 border-pencil wobbly-sm overflow-hidden font-body text-lg">
+            {% for r in ['1h', '6h', '24h', '7d'] %}
+            <button @click="range = '{{ r }}'; SeeQL.refreshServerCharts('{{ r }}')"
+                    class="px-3 py-1 border-r border-dashed border-erased last:border-0 transition-all duration-100"
+                    :class="range === '{{ r }}' ? 'bg-pencil text-white' : 'hover:bg-postit'">
+                {{ r }}
+            </button>
+            {% endfor %}
+        </div>
+    </div>
+
+    <!-- Charts Grid -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+
+        <!-- QPS -->
+        <div class="bg-white border-2 border-pencil p-4 shadow-hard-subtle wobbly-md" style="transform: rotate(0.3deg);">
+            <h3 class="font-heading text-xl mb-3" style="transform: rotate(-0.5deg);">
+                Queries / sec
+                <span class="info-tip" data-tip="Queries per second processed by MySQL. Sudden drops may indicate connection issues or a stalled workload.">i</span>
+            </h3>
+            <div style="position: relative; height: 220px;">
+                <canvas id="server-qps-chart"></canvas>
+            </div>
+        </div>
+
+        <!-- Threads -->
+        <div class="bg-white border-2 border-pencil p-4 shadow-hard-subtle wobbly" style="transform: rotate(-0.3deg);">
+            <h3 class="font-heading text-xl mb-3" style="transform: rotate(0.5deg);">
+                Threads
+                <span class="info-tip" data-tip="Running = actively executing queries. Connected = total open connections. A large gap between them means many idle connections.">i</span>
+            </h3>
+            <div style="position: relative; height: 220px;">
+                <canvas id="server-threads-chart"></canvas>
+            </div>
+        </div>
+
+        <!-- Buffer Pool -->
+        <div class="bg-white border-2 border-pencil p-4 shadow-hard-subtle wobbly-sm" style="transform: rotate(-0.4deg);">
+            <h3 class="font-heading text-xl mb-3">
+                Buffer Pool Hit Ratio %
+                <span class="info-tip" data-tip="Percentage of reads served from InnoDB buffer pool (RAM) vs disk. Should be >99%. Drops indicate working set exceeds memory.">i</span>
+            </h3>
+            <div style="position: relative; height: 220px;">
+                <canvas id="server-bp-chart"></canvas>
+            </div>
+        </div>
+
+        <!-- InnoDB Row Operations -->
+        <div class="bg-white border-2 border-pencil p-4 shadow-hard-subtle wobbly-md" style="transform: rotate(0.4deg);">
+            <h3 class="font-heading text-xl mb-3">
+                InnoDB Row Operations
+                <span class="info-tip" data-tip="Rate of row-level operations inside InnoDB. Sudden spikes in reads may indicate missing indexes. Write spikes may indicate batch jobs.">i</span>
+            </h3>
+            <div style="position: relative; height: 220px;">
+                <canvas id="server-innodb-chart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <!-- Wait Events -->
+    <div class="bg-white border-[3px] border-pencil p-5 md:p-6 shadow-hard wobbly tack" style="transform: rotate(0.3deg);">
+        <h2 class="font-heading text-2xl mb-4" style="transform: rotate(-0.5deg);">
+            Top Wait Events
+            <span class="info-tip" data-tip="What MySQL spends time waiting on. IO waits suggest disk bottlenecks. Lock waits suggest contention. CPU waits are usually normal.">i</span>
+        </h2>
+
+        {% if wait_events %}
+        <div class="space-y-3">
+            {% set max_wait = wait_events[0].total_wait_sec if wait_events else 1 %}
+            {% for we in wait_events %}
+            <div class="flex items-center gap-3">
+                <div class="w-[200px] md:w-[300px] text-sm font-body truncate" title="{{ we.event_name }}">
+                    {{ we.event_name.split('/')[-1] }}
+                </div>
+                <div class="flex-1 h-6 border border-pencil bg-paper relative" style="border-radius: 225px 15px 255px 15px / 15px 255px 15px 225px;">
+                    <div class="h-full bg-pen/70 absolute left-0 top-0"
+                         style="width: {{ (we.total_wait_sec / max_wait * 100) if max_wait > 0 else 0 }}%;
+                                border-radius: 225px 15px 255px 15px / 15px 255px 15px 225px;">
+                    </div>
+                </div>
+                <div class="w-[80px] text-right font-heading text-sm">
+                    {{ "%.2f"|format(we.total_wait_sec) }}s
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <p class="text-pencil/40 font-body text-lg">No wait event data collected yet.</p>
+        {% endif %}
+    </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    SeeQL.refreshServerCharts('1h');
+});
+
+SeeQL.refreshServerCharts = function(range) {
+    // QPS
+    SeeQL.fetchAndChart('/api/v1/metrics/qps?range=' + range, 'server-qps-chart', {
+        label: 'QPS', valueKey: 'value', timeKey: 'snapshot_time', color: '#2d5da1',
+    });
+
+    // Threads
+    fetch('/api/v1/metrics/threads?range=' + range)
+        .then(r => r.json())
+        .then(data => {
+            SeeQL.createChart('server-threads-chart', {
+                type: 'line',
+                data: {
+                    labels: data.running.map(d => SeeQL.formatTime(d.t)),
+                    datasets: [
+                        { label: 'Running', data: data.running.map(d => d.v), borderColor: '#ff4d4d', borderWidth: 2.5, tension: 0.3, fill: false },
+                        { label: 'Connected', data: data.connected.map(d => d.v), borderColor: '#2d5da1', borderWidth: 2.5, tension: 0.3, fill: false },
+                    ]
+                },
+                options: SeeQL.defaultChartOptions(),
+            });
+        });
+
+    // Buffer Pool
+    fetch('/api/v1/metrics/buffer-pool?range=' + range)
+        .then(r => r.json())
+        .then(data => {
+            SeeQL.createChart('server-bp-chart', {
+                type: 'line',
+                data: {
+                    labels: data.map(d => SeeQL.formatTime(d.snapshot_time)),
+                    datasets: [{
+                        label: 'Hit Ratio %', data: data.map(d => d.hit_ratio),
+                        borderColor: '#22c55e', borderWidth: 2.5, tension: 0.3,
+                        fill: { target: 'origin', above: 'rgba(34,197,94,0.1)' },
+                    }]
+                },
+                options: { ...SeeQL.defaultChartOptions(), scales: { ...SeeQL.defaultChartOptions().scales, y: { min: 90, max: 100 } } },
+            });
+        });
+
+    // InnoDB
+    fetch('/api/v1/metrics/innodb?range=' + range + '&metrics=rows_read,rows_inserted,rows_updated,rows_deleted')
+        .then(r => r.json())
+        .then(data => {
+            const grouped = {};
+            data.forEach(d => {
+                if (!grouped[d.metric_name]) grouped[d.metric_name] = [];
+                grouped[d.metric_name].push(d);
+            });
+            const colors = { rows_read: '#2d5da1', rows_inserted: '#22c55e', rows_updated: '#eab308', rows_deleted: '#ff4d4d' };
+            const datasets = Object.entries(grouped).map(([name, points]) => ({
+                label: name.replace('_', ' '),
+                data: points.map(p => p.count_value),
+                borderColor: colors[name] || '#2d2d2d',
+                borderWidth: 2, tension: 0.3, fill: false,
+            }));
+            const labels = Object.values(grouped)[0]?.map(d => SeeQL.formatTime(d.snapshot_time)) || [];
+            SeeQL.createChart('server-innodb-chart', {
+                type: 'line',
+                data: { labels, datasets },
+                options: SeeQL.defaultChartOptions(),
+            });
+        });
+};
+</script>
+{% endblock %}

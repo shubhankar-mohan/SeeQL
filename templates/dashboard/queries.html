@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+{% block title %}Query Performance{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+
+    <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+        <h1 class="text-4xl md:text-5xl font-heading font-bold" style="transform: rotate(-1deg);">
+            Query Performance
+        </h1>
+
+        <!-- Time range pills -->
+        <div class="flex border-2 border-pencil wobbly-sm overflow-hidden font-body text-lg">
+            {% for r in ['1h', '6h', '24h', '7d'] %}
+            <a href="/dashboard/queries?range={{ r }}&sort={{ current_sort }}"
+               class="px-3 py-1 border-r border-dashed border-erased last:border-0 transition-all duration-100
+                      {% if current_range == r %}bg-pencil text-white{% else %}hover:bg-postit{% endif %}">
+                {{ r }}
+            </a>
+            {% endfor %}
+        </div>
+    </div>
+
+    <!-- Regression banner -->
+    {% if regression_digests %}
+    <div class="border-[3px] border-marker bg-red-50 p-4 wobbly shadow-hard-sm" style="transform: rotate(0.5deg);">
+        <h3 class="font-heading text-lg text-marker">&#9888; {{ regression_digests|length }} query regression{{ 's' if regression_digests|length > 1 }} detected (3x+ slower vs 7-day baseline)</h3>
+    </div>
+    {% endif %}
+
+    <!-- Queries Table -->
+    <div class="bg-white border-2 border-pencil shadow-hard-subtle wobbly-md overflow-visible" style="transform: rotate(0.2deg);">
+        <div class="overflow-x-auto" style="overflow-y: visible;">
+            <table class="w-full sketch-table font-body text-base">
+                <thead>
+                    <tr class="text-left">
+                        <th class="px-4 py-3 w-[35%]">Query</th>
+                        {% for col in [('exec_count', 'Execs'), ('avg_time_sec', 'Avg Time'), ('total_time_sec', 'Total Time')] %}
+                        <th class="px-4 py-3 text-right">
+                            <a href="/dashboard/queries?range={{ current_range }}&sort={{ col[0] }}"
+                               class="hover:text-pen {% if current_sort == col[0] %}text-pen underline decoration-dashed{% endif %}">
+                                {{ col[1] }}
+                            </a>
+                        </th>
+                        {% endfor %}
+                        <th class="px-4 py-3 text-right hidden md:table-cell">
+                            <a href="/dashboard/queries?range={{ current_range }}&sort=rows_examined"
+                               class="hover:text-pen {% if current_sort == 'rows_examined' %}text-pen underline decoration-dashed{% endif %}">
+                                Rows Exam.
+                            </a>
+                        </th>
+                        <th class="px-4 py-3 text-right hidden md:table-cell">Rows Sent</th>
+                        <th class="px-4 py-3 text-right hidden lg:table-cell">
+                            <a href="/dashboard/queries?range={{ current_range }}&sort=full_scans"
+                               class="hover:text-pen {% if current_sort == 'full_scans' %}text-pen underline decoration-dashed{% endif %}">
+                                Scans
+                            </a>
+                        </th>
+                        <th class="px-4 py-3 w-8"></th>
+                    </tr>
+                </thead>
+                {% for q in queries %}
+                <tbody x-data="{ expanded: false }">
+                    <tr class="{% if q.digest in regression_digests %}severity-red{% endif %} cursor-pointer"
+                        @click="expanded = !expanded">
+                        <td class="px-4 py-3">
+                            <div class="truncate max-w-[300px] md:max-w-[400px]" title="{{ q.digest_text }}">
+                                {% if q.digest in regression_digests %}
+                                <span class="text-marker font-bold mr-1">&#9650;</span>
+                                {% endif %}
+                                {{ q.digest_text or q.digest[:16] }}
+                            </div>
+                            {% if q.schema_name %}
+                            <div class="text-xs text-pencil/50">{{ q.schema_name }}</div>
+                            {% endif %}
+                        </td>
+                        <td class="px-4 py-3 text-right font-heading">{{ "{:,}".format(q.exec_count) }}</td>
+                        <td class="px-4 py-3 text-right font-heading
+                                   {% if q.avg_time_sec and q.avg_time_sec > 1 %}text-marker font-bold{% endif %}">
+                            {{ "%.4f"|format(q.avg_time_sec or 0) }}s
+                        </td>
+                        <td class="px-4 py-3 text-right font-heading">{{ "%.2f"|format(q.total_time_sec or 0) }}s</td>
+                        <td class="px-4 py-3 text-right hidden md:table-cell">{{ "{:,}".format(q.rows_examined or 0) }}</td>
+                        <td class="px-4 py-3 text-right hidden md:table-cell">{{ "{:,}".format(q.rows_sent or 0) }}</td>
+                        <td class="px-4 py-3 text-right hidden lg:table-cell
+                                   {% if q.full_scans and q.full_scans > 0 %}text-marker{% endif %}">
+                            {{ q.full_scans or 0 }}
+                        </td>
+                        <td class="px-4 py-3">
+                            <span class="text-pen text-xl inline-block transition-transform duration-100"
+                                  :class="expanded ? 'rotate-90' : ''">&#9654;</span>
+                        </td>
+                    </tr>
+                    <tr x-show="expanded" x-transition.duration.150ms>
+                        <td colspan="8" class="px-4 py-0">
+                            <div hx-get="/dashboard/partials/query-detail/{{ q.digest }}"
+                                 hx-trigger="intersect once"
+                                 hx-swap="innerHTML"
+                                 class="py-4">
+                                <span class="text-pencil/40 font-body">Loading...</span>
+                            </div>
+                        </td>
+                    </tr>
+                </tbody>
+                {% endfor %}
+
+                {% if not queries %}
+                <tbody>
+                    <tr>
+                        <td colspan="8" class="px-4 py-8 text-center text-pencil/40 font-body text-lg">
+                            No query data yet. Run a collection first!
+                        </td>
+                    </tr>
+                </tbody>
+                {% endif %}
+            </table>
+        </div>
+    </div>
+
+    <!-- Pagination -->
+    {% if total_pages > 1 %}
+    <div class="flex items-center justify-between font-body text-lg">
+        <span class="text-sm text-pencil/50">{{ total_count }} queries total &middot; page {{ pg }} of {{ total_pages }}</span>
+        <div class="flex gap-2">
+            {% if pg > 1 %}
+            <a href="/dashboard/queries?range={{ current_range }}&sort={{ current_sort }}&pg={{ pg - 1 }}"
+               class="px-3 py-1 border-2 border-pencil bg-white wobbly-sm shadow-hard-sm hover:shadow-none hover:translate-x-[2px] hover:translate-y-[2px] transition-all duration-100">
+                &laquo; Prev
+            </a>
+            {% endif %}
+            {% for p in range(1, total_pages + 1) %}
+            {% if p == pg %}
+            <span class="px-3 py-1 border-2 border-pencil bg-pencil text-white wobbly-sm">{{ p }}</span>
+            {% elif p <= 3 or p >= total_pages - 1 or (p >= pg - 1 and p <= pg + 1) %}
+            <a href="/dashboard/queries?range={{ current_range }}&sort={{ current_sort }}&pg={{ p }}"
+               class="px-3 py-1 border-2 border-pencil bg-white wobbly-sm shadow-hard-sm hover:shadow-none hover:translate-x-[2px] hover:translate-y-[2px] transition-all duration-100">
+                {{ p }}
+            </a>
+            {% elif p == 4 or p == total_pages - 2 %}
+            <span class="px-1 py-1 text-pencil/40">...</span>
+            {% endif %}
+            {% endfor %}
+            {% if pg < total_pages %}
+            <a href="/dashboard/queries?range={{ current_range }}&sort={{ current_sort }}&pg={{ pg + 1 }}"
+               class="px-3 py-1 border-2 border-pencil bg-white wobbly-sm shadow-hard-sm hover:shadow-none hover:translate-x-[2px] hover:translate-y-[2px] transition-all duration-100">
+                Next &raquo;
+            </a>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+
+</div>
+{% endblock %}

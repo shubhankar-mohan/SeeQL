@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SeeQL — {% block title %}Dashboard{% endblock %}</title>
+
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Kalam:wght@400;700&family=Patrick+Hand&display=swap" rel="stylesheet">
+
+    <!-- Tailwind CSS (CDN play) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        paper: '#fdfbf7',
+                        pencil: '#2d2d2d',
+                        erased: '#e5e0d8',
+                        marker: '#ff4d4d',
+                        pen: '#2d5da1',
+                        postit: '#fff9c4',
+                    },
+                    fontFamily: {
+                        heading: ['Kalam', 'cursive'],
+                        body: ['Patrick Hand', 'cursive'],
+                    },
+                    boxShadow: {
+                        'hard': '4px 4px 0px 0px #2d2d2d',
+                        'hard-sm': '2px 2px 0px 0px #2d2d2d',
+                        'hard-lg': '8px 8px 0px 0px #2d2d2d',
+                        'hard-subtle': '3px 3px 0px 0px rgba(45,45,45,0.1)',
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- HTMX -->
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+
+    <!-- Alpine.js -->
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+    <style>
+        body {
+            font-family: 'Patrick Hand', cursive;
+            background-color: #fdfbf7;
+            background-image: radial-gradient(#e5e0d8 1px, transparent 1px);
+            background-size: 24px 24px;
+            color: #2d2d2d;
+        }
+        h1, h2, h3, h4, h5, h6 { font-family: 'Kalam', cursive; }
+
+        .wobbly {
+            border-radius: 255px 15px 225px 15px / 15px 225px 15px 255px;
+        }
+        .wobbly-md {
+            border-radius: 15px 225px 15px 255px / 255px 15px 225px 15px;
+        }
+        .wobbly-sm {
+            border-radius: 225px 15px 255px 15px / 15px 255px 15px 225px;
+        }
+
+        .tape {
+            position: relative;
+        }
+        .tape::before {
+            content: '';
+            position: absolute;
+            top: -8px;
+            left: 50%;
+            transform: translateX(-50%) rotate(-2deg);
+            width: 80px;
+            height: 20px;
+            background: rgba(200, 200, 180, 0.5);
+            border: 1px dashed #ccc;
+            z-index: 10;
+        }
+
+        .tack {
+            position: relative;
+        }
+        .tack::before {
+            content: '';
+            position: absolute;
+            top: -6px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 14px;
+            height: 14px;
+            background: #ff4d4d;
+            border-radius: 50%;
+            border: 2px solid #2d2d2d;
+            z-index: 10;
+            box-shadow: 1px 1px 0px #2d2d2d;
+        }
+
+        .nav-link {
+            position: relative;
+            display: inline-block;
+        }
+        .nav-link.active::after,
+        .nav-link:hover::after {
+            content: '';
+            position: absolute;
+            bottom: -2px;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: #ff4d4d;
+            border-radius: 2px;
+            transform: rotate(-1deg);
+        }
+
+        /* Severity colors */
+        .severity-red { background: #fee2e2; border-color: #ff4d4d; }
+        .severity-yellow { background: #fef9c3; border-color: #eab308; }
+        .severity-green { background: #dcfce7; border-color: #22c55e; }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #fdfbf7; }
+        ::-webkit-scrollbar-thumb {
+            background: #e5e0d8;
+            border-radius: 255px 15px 225px 15px / 15px 225px 15px 255px;
+        }
+
+        /* Table styles */
+        .sketch-table th {
+            border-bottom: 3px solid #2d2d2d;
+            font-family: 'Kalam', cursive;
+        }
+        .sketch-table td {
+            border-bottom: 1px dashed #e5e0d8;
+        }
+        .sketch-table tr:hover td {
+            background: rgba(255, 249, 196, 0.3);
+        }
+
+        @keyframes gentle-bounce {
+            0%, 100% { transform: translateY(0) rotate(-2deg); }
+            50% { transform: translateY(-6px) rotate(1deg); }
+        }
+        .bounce-gentle { animation: gentle-bounce 3s ease-in-out infinite; }
+
+        /* Info tooltip */
+        .info-tip {
+            position: relative;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 16px;
+            height: 16px;
+            border: 1.5px solid rgba(45, 45, 45, 0.3);
+            border-radius: 50%;
+            font-family: 'Kalam', cursive;
+            font-size: 10px;
+            font-weight: bold;
+            color: rgba(45, 45, 45, 0.4);
+            cursor: help;
+            vertical-align: middle;
+            margin-left: 4px;
+            flex-shrink: 0;
+        }
+        .info-tip:hover,
+        .info-tip:focus {
+            color: #2d5da1;
+            border-color: #2d5da1;
+            outline: none;
+        }
+        .info-tip:focus-visible {
+            box-shadow: 0 0 0 2px rgba(45, 93, 161, 0.35);
+        }
+        .info-tip::after {
+            content: attr(data-tip);
+            position: absolute;
+            top: calc(100% + 6px);
+            left: 50%;
+            transform: translateX(-50%);
+            background: #2d2d2d;
+            color: #fdfbf7;
+            font-family: 'Patrick Hand', cursive;
+            font-size: 14px;
+            font-weight: normal;
+            padding: 8px 12px;
+            border-radius: 6px;
+            width: 320px;
+            white-space: normal;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.15s;
+            z-index: 9999;
+            line-height: 1.4;
+            box-shadow: 2px 2px 0px rgba(45,45,45,0.2);
+        }
+        .info-tip:hover::after,
+        .info-tip:focus::after,
+        .info-tip:focus-visible::after {
+            opacity: 1;
+        }
+
+        /* Copy button styles */
+        .copy-btn {
+            cursor: pointer;
+            transition: all 0.1s;
+        }
+        .copy-btn:hover {
+            background: #fff9c4 !important;
+        }
+    </style>
+
+    {% block head %}{% endblock %}
+</head>
+<body class="min-h-screen" x-data="{ mobileNav: false }">
+
+    <!-- Skip-to-content link for keyboard + screen reader users (Phase 3.1 a11y) -->
+    <a href="#main-content"
+       class="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-[60] bg-postit px-3 py-1 border-2 border-pencil wobbly-sm shadow-hard-sm font-body text-sm">
+        Skip to main content
+    </a>
+
+    <!-- Navigation -->
+    <nav class="border-b-[3px] border-pencil bg-white/80 backdrop-blur-sm sticky top-0 z-50"
+         aria-label="Primary navigation">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6">
+            <div class="flex items-center justify-between h-16">
+                <!-- Logo -->
+                <a href="/dashboard" class="flex items-center gap-2">
+                    <span class="text-3xl font-heading font-bold" style="transform: rotate(-2deg); display: inline-block;">SeeQL</span>
+                    <span class="text-xs font-body text-pencil/60 hidden sm:inline" style="transform: rotate(1deg); display: inline-block;">~ MySQL DBA Agent</span>
+                </a>
+
+                <!-- Desktop Nav -->
+                <div class="hidden md:flex items-center gap-6 font-body text-lg">
+                    <a href="/dashboard?server={{ current_server_id }}" class="nav-link {% if page == 'overview' %}active{% endif %}">Overview</a>
+                    <a href="/dashboard/queries?server={{ current_server_id }}" class="nav-link {% if page == 'queries' %}active{% endif %}">Queries</a>
+                    <a href="/dashboard/locks?server={{ current_server_id }}" class="nav-link {% if page == 'locks' %}active{% endif %}">Locks</a>
+                    <a href="/dashboard/schema?server={{ current_server_id }}" class="nav-link {% if page == 'schema' %}active{% endif %}">Schema</a>
+                    <a href="/dashboard/server?server={{ current_server_id }}" class="nav-link {% if page == 'server' %}active{% endif %}">Server</a>
+                    <a href="/dashboard/todo?server={{ current_server_id }}" class="nav-link {% if page == 'todo' %}active{% endif %}">
+                        ToDo
+                    </a>
+                </div>
+
+                <!-- Server Selector -->
+                {% if servers_list|default([])|length > 0 %}
+                <div class="hidden md:block relative" x-data="{ serverOpen: false }">
+                    <button @click="serverOpen = !serverOpen"
+                            class="border-2 border-pencil px-3 py-1 wobbly-sm shadow-hard-sm
+                                   hover:shadow-none hover:translate-x-[2px] hover:translate-y-[2px]
+                                   transition-all duration-100 font-body text-sm flex items-center gap-2">
+                        <span class="w-2 h-2 rounded-full
+                            {% if current_server_role == 'primary' %}bg-green-500{% else %}bg-blue-400{% endif %}"></span>
+                        {{ current_server_name|default('Server') }}
+                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-width="2.5" d="M19 9l-7 7-7-7"/>
+                        </svg>
+                    </button>
+                    <div x-show="serverOpen" @click.away="serverOpen = false" x-transition
+                         class="absolute right-0 mt-2 w-60 bg-white border-2 border-pencil shadow-hard-lg z-50 wobbly">
+                        {% for env, env_servers in servers_grouped|default({})|items %}
+                        <div class="px-3 py-1 text-xs font-heading text-pencil/50 uppercase border-b border-dashed border-erased">
+                            {{ env }}
+                        </div>
+                        {% for s in env_servers %}
+                        <a href="?server={{ s.server_id }}"
+                           class="block px-3 py-2 font-body text-sm hover:bg-postit/50 flex items-center gap-2
+                                  {% if s.server_id == current_server_id %}bg-postit/30 font-bold{% endif %}">
+                            <span class="w-2 h-2 rounded-full
+                                {% if s.role == 'primary' %}bg-green-500{% else %}bg-blue-400{% endif %}"></span>
+                            {{ s.display_name }}
+                            {% if s.role == 'replica' %}
+                            <span class="text-xs text-pencil/40">(replica)</span>
+                            {% endif %}
+                        </a>
+                        {% endfor %}
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endif %}
+
+                <!-- Mobile hamburger -->
+                <button @click="mobileNav = !mobileNav" class="md:hidden border-2 border-pencil p-1 wobbly-sm shadow-hard-sm hover:shadow-none hover:translate-x-[2px] hover:translate-y-[2px] transition-all duration-100">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+                        <path x-show="!mobileNav" stroke-linecap="round" d="M4 6h16M4 12h16M4 18h16"/>
+                        <path x-show="mobileNav" stroke-linecap="round" d="M6 18L18 6M6 6l12 12"/>
+                    </svg>
+                </button>
+            </div>
+
+            <!-- Mobile Nav dropdown -->
+            <div x-show="mobileNav" x-transition class="md:hidden pb-4 border-t-2 border-dashed border-erased pt-3">
+                {% if servers_list|default([])|length > 1 %}
+                <div class="mb-3 pb-3 border-b border-dashed border-erased">
+                    <div class="text-xs font-heading text-pencil/50 uppercase mb-2">Server</div>
+                    {% for s in servers_list %}
+                    <a href="?server={{ s.server_id }}"
+                       class="block px-2 py-1 font-body text-sm {% if s.server_id == current_server_id %}font-bold bg-postit/30{% endif %}">
+                        <span class="w-2 h-2 rounded-full inline-block
+                            {% if s.role == 'primary' %}bg-green-500{% else %}bg-blue-400{% endif %}"></span>
+                        {{ s.display_name }}
+                    </a>
+                    {% endfor %}
+                </div>
+                {% endif %}
+                <div class="flex flex-col gap-3 font-body text-xl">
+                    <a href="/dashboard?server={{ current_server_id }}" class="nav-link {% if page == 'overview' %}active{% endif %}">Overview</a>
+                    <a href="/dashboard/queries?server={{ current_server_id }}" class="nav-link {% if page == 'queries' %}active{% endif %}">Queries</a>
+                    <a href="/dashboard/locks?server={{ current_server_id }}" class="nav-link {% if page == 'locks' %}active{% endif %}">Locks</a>
+                    <a href="/dashboard/schema?server={{ current_server_id }}" class="nav-link {% if page == 'schema' %}active{% endif %}">Schema</a>
+                    <a href="/dashboard/server?server={{ current_server_id }}" class="nav-link {% if page == 'server' %}active{% endif %}">Server</a>
+                    <a href="/dashboard/todo?server={{ current_server_id }}" class="nav-link {% if page == 'todo' %}active{% endif %}">ToDo</a>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main content -->
+    <main id="main-content" class="max-w-7xl mx-auto px-4 sm:px-6 py-8">
+        {% block content %}{% endblock %}
+    </main>
+
+    <!-- Footer -->
+    <footer class="border-t-2 border-dashed border-erased mt-12 py-6 text-center font-body text-pencil/50 text-sm">
+        <p style="transform: rotate(-0.5deg);">~ sketched with care by SeeQL ~</p>
+    </footer>
+
+    <!-- Dashboard JS -->
+    <script src="/static/js/charts.js"></script>
+    <script src="/static/js/dashboard.js"></script>
+
+    <!-- a11y: promote info-tips to keyboard-focusable tooltips (Phase 3.1) -->
+    <script>
+    (function() {
+        function promoteInfoTips(root) {
+            (root || document).querySelectorAll('.info-tip').forEach(function(el) {
+                if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '0');
+                if (!el.hasAttribute('role')) el.setAttribute('role', 'button');
+                if (!el.hasAttribute('aria-label') && el.hasAttribute('data-tip')) {
+                    el.setAttribute('aria-label', el.getAttribute('data-tip'));
+                }
+            });
+        }
+        document.addEventListener('DOMContentLoaded', function() { promoteInfoTips(); });
+        // HTMX-swapped content also needs this treatment
+        document.body.addEventListener('htmx:afterSwap', function(evt) {
+            promoteInfoTips(evt.target);
+        });
+    })();
+    </script>
+
+    {% block scripts %}{% endblock %}
+</body>
+</html>

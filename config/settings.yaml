@@ -1,0 +1,150 @@
+# =============================================================================
+# MySQL DBA Agent — Configuration
+# =============================================================================
+# Copy this file to settings.local.yaml and fill in your actual values.
+# settings.local.yaml is gitignored and will override these defaults.
+# =============================================================================
+
+# --- Production MySQL (Cloud SQL 8.0.43) — READ ONLY access ---
+production_db:
+  host: "10.0.0.1"                  # Cloud SQL private IP
+  port: 3306
+  user: "dba_agent"                 # Dedicated monitoring user (SELECT + PROCESS only)
+  password: "${PROD_DB_PASSWORD}"   # Use env var or replace in local config
+  database: "your_database"         # Default schema for EXPLAIN queries
+  pool_size: 5                      # 5 connections: collectors + agent live tools need headroom
+  connect_timeout: 10
+
+# --- Monitoring Database (SQLite on local disk) ---
+# SQLite is the right choice here: single agent process, append-heavy writes,
+# periodic reads. No need for a separate Cloud SQL instance.
+monitoring_db:
+  path: "data/mysql_monitor.db"     # Relative to project root
+  wal_mode: true                    # WAL = concurrent reads during writes
+  busy_timeout_ms: 5000             # Wait up to 5s if DB is locked
+  max_size_mb: 5000                 # Max SQLite DB size in MB, override with SEEQL_DB_MAX_SIZE_MB
+
+# --- Collection Intervals (seconds) ---
+intervals:
+  fast_loop: 30           # Processlist, locks, active transactions
+  medium_loop: 300        # Query digests, wait events, global status, InnoDB, EXPLAIN
+  slow_loop: 1800         # Table sizes, index usage, schema snapshots, variables
+  retention_loop: 86400   # Daily retention cleanup
+
+# --- Collection Limits ---
+limits:
+  top_queries: 50         # How many top queries to capture per digest snapshot
+  explain_top_n: 10       # How many expensive queries to auto-EXPLAIN
+  processlist_query_max_len: 500   # Truncate long queries in processlist
+  digest_text_max_len: 1024        # Truncate digest text for storage (was 200, too short for EXPLAIN)
+  max_batch_size: 500              # Max rows per batch insert
+
+# --- Data Retention ---
+retention:
+  days: 90                      # Global default retention
+  metric_snapshots: 90
+  query_digests: 90
+  schema_snapshots: 180
+  lock_snapshots: 30
+  processlist_snapshots: 7    # Very high volume, keep shorter
+
+# --- Schemas to Exclude from Monitoring ---
+excluded_schemas:
+  - "mysql"
+  - "performance_schema"
+  - "sys"
+  - "information_schema"
+
+# --- GCP Settings ---
+gcp:
+  project_id: "your-gcp-project-id"
+  cloud_sql_instance_id: "your-instance-id"
+  region: "asia-south1"
+  vertex_region: "us-east5"              # Region for Vertex AI (Claude: us-east5, Gemini: us-central1)
+  monitoring_credentials_file: "${MONITORING_APPLICATION_CREDENTIALS}"  # Optional: separate SA for Monitoring/Logging
+
+# --- LLM Agent ---
+agent:
+  enabled: true                    # Set to true + provide API key to enable
+  model: "claude-opus-4-6"
+  max_tokens: 8192
+  max_tool_rounds: 10
+  schedule_seconds: 900             # 15 minutes
+  skip_quiet: true                  # Skip analysis when nothing interesting is happening
+  anthropic_api_key: "${ANTHROPIC_API_KEY}"
+  state_builder:
+    trend_threshold: 0.2            # 20% change = "up" or "down"
+    regression_threshold: 3.0       # 3x slowdown = regression
+    long_transaction_sec: 30
+    lookback_minutes: 5
+
+# --- Alerting ---
+alerting:
+  enabled: false                    # Set to true to enable alert evaluation
+  default_cooldown_minutes: 15
+  channels:
+    slack:
+      enabled: false
+      webhook_url: "${SLACK_WEBHOOK_URL}"
+    webhook:
+      enabled: false
+      url: "https://your-endpoint.com/alerts"
+      headers:
+        Authorization: "Bearer ${WEBHOOK_TOKEN}"
+    log:
+      enabled: true                 # Always-on fallback
+  rules:
+    lock_cascade:
+      enabled: true
+      severity: critical
+      min_count: 3
+      min_wait_seconds: 10
+      cooldown_minutes: 5
+      channels: [slack, log]
+    threads_running_spike:
+      enabled: true
+      severity: warning
+      multiplier: 4
+      cooldown_minutes: 15
+      channels: [slack, log]
+    query_regression:
+      enabled: true
+      severity: warning
+      threshold: 5.0
+      cooldown_minutes: 30
+      channels: [slack, log]
+    ddl_change:
+      enabled: true
+      severity: info
+      cooldown_minutes: 0
+      channels: [slack, log]
+    high_cpu:
+      enabled: true
+      severity: warning
+      threshold: 0.85
+      cooldown_minutes: 15
+      channels: [slack, log]
+    deadlock_detected:
+      enabled: true
+      severity: critical
+      cooldown_minutes: 5
+      channels: [slack, log]
+    anomaly_detection:
+      enabled: true
+      severity: warning
+      z_threshold: 3.0               # Standard deviations from baseline to trigger
+      cooldown_minutes: 30
+      channels: [slack, log]
+
+# --- Prometheus ---
+prometheus:
+  enabled: true
+  cache_ttl_seconds: 10
+
+# --- Logging ---
+logging:
+  level: "INFO"           # DEBUG for development, INFO for production
+  file: "logs/dba_agent.log"
+  max_bytes: 10485760     # 10 MB
+  backup_count: 5
+  max_total_mb: 500       # Max total log size, override with SEEQL_LOG_MAX_SIZE_MB

@@ -1,0 +1,95 @@
+<!-- Health bar partial — refreshed via HTMX every 30s -->
+<div x-data="{ details: false }">
+    <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 p-4 border-2 border-pencil wobbly cursor-pointer
+                {% if health == 'red' %}severity-red
+                {% elif health == 'yellow' %}severity-yellow
+                {% elif health == 'waiting' %}bg-erased/30
+                {% else %}severity-green{% endif %}"
+         style="transform: rotate(-0.3deg);"
+         @click="details = !details">
+
+        <!-- Health indicator -->
+        <div class="flex items-center gap-2">
+            <div class="w-5 h-5 rounded-full border-2 border-pencil
+                        {% if health == 'red' %}bg-marker
+                        {% elif health == 'yellow' %}bg-yellow-400
+                        {% elif health == 'waiting' %}bg-erased
+                        {% else %}bg-green-500{% endif %}"
+                 style="border-radius: 60% 40% 50% 50%;">
+            </div>
+            <span class="font-heading text-xl font-bold">
+                {% if health == 'red' %}ALERT
+                {% elif health == 'yellow' %}WARNING
+                {% elif health == 'waiting' %}WAITING
+                {% else %}HEALTHY{% endif %}
+            </span>
+        </div>
+
+        <div class="hidden sm:block border-l-2 border-dashed border-pencil/30 h-8"></div>
+
+        <!-- Quick stats -->
+        <div class="flex flex-wrap gap-4 font-body text-base flex-1">
+            {% if health == 'waiting' %}
+            <span class="text-pencil/60">
+                Waiting for first data collection — baseline will take ~30 seconds
+            </span>
+            {% else %}
+            <span>Threads: <strong class="font-heading">{{ thread_count }}</strong></span>
+            <span>Lock waits: <strong class="font-heading {% if lock_count > 0 %}text-marker{% endif %}">{{ lock_count }}</strong></span>
+            <span>Buffer pool:
+                <strong class="font-heading">
+                    {% if bp.hit_ratio is not none %}{{ "%.1f"|format(bp.hit_ratio) }}%{% else %}—{% endif %}
+                </strong>
+            </span>
+            {% if anomaly_count is defined and anomaly_count > 0 %}
+            <span>Anomalies: <strong class="font-heading text-purple-600">{{ anomaly_count }}</strong></span>
+            {% endif %}
+            {% endif %}
+        </div>
+
+        <span class="text-pencil/30 text-lg transition-transform duration-100"
+              :class="details ? 'rotate-90' : ''">&#9654;</span>
+    </div>
+
+    <!-- Expanded details -->
+    <div x-show="details" x-transition class="mt-2 p-4 border-2 border-dashed border-pencil/20 bg-white wobbly-sm font-body text-sm space-y-2">
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div>
+                <div class="text-xs text-pencil/50">Threads Running</div>
+                <div class="font-heading text-lg font-bold">{{ thread_count }}</div>
+                <div class="text-xs text-pencil/40">actively executing queries</div>
+            </div>
+            <div>
+                <div class="text-xs text-pencil/50">Lock Waits</div>
+                <div class="font-heading text-lg font-bold {% if lock_count > 5 %}text-marker{% elif lock_count > 0 %}text-yellow-600{% endif %}">{{ lock_count }}</div>
+                <div class="text-xs text-pencil/40">transactions blocked</div>
+            </div>
+            <div>
+                <div class="text-xs text-pencil/50">Buffer Pool Hit %</div>
+                <div class="font-heading text-lg font-bold {% if bp.hit_ratio is not none and bp.hit_ratio < 99 %}text-marker{% endif %}">
+                    {% if bp.hit_ratio is not none %}{{ "%.2f"|format(bp.hit_ratio) }}%{% else %}—{% endif %}
+                </div>
+                <div class="text-xs text-pencil/40">{% if bp.hit_ratio is not none and bp.hit_ratio < 99 %}below 99% — check buffer pool size{% else %}reads from memory{% endif %}</div>
+            </div>
+            {% if anomaly_count is defined and anomaly_count > 0 %}
+            <div>
+                <div class="text-xs text-pencil/50">Anomalies</div>
+                <div class="font-heading text-lg font-bold text-purple-600">{{ anomaly_count }}</div>
+                <div class="text-xs text-pencil/40">metrics outside baseline</div>
+            </div>
+            {% endif %}
+        </div>
+        {% if health == 'red' %}
+        <div class="text-xs text-marker mt-2">&#128680; Immediate attention needed — check Locks page and ToDo for actions.</div>
+        {% elif health == 'yellow' %}
+        <div class="text-xs text-yellow-700 mt-2">&#9888; Issues detected — check Active Alerts below or ToDo page for details.</div>
+        {% elif health == 'waiting' %}
+        <div class="text-xs text-pencil/60 mt-2">
+            &#9203; SeeQL is collecting its first data batch. Refresh in 30 seconds —
+            this status is NOT a false-positive HEALTHY, it means nothing has arrived yet.
+        </div>
+        {% else %}
+        <div class="text-xs text-green-700 mt-2">&#9989; All systems nominal. Check ToDo for optimization opportunities.</div>
+        {% endif %}
+    </div>
+</div>

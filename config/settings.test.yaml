@@ -1,0 +1,15 @@
+production_db:
+  host: "127.0.0.1"
+  port: 3307
+  pool_size: 1
+
+monitoring_db:
+  path: ":memory:"
+
+intervals:
+  fast_loop: 1
+  medium_loop: 1
+  slow_loop: 1
+
+logging:
+  level: "DEBUG"

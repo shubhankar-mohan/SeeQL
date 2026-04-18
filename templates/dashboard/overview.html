@@ -1,0 +1,184 @@
+{% extends "base.html" %}
+{% block title %}Overview{% endblock %}
+
+{% block content %}
+<div class="space-y-8">
+
+    <!-- Page title with doodle -->
+    <div class="flex items-center gap-3">
+        <h1 class="text-4xl md:text-5xl font-heading font-bold" style="transform: rotate(-1deg);">
+            Dashboard
+        </h1>
+        <span class="text-2xl bounce-gentle hidden md:inline-block">&#9729;</span>
+    </div>
+
+    <!-- Health Bar (HTMX auto-refresh) — ARIA live for screen readers -->
+    <div hx-get="/dashboard/partials/health-bar"
+         hx-trigger="every 30s"
+         hx-swap="innerHTML"
+         aria-live="polite"
+         aria-label="Database health status — auto-refreshing every 30 seconds">
+        {% include "partials/health_bar.html" %}
+    </div>
+
+    <!-- KPI Cards -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 md:gap-6">
+        <!-- Threads — running is LOAD-BEARING, connected is context (Phase 2.11.3) -->
+        <div class="bg-white border-2 border-pencil p-4 md:p-6 shadow-hard wobbly tape text-center"
+             style="transform: rotate(-1deg);">
+            <div class="text-sm font-body text-pencil/60 mb-1">
+                Threads Running
+                <span class="info-tip"
+                      data-tip="Threads_running is the count of threads actively executing SQL right now. This is the load-bearing metric during lock cascades — if it climbs while Threads_connected stays flat, you have contention. Threads_connected counts all open connections, which stays high with connection pooling regardless of health.">i</span>
+            </div>
+            <div class="text-4xl md:text-5xl font-heading font-bold text-marker">
+                {% if threads_running is not none %}{{ threads_running }}{% else %}{{ thread_count }}{% endif %}
+            </div>
+            <div class="text-xs text-pencil/60 font-body mt-1">
+                running (load)
+            </div>
+            {% if threads_connected is not none %}
+            <div class="text-xs text-pencil/50 font-body mt-1" style="color:#2d5da1">
+                &rarr; {{ threads_connected }} connected (pool)
+            </div>
+            {% endif %}
+        </div>
+
+        <!-- Lock Waits -->
+        <div class="bg-white border-2 border-pencil p-4 md:p-6 shadow-hard wobbly-md text-center
+                    {% if lock_count > 0 %}severity-yellow{% endif %}"
+             style="transform: rotate(1.5deg);">
+            <div class="text-sm font-body text-pencil/60 mb-1">
+                Lock Waits
+                <span class="info-tip" data-tip="Active InnoDB row lock waits. Each wait means a transaction is blocked by another. High counts risk cascading failures.">i</span>
+            </div>
+            <div class="text-4xl md:text-5xl font-heading font-bold {% if lock_count > 5 %}text-marker{% endif %}">
+                {{ lock_count }}
+            </div>
+        </div>
+
+        <!-- Buffer Pool Hit Ratio -->
+        <div class="bg-white border-2 border-pencil p-4 md:p-6 shadow-hard wobbly-sm text-center"
+             style="transform: rotate(-0.5deg);">
+            <div class="text-sm font-body text-pencil/60 mb-1">
+                Buffer Pool Hit %
+                <span class="info-tip" data-tip="Percentage of reads served from memory vs disk. Below 99% warrants investigation — it means InnoDB is hitting disk more than expected.">i</span>
+            </div>
+            <div class="text-4xl md:text-5xl font-heading font-bold">
+                {% if bp.hit_ratio is not none %}
+                    {{ "%.1f"|format(bp.hit_ratio) }}%
+                {% else %}
+                    —
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Top Query Latency -->
+        <div class="bg-white border-2 border-pencil p-4 md:p-6 shadow-hard wobbly text-center"
+             style="transform: rotate(0.8deg);">
+            <div class="text-sm font-body text-pencil/60 mb-1">
+                Top Query Avg
+                <span class="info-tip" data-tip="Average latency of the most time-consuming query. A sudden increase may indicate a plan change or resource contention.">i</span>
+            </div>
+            <div class="text-3xl md:text-4xl font-heading font-bold">
+                {% if top_query %}
+                    {{ "%.3f"|format(top_query.avg_time_sec) }}s
+                {% else %}
+                    —
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <!-- Charts Row -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <!-- QPS Chart -->
+        <div class="bg-white border-2 border-pencil p-4 shadow-hard-subtle wobbly-md" style="transform: rotate(0.3deg);">
+            <h3 class="font-heading text-xl mb-3" style="transform: rotate(-0.5deg);">
+                Queries / sec
+                <span class="info-tip" data-tip="Queries per second processed by MySQL. Sudden drops may indicate connection issues or a stalled workload.">i</span>
+            </h3>
+            <div style="position: relative; height: 220px;">
+                <canvas id="qps-chart"></canvas>
+            </div>
+        </div>
+
+        <!-- Threads Chart -->
+        <div class="bg-white border-2 border-pencil p-4 shadow-hard-subtle wobbly" style="transform: rotate(-0.3deg);">
+            <h3 class="font-heading text-xl mb-3" style="transform: rotate(0.5deg);">
+                Threads
+                <span class="info-tip" data-tip="Running = actively executing queries (contention signal). Connected = total open connections (capacity signal).">i</span>
+            </h3>
+            <div style="position: relative; height: 220px;">
+                <canvas id="threads-chart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <!-- Active Alerts (HTMX auto-refresh) — ARIA live -->
+    <div class="bg-white border-[3px] border-pencil p-5 md:p-6 shadow-hard wobbly-md tack"
+         style="transform: rotate(0.5deg);"
+         hx-get="/dashboard/partials/active-alerts"
+         hx-trigger="every 30s"
+         hx-swap="innerHTML"
+         aria-live="polite"
+         aria-label="Active database alerts — auto-refreshing every 30 seconds">
+        {% include "partials/active_alerts.html" %}
+    </div>
+
+    <!-- Recent Incidents (Phase 1.10) -->
+    {% include "partials/incidents_timeline.html" %}
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // QPS chart
+    SeeQL.fetchAndChart('/api/v1/metrics/qps?range=1h', 'qps-chart', {
+        label: 'QPS',
+        valueKey: 'value',
+        timeKey: 'snapshot_time',
+        color: '#2d5da1',
+    });
+
+    // Threads chart — running is the LOAD-BEARING metric during lock cascades
+    // (Phase 2.11.3). Render it bold red; connected goes thin dashed blue
+    // so the eye is drawn to running first.
+    fetch('/api/v1/metrics/threads?range=1h')
+        .then(r => r.json())
+        .then(data => {
+            SeeQL.createChart('threads-chart', {
+                type: 'line',
+                data: {
+                    labels: data.running.map(d => SeeQL.formatTime(d.t)),
+                    datasets: [
+                        {
+                            label: 'running (load)',
+                            data: data.running.map(d => d.v),
+                            borderColor: '#ff4d4d',
+                            backgroundColor: 'rgba(255,77,77,0.12)',
+                            borderWidth: 3,
+                            tension: 0.3,
+                            fill: true,
+                            pointRadius: 2,
+                        },
+                        {
+                            label: 'connected (pool)',
+                            data: data.connected.map(d => d.v),
+                            borderColor: '#2d5da1',
+                            borderWidth: 1.25,
+                            borderDash: [4, 4],
+                            tension: 0.3,
+                            fill: false,
+                            pointRadius: 0,
+                        }
+                    ]
+                },
+                options: SeeQL.defaultChartOptions(),
+            });
+        });
+});
+</script>
+{% endblock %}

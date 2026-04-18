@@ -1,0 +1,12 @@
+production_db:
+  host: "127.0.0.1"
+  port: 3307
+  user: "dba_agent"
+  database: "kira_db"
+  pool_size: 1
+
+monitoring_db:
+  path: "data/mysql_monitor_dev.db"
+
+logging:
+  level: "DEBUG"
