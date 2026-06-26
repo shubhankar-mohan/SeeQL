@@ -167,7 +167,7 @@ Key packages and files beyond the original collector scaffolding:
 - **`alerting/`** — Rule-based alerting engine. `engine.py` (evaluation loop), `rules.py` (6 built-in rules: lock_cascade, threads_running_spike, query_regression, ddl_change, high_cpu, deadlock_detected), `anomaly.py` (z-score anomaly detection — separate layer, not a rule), `anomaly_store.py` (anomaly event persistence), `incidents.py` (gap-based incident windowing), `channels.py` (3 channels: Slack, webhook, log), `models.py` (alert data models)
 - **`api/`** — HTTP endpoints. `prometheus.py` (Prometheus `/metrics` endpoint, ~20 gauges/counters), `agent_routes.py`, `dashboard_routes.py`, `dashboard_api.py`, `query_helpers.py`
 - **`parsers/`** — Output parsers. `innodb_status.py` (parses `SHOW ENGINE INNODB STATUS`)
-- **`storage/`** — SQLite layer. `schema.sql` (26 tables), `retention.py` (daily cleanup of old rows, per-table overrides), `writer.py`
+- **`storage/`** — SQLite layer. `schema.sql` (30 tables), `retention.py` (daily cleanup of old rows, per-table overrides), `writer.py`
 - **`seeql/`** — CLI-support package. `doctor.py` (preflight checks for `seeql doctor`), `errors.py` (E001-E010 error catalog)
 - **`scheduler/`** — APScheduler wiring (`runner.py`)
 - **`templates/`**, **`static/`** — HTMX dashboard views (`dashboard/overview.html`, partials including `incidents_timeline.html`)
@@ -182,14 +182,14 @@ Key packages and files beyond the original collector scaffolding:
 - **Config via YAML** with env var substitution for secrets
 - **Logging:** structured format with collector name, timing
 - **Error handling:** fail independently, log, continue
-- **LLM provider:** configurable between Gemini (Vertex AI) and Claude (Anthropic API). Default: gemini-2.0-flash
+- **LLM provider:** configurable between Gemini (Vertex AI) and Claude (Anthropic API or Vertex AI). Default (shipped in `settings.yaml`): claude-opus-4-6 via Vertex AI; falls back to gemini-2.0-flash if no Claude model/credentials are configured.
 
 ## Current State
 
 ### Done
 - [x] Project structure and config system
 - [x] MySQL connection pooling for production DB (multi-server via `ServerContext`)
-- [x] SQLite monitoring storage with WAL mode (26 tables)
+- [x] SQLite monitoring storage with WAL mode (30 tables)
 - [x] Fast loop (4 collectors): processlist, lock waits, transactions, metadata locks
 - [x] Medium loop (11 collectors): query digests, wait events, table IO, InnoDB metrics, buffer pool, global status deltas, GCP metrics, GCP slow log, InnoDB status, execution stages, EXPLAIN capture
 - [x] Slow loop (4 collectors): schema snapshots with DDL change detection, unused indexes, redundant indexes, global variables
@@ -206,13 +206,29 @@ Key packages and files beyond the original collector scaffolding:
 - [x] Structured State Builder (pre-processor for LLM input)
 - [x] LLM Agent layer with tool-use (supports Gemini via Vertex AI and Claude via Anthropic API; default model: claude-opus-4-6 via Vertex AI)
 - [x] Alerting with 6 built-in rules and 3 channels (Slack, webhook, log)
-- [x] **Anomaly detection layer** (`alerting/anomaly.py`, 464 lines): z-score, same-hour-same-weekday baselines over 28 days with 24h + all-data fallbacks, 8 metrics, zero-stddev guard, cold-start handling, integrated with alerting engine and state builder
+- [x] **Anomaly detection layer** (`alerting/anomaly.py`, 615 lines): z-score, same-hour-same-weekday baselines over 28 days with 24h + all-data fallbacks, 7 active metrics (query-latency per-digest planned), zero-stddev guard, cold-start handling, integrated with alerting engine and state builder
 - [x] Prometheus endpoint at `/metrics` (~20 gauges/counters)
 - [x] Index analysis collectors (unused and redundant index detection)
 - [x] API layer: agent routes, dashboard routes, dashboard API
 - [x] **Anomaly event persistence + incident windowing** (`alerting/anomaly_store.py`, `alerting/incidents.py`): gap-based clustering with duration cap, two new tables (`anomaly_events`, `incident_windows`)
 - [x] **Incident replay** (`agent/replay.py`): `seeql replay --from X --to Y` / `--incident N` / `--latest` with chronological timeline builder + LLM root cause analysis + timeline-only fallback
 - [x] **Dashboard incidents timeline widget** with HTMX auto-refresh + ARIA live regions
+- [x] **Inbound webhooks + 3-phase root-cause investigator**:
+  - `POST /webhooks/{provider}` with HMAC verification (`api/webhook_routes.py`).
+  - Four adapters: generic, GCP Cloud Monitoring, PagerDuty, Grafana Alertmanager (`alerting/inbound/`).
+  - Investigator orchestrator (`alerting/investigator.py`): Phase 1 triage (zero new MySQL queries — state builder + timeline + missing-index correlator), Phase 2 LLM with tool-budget enforcement via `run_llm_analysis(tool_budget=...)`, Phase 3 continuous sampling (`alerting/phase3.py`) with load-guard on `Threads_running` + per-minute query budget + alert-type-specific clearance conditions.
+  - Missing-index correlator (`alerting/correlators/missing_index.py`) joins `query_digest_snapshots` + `explain_captures` + `ddl_changes` + `unused_index_snapshots` + `redundant_index_snapshots` into structured evidence.
+  - Four new SQLite tables: `inbound_alerts`, `investigations`, `investigation_samples`, `investigation_findings`.
+  - CLI: `seeql investigations list | show <id> | trigger | abort <id>`.
+  - Dashboard partial `templates/partials/investigations_panel.html` + JSON API `/api/v1/investigations/recent`.
+  - Config sections `webhooks:` and `investigator:` in `settings.yaml`.
+- [x] **MCP server for external Claude clients** (`mcp_server/`):
+  - 28 tools exposed via Model Context Protocol covering investigations, incidents, state reports, query history, cached EXPLAINs, missing-index correlator, live MySQL reads (processlist/locks/transactions/innodb_status/index_stats/table_status), plus gated action tools (`seeql_trigger_investigation`, `seeql_abort_investigation`, `seeql_explain_query`).
+  - 7 resources under `seeql://` scheme, 5 prompts (`seeql/rca`, `seeql/review_investigation`, `seeql/explain_digest`, `seeql/schema_audit`, `seeql/investigate_window`).
+  - Safety layer (`mcp_server/safety.py`): server allowlist, per-session budget (live_calls, explain_calls), per-tool rate limiter, action gate.
+  - Two transports: stdio (for Claude Desktop / Claude Code subprocess mode) and streamable HTTP/SSE (for remote clients) with bearer-token middleware.
+  - CLI: `seeql mcp [--http] [--port] [--bind]`. Config section `mcp:` in `settings.yaml`. Requires `pip install 'seeql[mcp]'` or `pip install 'mcp>=1.2'`.
+  - Setup guide: `docs/mcp.md`.
 
 ### Not Yet Built
 - [ ] (Nothing at this level — Phase 4 items in PLAN.md are deferred until real-world signal)
@@ -236,7 +252,7 @@ The agent discovers hot tables automatically from `performance_schema` aggregate
 - High-write hot tables (often named `users`, `members`, `orders`, `transactions`) that see both OLTP writes and occasional batch OLAP aggregations — this is the classic setup for lock cascades.
 - Schema size and row counts vary widely; SeeQL has been validated against ~100-table schemas with tables up to ~10M rows.
 
-The monitoring SQLite database has 26 tables (see `storage/schema.sql`):
+The monitoring SQLite database has 30 tables (see `storage/schema.sql`):
 - `query_digest_snapshots` — The most important. Performance per query fingerprint over time.
 - `ddl_changes` — The unique value-add. Schema change history with before/after DDL.
 - `lock_wait_snapshots` — Lock contention history for incident investigation.

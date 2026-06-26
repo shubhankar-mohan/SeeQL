@@ -19,7 +19,9 @@
 
 ### 1.2 What is NOT yet built
 
-The entire "Incident Replay + Anomaly Persistence" CEO plan is unimplemented. The anomaly detector produces `AnomalyResult` objects that are consumed by alerts and then thrown away — nothing is persisted, nothing is grouped into incidents, and there is no replay entry point.
+> **Update (shipped):** This plan has since landed in full. Anomaly events are persisted to `anomaly_events`, grouped into `incident_windows` (`alerting/anomaly_store.py`, `alerting/incidents.py`), and replayable via `seeql replay` (`agent/replay.py`). The gap description below is preserved for historical context.
+
+The anomaly detector produces `AnomalyResult` objects that are consumed by alerts and then thrown away — nothing is persisted, nothing is grouped into incidents, and there is no replay entry point.
 
 ### 1.3 Known defects (from reviews + TODOS)
 
@@ -132,7 +134,7 @@ hit_ratio = 1 - (Innodb_buffer_pool_reads / Innodb_buffer_pool_read_requests)
 
 ---
 
-## Phase 1 — Incident Replay + Anomaly Persistence (ACTIVE CEO PLAN)
+## Phase 1 — Incident Replay + Anomaly Persistence (✅ COMPLETE)
 
 **Goal:** Persist anomaly events, group them into incident windows, expose a `seeql replay` CLI, and surface incidents in the dashboard and Slack. This is the differentiator — no other open-source MySQL monitor does incident replay.
 

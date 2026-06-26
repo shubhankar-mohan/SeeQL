@@ -13,7 +13,9 @@ Metrics monitored:
   - Memory utilization
   - Lock wait frequency
   - Buffer pool hit ratio (drop detection)
-  - Query latency (per-digest)
+
+(Query latency per-digest is planned but not yet implemented; 7 metrics
+are active in METRIC_CONFIGS.)
 """
 
 import json
