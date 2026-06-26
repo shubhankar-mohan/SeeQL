@@ -7,7 +7,7 @@ alert storms.
 
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from alerting.models import Alert
 from alerting.rules import RULE_EVALUATORS
@@ -165,7 +165,7 @@ def _in_cooldown(rule_name: str, cooldown_minutes: int) -> bool:
 
     try:
         last_dt = datetime.fromisoformat(last_fired)
-        return datetime.utcnow() - last_dt < timedelta(minutes=cooldown_minutes)
+        return datetime.now(timezone.utc).replace(tzinfo=None) - last_dt < timedelta(minutes=cooldown_minutes)
     except (ValueError, TypeError):
         return False
 

@@ -13,7 +13,7 @@ Markdown string (for the LLM prompt).
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 from agent import queries as Q
 from config import get_config
@@ -59,7 +59,7 @@ def build_state_report(since: str | None = None, server_id: str | None = None) -
     regression_threshold = config.get("regression_threshold", 3.0)
     long_txn_sec = config.get("long_transaction_sec", 30)
 
-    report = StateReport(generated_at=datetime.utcnow().isoformat())
+    report = StateReport(generated_at=datetime.now(timezone.utc).replace(tzinfo=None).isoformat())
 
     with get_mon_reader() as conn:
         # ---------------------------------------------------------------
@@ -252,7 +252,7 @@ def _get_last_analysis_time(conn, server_id: str = "default") -> str:
     if row and row["last_at"]:
         return row["last_at"]
     from datetime import timedelta
-    return (datetime.utcnow() - timedelta(hours=1)).isoformat()
+    return (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1)).isoformat()
 
 
 def _build_incidents(conn, server_id: str) -> list[dict]:

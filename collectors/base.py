@@ -18,7 +18,7 @@ from __future__ import annotations
 import time
 import logging
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import mysql.connector
@@ -89,7 +89,7 @@ class BaseCollector(ABC):
             server = registry.get_server(default_id)
             ctx = server.to_context()
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
 
         for attempt in range(MAX_RETRIES + 1):
             start = time.monotonic()

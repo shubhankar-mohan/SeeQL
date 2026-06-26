@@ -1,7 +1,7 @@
 """Tests for anomaly detection module."""
 
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -26,7 +26,7 @@ def anomaly_db(tmp_path, test_config):
 
     # Seed global_status_snapshots with Threads_running data
     # 30 samples, all >15 minutes old, mean ~10, small variance
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     values = [8, 9, 10, 11, 12, 9, 10, 13, 8, 10, 11, 9, 10, 12, 10,
               8, 11, 10, 9, 10, 10, 11, 9, 10, 12, 10, 8, 11, 10, 9]
     for i, val in enumerate(values):

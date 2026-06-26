@@ -1,7 +1,7 @@
 """Tests for storage module (connection + writer)."""
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -36,7 +36,7 @@ class TestBatchInsert:
         test_config["monitoring_db"]["path"] = str(db_path)
         config_module._config = test_config
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         rows = [
             {
                 "snapshot_time": now,
@@ -79,7 +79,7 @@ class TestWriteFunctions:
         return self.conn.execute(f"SELECT COUNT(*) as c FROM {table}").fetchone()["c"]
 
     def test_write_processlist(self):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         rows = [{
             "snapshot_time": now, "thread_id": 1, "pid": 10,
             "user": "app", "db": "mydb", "command": "Query",
@@ -89,7 +89,7 @@ class TestWriteFunctions:
         assert self._count_rows("processlist_snapshots") == 1
 
     def test_write_lock_waits(self):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         rows = [{
             "snapshot_time": now,
             "waiting_trx_id": "T1", "waiting_pid": 10,
@@ -103,7 +103,7 @@ class TestWriteFunctions:
         assert self._count_rows("lock_wait_snapshots") == 1
 
     def test_write_transactions(self):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         rows = [{
             "snapshot_time": now, "trx_id": "T1", "trx_state": "RUNNING",
             "trx_started": "2025-01-01 10:00:00", "age_sec": 30,
@@ -115,7 +115,7 @@ class TestWriteFunctions:
         assert self._count_rows("transaction_snapshots") == 1
 
     def test_write_metadata_locks(self):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         rows = [{
             "snapshot_time": now, "object_type": "TABLE",
             "object_schema": "mydb", "object_name": "users",
@@ -126,7 +126,7 @@ class TestWriteFunctions:
         assert self._count_rows("metadata_lock_snapshots") == 1
 
     def test_write_query_digests(self):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         rows = [{
             "snapshot_time": now, "digest": "abc123", "digest_text": "SELECT ?",
             "schema_name": "mydb", "exec_count": 100,
@@ -142,7 +142,7 @@ class TestWriteFunctions:
         assert self._count_rows("query_digest_snapshots") == 1
 
     def test_write_global_status(self):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         rows = [{
             "snapshot_time": now, "variable_name": "Questions",
             "raw_value": 1000, "delta_value": 500, "per_second": 1.67,
@@ -151,7 +151,7 @@ class TestWriteFunctions:
         assert self._count_rows("global_status_snapshots") == 1
 
     def test_write_innodb_metrics(self):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         rows = [{
             "snapshot_time": now, "metric_name": "buffer_pool_reads",
             "subsystem": "buffer", "count_value": 12345, "metric_type": "status_counter",
@@ -160,7 +160,7 @@ class TestWriteFunctions:
         assert self._count_rows("innodb_metric_snapshots") == 1
 
     def test_write_wait_events(self):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         rows = [{
             "snapshot_time": now, "event_name": "wait/io/file",
             "count_star": 50000, "total_wait_sec": 1.234, "avg_wait_sec": 0.00002,
@@ -169,7 +169,7 @@ class TestWriteFunctions:
         assert self._count_rows("wait_event_snapshots") == 1
 
     def test_write_table_io(self):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         rows = [{
             "snapshot_time": now, "object_schema": "mydb", "table_name": "users",
             "count_read": 1000, "count_write": 500, "count_fetch": 1000,
@@ -180,7 +180,7 @@ class TestWriteFunctions:
         assert self._count_rows("table_io_snapshots") == 1
 
     def test_write_buffer_pool(self):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         rows = [{
             "snapshot_time": now, "pool_id": 0, "pool_size": 65536,
             "free_buffers": 1000, "database_pages": 64000, "dirty_pages": 100,
@@ -191,7 +191,7 @@ class TestWriteFunctions:
         assert self._count_rows("buffer_pool_snapshots") == 1
 
     def test_write_schema_snapshots(self):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         rows = [{
             "snapshot_time": now, "table_schema": "mydb", "table_name": "users",
             "schema_hash": "abc", "index_hash": "def", "create_stmt": "CREATE TABLE ...",
@@ -201,7 +201,7 @@ class TestWriteFunctions:
         assert self._count_rows("schema_snapshots") == 1
 
     def test_write_ddl_changes(self):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         rows = [{
             "detected_at": now, "table_schema": "mydb", "table_name": "users",
             "change_type": "schema",

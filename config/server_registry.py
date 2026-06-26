@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 from config.server_context import ServerContext
 
@@ -127,7 +127,7 @@ class ServerRegistry:
         """Upsert server registry into the `servers` SQLite table."""
         from storage.connection import get_mon_connection
 
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         with get_mon_connection() as conn:
             for s in self._servers.values():
                 import json

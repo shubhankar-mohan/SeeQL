@@ -1,7 +1,7 @@
 """Alert data models."""
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 
 
@@ -24,4 +24,4 @@ class Alert:
 
     def __post_init__(self):
         if not self.fired_at:
-            self.fired_at = datetime.utcnow().isoformat()
+            self.fired_at = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
