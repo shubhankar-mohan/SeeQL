@@ -152,6 +152,10 @@ def _apply_env_overrides(config: dict):
     if _env("SEEQL_SLOW_INTERVAL"):
         config.setdefault("intervals", {})["slow_loop"] = int(_env("SEEQL_SLOW_INTERVAL"))
 
+    # Monitoring DB path (useful for Docker bind-mounts and test subprocesses)
+    if _env("SEEQL_MON_DB_PATH"):
+        config.setdefault("monitoring_db", {})["path"] = _env("SEEQL_MON_DB_PATH")
+
     # Size limits
     if _env("SEEQL_DB_MAX_SIZE_MB"):
         config.setdefault("monitoring_db", {})["max_size_mb"] = int(_env("SEEQL_DB_MAX_SIZE_MB"))

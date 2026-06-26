@@ -299,6 +299,200 @@ def cmd_incidents(args):
               f"{row['status']:<10} {start:<20} {row['event_count']:<7} {metrics}")
 
 
+def cmd_investigations(args):
+    """Manage webhook-triggered root-cause investigations."""
+    import json
+    from datetime import datetime, timezone
+    from storage.connection import get_mon_reader
+    from storage import writer
+
+    sub_cmd = getattr(args, "inv_cmd", None)
+
+    if sub_cmd == "list":
+        where: list[str] = []
+        params: list = []
+        if getattr(args, "server", None):
+            where.append("i.server_id = ?")
+            params.append(args.server)
+        if getattr(args, "status", None):
+            where.append("i.status = ?")
+            params.append(args.status)
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+        params.append(args.limit)
+
+        sql = f"""
+            SELECT i.id, i.server_id, i.status, i.started_at, i.ended_at,
+                   i.confidence, i.root_cause_summary,
+                   a.alert_type, a.severity, a.provider
+            FROM investigations i
+            JOIN inbound_alerts a ON i.inbound_alert_id = a.id
+            {where_sql}
+            ORDER BY i.started_at DESC
+            LIMIT ?
+        """
+        with get_mon_reader() as conn:
+            rows = conn.execute(sql, tuple(params)).fetchall()
+
+        if not rows:
+            print("No investigations.")
+            return
+
+        print(
+            f"{'ID':<5} {'PROVIDER':<10} {'TYPE':<22} {'SEV':<9} "
+            f"{'STATUS':<18} {'SERVER':<16} {'STARTED':<20} {'CONF':<5}"
+        )
+        print("-" * 120)
+        for r in rows:
+            started = (r["started_at"] or "")[:19]
+            conf = f"{r['confidence']:.2f}" if r["confidence"] is not None else "-"
+            print(
+                f"{r['id']:<5} {r['provider']:<10} {r['alert_type']:<22} "
+                f"{r['severity']:<9} {r['status']:<18} {r['server_id']:<16} "
+                f"{started:<20} {conf:<5}"
+            )
+        return
+
+    if sub_cmd == "show":
+        with get_mon_reader() as conn:
+            inv = conn.execute(
+                """
+                SELECT i.*, a.provider, a.alert_type, a.severity AS alert_severity,
+                       a.summary, a.external_id, a.received_at
+                FROM investigations i
+                JOIN inbound_alerts a ON i.inbound_alert_id = a.id
+                WHERE i.id = ?
+                """,
+                (args.id,),
+            ).fetchone()
+            if inv is None:
+                print(f"investigation {args.id} not found", file=sys.stderr)
+                sys.exit(2)
+
+            findings = conn.execute(
+                "SELECT id, phase, kind, severity, content, created_at "
+                "FROM investigation_findings WHERE investigation_id = ? ORDER BY id",
+                (args.id,),
+            ).fetchall()
+            samples = conn.execute(
+                "SELECT sample_type, COUNT(*) AS n, "
+                "       MIN(sampled_at) AS first_at, MAX(sampled_at) AS last_at, "
+                "       SUM(query_count) AS q "
+                "FROM investigation_samples WHERE investigation_id = ? "
+                "GROUP BY sample_type ORDER BY sample_type",
+                (args.id,),
+            ).fetchall()
+
+        print(f"Investigation #{inv['id']} — {inv['alert_type']} / {inv['alert_severity']}")
+        print(f"  provider:       {inv['provider']}")
+        print(f"  server_id:      {inv['server_id']}")
+        print(f"  status:         {inv['status']}")
+        print(f"  started_at:     {inv['started_at']}")
+        print(f"  ended_at:       {inv['ended_at'] or '-'}")
+        print(f"  confidence:     {inv['confidence'] if inv['confidence'] is not None else '-'}")
+        print(f"  queries_total:  {inv['query_count_total']}")
+        print(f"  root cause:     {inv['root_cause_summary'] or '-'}")
+        print(f"  external_id:    {inv['external_id']}")
+        print(f"  alert summary:  {inv['summary']}")
+        print()
+
+        print("Samples (Phase 3):")
+        if samples:
+            for s in samples:
+                print(
+                    f"  {s['sample_type']:<18} n={s['n']:<4} "
+                    f"queries={s['q'] or 0:<4} "
+                    f"window {(s['first_at'] or '')[:19]} → {(s['last_at'] or '')[:19]}"
+                )
+        else:
+            print("  (none)")
+        print()
+
+        print("Findings:")
+        for f in findings:
+            content_preview = (f["content"] or "")[:240].replace("\n", " ")
+            print(
+                f"  #{f['id']:<4} phase={f['phase']} kind={f['kind']:<12} "
+                f"sev={f['severity'] or '-':<8} {(f['created_at'] or '')[:19]}"
+            )
+            print(f"      {content_preview}")
+        return
+
+    if sub_cmd == "trigger":
+        server = getattr(args, "server", None)
+        if server is None:
+            from config.server_registry import get_server_registry
+            server = get_server_registry().get_default_server_id()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        alert_id = writer.write_inbound_alert({
+            "provider": "cli",
+            "received_at": now_iso,
+            "server_id": server,
+            "external_id": f"cli:{now_iso}",
+            "alert_type": args.type,
+            "severity": args.severity,
+            "summary": args.summary,
+            "payload": json.dumps({"origin": "cli"}),
+            "signature_verified": 0,
+        })
+        inv_id = writer.write_investigation({
+            "inbound_alert_id": alert_id,
+            "server_id": server,
+            "started_at": now_iso,
+            "status": "queued",
+        })
+        print(f"Triggered investigation #{inv_id} (alert #{alert_id})")
+        # Run inline — no running scheduler from the CLI.
+        from alerting.investigator import run_investigation
+        result = run_investigation(inv_id)
+        print(f"Result: {result}")
+        return
+
+    if sub_cmd == "abort":
+        rc = writer.update_investigation(
+            args.id,
+            status="aborted",
+            abort_reason=args.reason,
+            ended_at=datetime.now(timezone.utc).isoformat(),
+        )
+        if rc == 0:
+            print(f"investigation {args.id} not found or already terminal", file=sys.stderr)
+            sys.exit(2)
+        print(f"Aborted investigation #{args.id}")
+        return
+
+    print(
+        "Usage: seeql investigations {list|show|trigger|abort} ...",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
+def cmd_mcp(args):
+    """Run the SeeQL MCP server."""
+    from config import get_config
+    mcp_cfg = dict(get_config().get("mcp") or {})
+    if not mcp_cfg.get("enabled", True):
+        print("MCP server is disabled (set mcp.enabled: true in settings.yaml)",
+              file=sys.stderr)
+        sys.exit(2)
+
+    from mcp_server.server import run_stdio, run_http
+
+    if args.http:
+        http_cfg = dict(mcp_cfg.get("http") or {})
+        bind = args.bind or http_cfg.get("bind", "127.0.0.1")
+        port = args.port or int(http_cfg.get("port", 8765))
+        run_http(
+            name=mcp_cfg.get("server_name", "seeql"),
+            host=bind,
+            port=port,
+            auth=http_cfg.get("auth"),
+            auth_token=http_cfg.get("auth_token"),
+        )
+    else:
+        run_stdio(name=mcp_cfg.get("server_name", "seeql"))
+
+
 def cmd_api(with_scheduler: bool = True):
     """Start the API server, optionally with the scheduler."""
     import uvicorn
@@ -417,6 +611,48 @@ def _main_inner():
     list_p.add_argument("--limit", type=int, default=20)
     list_p.add_argument("--server", default=None)
 
+    inv_p = sub.add_parser(
+        "investigations",
+        help="Manage webhook-triggered investigations",
+    )
+    inv_sub = inv_p.add_subparsers(dest="inv_cmd", metavar="<subcommand>")
+
+    inv_list = inv_sub.add_parser("list", help="List recent investigations")
+    inv_list.add_argument("--status", default=None,
+                          help="Filter by status (queued, phase1..phase3, completed, aborted, load_guard_paused)")
+    inv_list.add_argument("--server", default=None)
+    inv_list.add_argument("--limit", type=int, default=20)
+
+    inv_show = inv_sub.add_parser("show", help="Show a single investigation in detail")
+    inv_show.add_argument("id", type=int)
+
+    inv_trigger = inv_sub.add_parser(
+        "trigger",
+        help="Manually trigger an investigation (testing / incident drills)",
+    )
+    inv_trigger.add_argument("--type", default="default",
+                             help="Alert type (e.g. missing_index, lock_cascade)")
+    inv_trigger.add_argument("--severity", default="warning",
+                             choices=["critical", "warning", "info"])
+    inv_trigger.add_argument("--server", default=None,
+                             help="Server ID (defaults to primary)")
+    inv_trigger.add_argument("--summary", default="Manual trigger via CLI")
+
+    inv_abort = inv_sub.add_parser("abort", help="Abort a running investigation")
+    inv_abort.add_argument("id", type=int)
+    inv_abort.add_argument("--reason", default="cli_abort")
+
+    mcp_p = sub.add_parser(
+        "mcp",
+        help="Run the SeeQL MCP server (stdio by default, HTTP with --http)",
+    )
+    mcp_p.add_argument("--http", action="store_true",
+                       help="Use streamable HTTP/SSE transport instead of stdio")
+    mcp_p.add_argument("--port", type=int, default=None,
+                       help="HTTP port (default: mcp.http.port in settings.yaml, or 8765)")
+    mcp_p.add_argument("--bind", default=None,
+                       help="HTTP bind address (default: mcp.http.bind, or 127.0.0.1)")
+
     args = parser.parse_args()
     setup_logging()
 
@@ -454,6 +690,10 @@ def _main_inner():
         return cmd_replay(args)
     if args.cmd == "incidents":
         return cmd_incidents(args)
+    if args.cmd == "investigations":
+        return cmd_investigations(args)
+    if args.cmd == "mcp":
+        return cmd_mcp(args)
 
     # No subcommand → continuous collector (same as before)
     cmd_run()

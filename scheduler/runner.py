@@ -276,6 +276,15 @@ def run_scheduler():
     _run_slow()
     logger.info("Initial collection complete.")
 
+    # Abort any investigations that were mid-flight when the process died —
+    # otherwise they sit in phase1/phase2/phase3 forever with no scheduler
+    # job backing them.
+    try:
+        from alerting.phase3 import sweep_stale_investigations
+        sweep_stale_investigations(max_age_minutes=10)
+    except Exception as e:
+        logger.debug(f"Skipping investigation sweep: {e}")
+
     _install_signal_handlers()
     scheduler.start()
     logger.info("Scheduler started. Press Ctrl+C (or send SIGTERM) to stop.")

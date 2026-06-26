@@ -136,6 +136,75 @@ alerting:
       cooldown_minutes: 30
       channels: [slack, log]
 
+# --- Inbound Webhooks (external alerts → SeeQL investigator) ---
+webhooks:
+  enabled: false                      # Master switch for POST /webhooks/<provider>
+  dedup_window_minutes: 5             # Same (provider, external_id) within window
+                                      # attaches to the existing investigation
+  rate_limit_per_minute: 60           # Per-provider token bucket
+  callback_enabled: false             # POST findings back to alert.callback_url
+  providers:
+    generic:
+      enabled: false
+      secret: "${SEEQL_GENERIC_WEBHOOK_SECRET}"
+      default_server_id: "default"
+    gcp:
+      enabled: false
+      secret: "${SEEQL_GCP_WEBHOOK_SECRET}"
+      verify_oidc: true               # Prefer Google-signed OIDC over HMAC
+      policy_map:                     # Cloud Monitoring policy → SeeQL trigger
+        high-cpu-policy: high_cpu
+        lock-wait-policy: lock_cascade
+        slow-query-policy: missing_index
+    pagerduty:
+      enabled: false
+      secret: "${SEEQL_PAGERDUTY_SECRET}"
+    grafana:
+      enabled: false
+      secret: "${SEEQL_GRAFANA_SECRET}"
+
+# --- Root-cause Investigator (3-phase orchestrator invoked by webhooks) ---
+investigator:
+  enabled: true
+  max_concurrent_per_server: 2
+  queue_depth: 4
+  phase1_timeout_seconds: 10
+  phase2_timeout_seconds: 120
+  phase2_max_tool_rounds: 8
+  phase2_live_tool_cap: 10            # live-MySQL tool calls allowed in Phase 2
+  phase2_explain_cap: 2               # expensive explain_query calls
+  phase3_sampling_interval_seconds: 20
+  phase3_max_duration_seconds: 480    # 8 min hard cap
+  query_budget_per_minute: 20         # rolling window budget
+  load_guard_threads_running_threshold: 40
+  load_guard_cpu_threshold: 0.90
+  load_guard_pause_seconds: 60
+  clearance:
+    lock_waits: 1
+    max_wait_seconds: 5
+    cpu_pct: 0.75
+    rows_examined_ratio: 100
+  confidence_completion_threshold: 0.8
+
+# --- MCP Server (Model Context Protocol — external Claude clients) ---
+mcp:
+  enabled: true
+  server_name: "seeql"
+  allowed_servers: []                 # Empty = any server SeeQL knows about
+  action_tools_enabled: false         # Master gate for trigger/abort/explain_query
+  allow_trigger: false                # Fine-grain: seeql_trigger_investigation
+  allow_abort: false                  # Fine-grain: seeql_abort_investigation
+  allow_explain_query: false          # Fine-grain: seeql_explain_query (arbitrary EXPLAIN)
+  budget:
+    live_calls_per_session: 30
+    explain_calls_per_session: 5
+    tools_per_minute: 60
+  http:
+    bind: "127.0.0.1"
+    port: 8765
+    auth: "bearer"                    # bearer | none (none warns if bind != 127.0.0.1)
+    auth_token: "${SEEQL_MCP_TOKEN}"
+
 # --- Prometheus ---
 prometheus:
   enabled: true
