@@ -43,6 +43,11 @@ Issues = "https://github.com/shubhankar-mohan/SeeQL/issues"
 [project.optional-dependencies]
 dev = ["pytest>=7.4", "pytest-cov>=4.1", "pytest-mock>=3.12", "ruff>=0.1.0", "httpx>=0.25"]
 api = ["fastapi>=0.104", "uvicorn[standard]>=0.24", "jinja2>=3.1", "aiofiles>=23.0"]
+# MCP: expose SeeQL's surface via Model Context Protocol so Claude Desktop /
+# Claude Code / remote MCP clients can use it for RCA. Ships tools for
+# investigations, incidents, state reports, missing-index correlation,
+# plus live-MySQL reads behind a session budget.
+mcp = ["mcp>=1.2"]
 # GCP extra: Cloud Monitoring + Cloud Logging collectors, plus google-genai
 # for Gemini / Vertex AI Claude via the google SDK path.
 gcp = [
@@ -57,7 +62,7 @@ gcp = [
 py-modules = ["main"]
 
 [tool.setuptools.packages.find]
-include = ["config*", "collectors*", "storage*", "parsers*", "scheduler*", "api*", "agent*", "alerting*", "seeql*"]
+include = ["config*", "collectors*", "storage*", "parsers*", "scheduler*", "api*", "agent*", "alerting*", "seeql*", "mcp_server*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
