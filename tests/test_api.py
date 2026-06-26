@@ -51,26 +51,39 @@ class TestHealthEndpoint:
         assert data["status"] == "degraded"
 
 
-@pytest.mark.skip(
-    reason="Stale — uses pre-ServerContext collector API (get_prod_connection). "
-    "Needs rewrite against ctx.get_connection()."
-)
 class TestCollectEndpoints:
-    @patch("collectors.fast_loop.get_prod_connection")
     @patch("collectors.fast_loop.writer")
-    def test_collect_fast(self, mock_writer, mock_conn_ctx, api_client):
+    @patch("storage.connection.get_prod_connection")
+    def test_collect_fast(self, mock_get_conn, mock_writer, api_client):
+        # The endpoint calls run_fast_loop() with no ctx, so each collector
+        # falls back to the default server from the registry, whose
+        # ctx.get_connection() ultimately calls storage.connection.get_prod_connection.
+        # Reset the registry singleton so it reloads the test config's default server.
+        import config.server_registry as sr
+        sr._registry = None
+
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_cursor.fetchall.return_value = []
         mock_conn.cursor.return_value = mock_cursor
-        mock_conn_ctx.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        mock_conn_ctx.return_value.__exit__ = MagicMock(return_value=False)
+
+        cm = MagicMock()
+        cm.__enter__.return_value = mock_conn
+        cm.__exit__.return_value = False
+        mock_get_conn.return_value = cm
 
         resp = api_client.post("/collect/fast")
         assert resp.status_code == 200
         data = resp.json()
         assert data["loop"] == "fast"
         assert "results" in data
+        # All four fast collectors should have run and succeeded.
+        assert data["results"] == {
+            "processlist": True,
+            "lock_waits": True,
+            "transactions": True,
+            "metadata_locks": True,
+        }
 
 
 class TestIncidentsEndpoint:

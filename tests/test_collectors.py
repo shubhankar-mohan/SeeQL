@@ -1,22 +1,15 @@
 """Tests for collector modules.
 
-NOTE: Most tests in this file are currently skipped because they target a
-pre-`ServerContext` collector API (`collectors.fast_loop.get_prod_connection`)
-that no longer exists. Collectors now take a `ServerContext` argument so the
-same collector can run against multiple servers. These tests should be
-rewritten against the `ctx.get_connection()` interface. Tracked as follow-up —
-not a blocker for the incident-replay / Phase 1 work.
+Collectors take a ``ServerContext`` and obtain connections via
+``with ctx.get_connection() as conn:``. These tests build a mock context whose
+``get_connection()`` yields a mock MySQL connection, then exercise the
+``collect(now, ctx) -> store(data)`` workflow.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import patch, MagicMock
 
 import pytest
-
-pytestmark = pytest.mark.skip(
-    reason="Stale — tests target pre-ServerContext collector API. "
-    "Needs rewrite against ctx.get_connection(). See conftest.py mock_server_context."
-)
 
 from collectors.fast_loop import (
     ProcesslistCollector,
@@ -52,8 +45,12 @@ from tests.fixtures.mysql_mock_data import (
 )
 
 
+def _utcnow():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 def _mock_cursor_with_data(data):
-    """Create a mock connection context manager that returns data from cursor."""
+    """Create a mock connection whose cursor.fetchall() returns ``data``."""
     mock_conn = MagicMock()
     mock_cursor = MagicMock()
     mock_cursor.fetchall.return_value = [row.copy() for row in data]
@@ -61,130 +58,144 @@ def _mock_cursor_with_data(data):
     return mock_conn
 
 
+def _mock_ctx_with_data(data, server_id="test-server"):
+    """Build a mock ServerContext whose get_connection() yields a mock conn.
+
+    ``ctx.get_connection()`` returns a context manager whose ``__enter__``
+    yields a mock MySQL connection backed by ``data``.
+    """
+    mock_conn = _mock_cursor_with_data(data)
+    ctx = MagicMock()
+    ctx.server_id = server_id
+    ctx.get_connection.return_value.__enter__.return_value = mock_conn
+    ctx.get_connection.return_value.__exit__.return_value = False
+    return ctx
+
+
 class TestProcesslistCollector:
-    @patch("collectors.fast_loop.get_prod_connection")
     @patch("collectors.fast_loop.writer")
-    def test_collect_and_store(self, mock_writer, mock_conn_ctx):
-        mock_conn = _mock_cursor_with_data(MOCK_PROCESSLIST)
-        mock_conn_ctx.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        mock_conn_ctx.return_value.__exit__ = MagicMock(return_value=False)
+    def test_collect_and_store(self, mock_writer):
+        ctx = _mock_ctx_with_data(MOCK_PROCESSLIST)
 
         collector = ProcesslistCollector()
-        now = datetime.utcnow()
-        data = collector.collect(now)
+        now = _utcnow()
+        data = collector.collect(now, ctx)
 
         assert "processlist" in data
         assert len(data["processlist"]) == 2
         assert data["processlist"][0]["snapshot_time"] == now
+        assert data["processlist"][0]["server_id"] == "test-server"
 
         collector.store(data)
         mock_writer.write_processlist.assert_called_once()
 
 
 class TestLockWaitCollector:
-    @patch("collectors.fast_loop.get_prod_connection")
     @patch("collectors.fast_loop.writer")
-    def test_collect_and_store(self, mock_writer, mock_conn_ctx):
-        mock_conn = _mock_cursor_with_data(MOCK_LOCK_WAITS)
-        mock_conn_ctx.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        mock_conn_ctx.return_value.__exit__ = MagicMock(return_value=False)
+    def test_collect_and_store(self, mock_writer):
+        ctx = _mock_ctx_with_data(MOCK_LOCK_WAITS)
 
         collector = LockWaitCollector()
-        now = datetime.utcnow()
-        data = collector.collect(now)
+        now = _utcnow()
+        data = collector.collect(now, ctx)
 
         assert "lock_waits" in data
         assert len(data["lock_waits"]) == 1
+        assert data["lock_waits"][0]["server_id"] == "test-server"
 
         collector.store(data)
         mock_writer.write_lock_waits.assert_called_once()
 
 
 class TestTransactionCollector:
-    @patch("collectors.fast_loop.get_prod_connection")
     @patch("collectors.fast_loop.writer")
-    def test_collect_and_store(self, mock_writer, mock_conn_ctx):
-        mock_conn = _mock_cursor_with_data(MOCK_TRANSACTIONS)
-        mock_conn_ctx.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        mock_conn_ctx.return_value.__exit__ = MagicMock(return_value=False)
+    def test_collect_and_store(self, mock_writer):
+        ctx = _mock_ctx_with_data(MOCK_TRANSACTIONS)
 
         collector = TransactionCollector()
-        now = datetime.utcnow()
-        data = collector.collect(now)
+        now = _utcnow()
+        data = collector.collect(now, ctx)
 
         assert "transactions" in data
         assert len(data["transactions"]) == 1
+        assert data["transactions"][0]["server_id"] == "test-server"
 
         collector.store(data)
         mock_writer.write_transactions.assert_called_once()
 
 
 class TestMetadataLockCollector:
-    @patch("collectors.fast_loop.get_prod_connection")
     @patch("collectors.fast_loop.writer")
-    def test_collect_and_store(self, mock_writer, mock_conn_ctx):
-        mock_conn = _mock_cursor_with_data(MOCK_METADATA_LOCKS)
-        mock_conn_ctx.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        mock_conn_ctx.return_value.__exit__ = MagicMock(return_value=False)
+    def test_collect_and_store(self, mock_writer):
+        ctx = _mock_ctx_with_data(MOCK_METADATA_LOCKS)
 
         collector = MetadataLockCollector()
-        now = datetime.utcnow()
-        data = collector.collect(now)
+        now = _utcnow()
+        data = collector.collect(now, ctx)
 
         assert "metadata_locks" in data
         assert len(data["metadata_locks"]) == 1
+        assert data["metadata_locks"][0]["server_id"] == "test-server"
 
         collector.store(data)
         mock_writer.write_metadata_locks.assert_called_once()
 
 
 class TestQueryDigestCollector:
-    @patch("collectors.medium_loop.get_prod_connection")
     @patch("collectors.medium_loop.writer")
-    def test_collect_and_store(self, mock_writer, mock_conn_ctx):
-        mock_conn = _mock_cursor_with_data(MOCK_QUERY_DIGESTS)
-        mock_conn_ctx.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        mock_conn_ctx.return_value.__exit__ = MagicMock(return_value=False)
+    def test_collect_and_store(self, mock_writer):
+        ctx = _mock_ctx_with_data(MOCK_QUERY_DIGESTS)
 
         collector = QueryDigestCollector()
-        now = datetime.utcnow()
-        data = collector.collect(now)
+        now = _utcnow()
+        data = collector.collect(now, ctx)
 
         assert "digests" in data
         assert len(data["digests"]) == 1
+        assert data["digests"][0]["server_id"] == "test-server"
 
         collector.store(data)
         mock_writer.write_query_digests.assert_called_once()
 
 
 class TestGlobalStatusCollector:
-    @patch("collectors.medium_loop.get_prod_connection")
     @patch("collectors.medium_loop.writer")
-    def test_first_run_no_delta(self, mock_writer, mock_conn_ctx):
-        mock_conn = _mock_cursor_with_data(MOCK_GLOBAL_STATUS)
-        mock_conn_ctx.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        mock_conn_ctx.return_value.__exit__ = MagicMock(return_value=False)
+    def test_first_run_no_delta(self, mock_writer):
+        ctx = _mock_ctx_with_data(MOCK_GLOBAL_STATUS)
 
+        # Fresh collector → fresh in-memory delta calculator → first run.
         collector = GlobalStatusCollector()
-        now = datetime.utcnow()
-        data = collector.collect(now)
+        now = _utcnow()
+        data = collector.collect(now, ctx)
 
         assert "global_status" in data
+        assert len(data["global_status"]) > 0
         for row in data["global_status"]:
             assert row["delta_value"] is None
+            assert row["server_id"] == "test-server"
 
 
 class TestRunFastLoop:
-    @patch("collectors.fast_loop.get_prod_connection")
     @patch("collectors.fast_loop.writer")
-    def test_returns_results_dict(self, mock_writer, mock_conn_ctx):
-        mock_conn = _mock_cursor_with_data([])
-        mock_conn_ctx.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        mock_conn_ctx.return_value.__exit__ = MagicMock(return_value=False)
+    def test_returns_results_dict(self, mock_writer):
+        # One context manager per fast collector (collector order):
+        # processlist, lock_waits, transactions, metadata_locks.
+        ctx = MagicMock()
+        ctx.server_id = "test-server"
 
-        results = run_fast_loop()
+        def _empty_cm():
+            cm = MagicMock()
+            cm.__enter__.return_value = _mock_cursor_with_data([])
+            cm.__exit__.return_value = False
+            return cm
+
+        ctx.get_connection.side_effect = [_empty_cm() for _ in range(4)]
+
+        results = run_fast_loop(ctx)
         assert isinstance(results, dict)
-        assert "processlist" in results
-        assert "lock_waits" in results
-        assert "transactions" in results
-        assert "metadata_locks" in results
+        assert results == {
+            "processlist": True,
+            "lock_waits": True,
+            "transactions": True,
+            "metadata_locks": True,
+        }

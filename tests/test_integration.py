@@ -51,6 +51,10 @@ ALL_TABLES = [
     "execution_stage_snapshots",
     "explain_captures",
     "alert_history",
+    "inbound_alerts",
+    "investigations",
+    "investigation_samples",
+    "investigation_findings",
 ]
 
 
@@ -72,16 +76,18 @@ class TestSchemaValidation:
             "SELECT COUNT(*) as c FROM sqlite_master WHERE type='table'"
         )
         count = cursor.fetchone()["c"]
-        # 24 base tables + anomaly_events + incident_windows = 26
-        assert count == 26
+        # 24 base tables + anomaly_events + incident_windows
+        # + inbound_alerts + investigations + investigation_samples + investigation_findings = 30
+        assert count == 30
 
 
-@pytest.mark.skip(
-    reason="Stale — uses pre-ServerContext collector API (get_prod_connection). "
-    "Needs rewrite against ctx.get_connection(). See follow-up."
-)
 class TestFullCycleIntegration:
-    """Run all three loops with mocked MySQL and verify SQLite has data."""
+    """Run all three loops with mocked MySQL and verify SQLite has data.
+
+    Each loop runner is passed an explicit mock ``ServerContext`` whose
+    ``get_connection()`` yields one mock MySQL connection per collector (in
+    collector order). The real writer runs against a temp SQLite DB.
+    """
 
     @pytest.fixture(autouse=True)
     def setup_full_cycle(self, tmp_path, test_config):
@@ -107,66 +113,90 @@ class TestFullCycleIntegration:
         conn.close()
         return count
 
-    def _make_mock_conn(self, data_sequence):
-        """Create a mock connection that returns different data on each fetchall call."""
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-        mock_cursor.fetchall.side_effect = [[row.copy() for row in d] for d in data_sequence]
-        mock_cursor.fetchone.return_value = ("users", "CREATE TABLE users (id INT)")
-        mock_conn.cursor.return_value = mock_cursor
-        return mock_conn
+    @staticmethod
+    def _conn(data):
+        """Mock connection whose cursor.fetchall() returns ``data`` (one call)."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [row.copy() for row in data]
+        conn.cursor.return_value = cursor
+        return conn
 
-    @patch("collectors.fast_loop.get_prod_connection")
-    def test_fast_loop(self, mock_conn_ctx):
+    @staticmethod
+    def _multi_fetchall_conn(data_sequence):
+        """Mock connection returning a different list on each fetchall() call."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchall.side_effect = [[row.copy() for row in d] for d in data_sequence]
+        conn.cursor.return_value = cursor
+        return conn
+
+    @staticmethod
+    def _innodb_status_conn():
+        """innodb_status uses cursor.fetchone() returning a 3-tuple."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchone.return_value = ("InnoDB", "", "")
+        conn.cursor.return_value = cursor
+        return conn
+
+    @staticmethod
+    def _cm(conn):
+        """Wrap a mock conn in a context manager (for ctx.get_connection)."""
+        cm = MagicMock()
+        cm.__enter__.return_value = conn
+        cm.__exit__.return_value = False
+        return cm
+
+    def _make_ctx(self, conns):
+        """Build a mock ServerContext that yields each conn in order."""
+        ctx = MagicMock()
+        ctx.server_id = "test-server"
+        ctx.get_connection.side_effect = [self._cm(c) for c in conns]
+        return ctx
+
+    def test_fast_loop(self):
         from collectors.fast_loop import run_fast_loop
 
-        mock_conn = self._make_mock_conn([
-            MOCK_PROCESSLIST, MOCK_LOCK_WAITS, MOCK_TRANSACTIONS, MOCK_METADATA_LOCKS,
+        # Collector order: processlist, lock_waits, transactions, metadata_locks.
+        ctx = self._make_ctx([
+            self._conn(MOCK_PROCESSLIST),
+            self._conn(MOCK_LOCK_WAITS),
+            self._conn(MOCK_TRANSACTIONS),
+            self._conn(MOCK_METADATA_LOCKS),
         ])
-        mock_conn_ctx.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        mock_conn_ctx.return_value.__exit__ = MagicMock(return_value=False)
 
-        results = run_fast_loop()
+        results = run_fast_loop(ctx)
         assert all(results.values()), f"Some collectors failed: {results}"
         assert self._count_rows("processlist_snapshots") > 0
         assert self._count_rows("lock_wait_snapshots") > 0
         assert self._count_rows("transaction_snapshots") > 0
         assert self._count_rows("metadata_lock_snapshots") > 0
 
-    @patch("collectors.explain_capture.get_prod_connection")
-    @patch("collectors.execution_stages.get_prod_connection")
-    @patch("collectors.innodb_status.get_prod_connection")
-    @patch("collectors.medium_loop.get_prod_connection")
-    def test_medium_loop(self, mock_conn_ctx, mock_innodb_ctx, mock_stages_ctx, mock_explain_ctx):
-        from collectors.medium_loop import run_medium_loop
+    def test_medium_loop(self):
+        from collectors.medium_loop import run_medium_loop, _global_status_collector
 
-        mock_conn = self._make_mock_conn([
-            MOCK_QUERY_DIGESTS, MOCK_WAIT_EVENTS, MOCK_TABLE_IO,
-            MOCK_INNODB_METRICS, MOCK_BUFFER_POOL, MOCK_GLOBAL_STATUS,
+        # Ensure first-run delta behavior for the shared global_status singleton.
+        _global_status_collector._delta_calcs = {}
+
+        # get_connection is consumed (in order) by the MySQL collectors:
+        # query_digests, wait_events, table_io, innodb_metrics, buffer_pool,
+        # global_status, innodb_status, execution_stages, explain_capture.
+        # The GCP collectors run but DO NOT call get_connection (they will fail
+        # harmlessly with no GCP creds — not asserted).
+        ctx = self._make_ctx([
+            self._conn(MOCK_QUERY_DIGESTS),
+            self._conn(MOCK_WAIT_EVENTS),
+            self._conn(MOCK_TABLE_IO),
+            self._conn(MOCK_INNODB_METRICS),
+            self._conn(MOCK_BUFFER_POOL),
+            self._conn(MOCK_GLOBAL_STATUS),
+            self._innodb_status_conn(),
+            self._conn([]),   # execution_stages
+            self._conn([]),   # explain_capture
         ])
-        mock_conn_ctx.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        mock_conn_ctx.return_value.__exit__ = MagicMock(return_value=False)
 
-        # Mock innodb_status connection (uses fetchone, not fetchall)
-        mock_innodb_conn = MagicMock()
-        mock_innodb_cursor = MagicMock()
-        mock_innodb_cursor.fetchone.return_value = ("InnoDB", "", "")
-        mock_innodb_conn.cursor.return_value = mock_innodb_cursor
-        mock_innodb_ctx.return_value.__enter__ = MagicMock(return_value=mock_innodb_conn)
-        mock_innodb_ctx.return_value.__exit__ = MagicMock(return_value=False)
-
-        # Mock execution_stages connection
-        mock_stages_conn = self._make_mock_conn([[]])
-        mock_stages_ctx.return_value.__enter__ = MagicMock(return_value=mock_stages_conn)
-        mock_stages_ctx.return_value.__exit__ = MagicMock(return_value=False)
-
-        # Mock explain_capture connection
-        mock_explain_conn = self._make_mock_conn([[]])
-        mock_explain_ctx.return_value.__enter__ = MagicMock(return_value=mock_explain_conn)
-        mock_explain_ctx.return_value.__exit__ = MagicMock(return_value=False)
-
-        results = run_medium_loop()
-        # GCP collectors will fail (no GCP mock) — that's expected
+        results = run_medium_loop(ctx)
         mysql_collectors = ["query_digests", "wait_events", "table_io",
                             "innodb_metrics", "buffer_pool", "global_status"]
         for name in mysql_collectors:
@@ -178,49 +208,40 @@ class TestFullCycleIntegration:
         assert self._count_rows("buffer_pool_snapshots") > 0
         assert self._count_rows("global_status_snapshots") > 0
 
-    @patch("collectors.global_variables.get_prod_connection")
-    @patch("collectors.index_analysis.get_prod_connection")
-    @patch("collectors.slow_loop.get_prod_connection")
     @patch("collectors.slow_loop.get_mon_reader")
-    def test_slow_loop(self, mock_reader_ctx, mock_conn_ctx, mock_idx_conn_ctx, mock_var_conn_ctx):
+    def test_slow_loop(self, mock_get_mon_reader):
         from collectors.slow_loop import run_slow_loop, _schema_collector
 
-        # Reset collector state for clean test
+        # Reset schema collector state for a clean first run.
         _schema_collector._previous_hashes = {}
-        _schema_collector._initialized = False
+        _schema_collector._initialized = set()
 
-        # Mock the reader for _load_previous_hashes
-        mock_reader_conn = MagicMock()
-        mock_reader_cursor = MagicMock()
-        mock_reader_cursor.fetchall.return_value = []
-        mock_reader_conn.execute.return_value = mock_reader_cursor
-        mock_reader_ctx.return_value.__enter__ = MagicMock(return_value=mock_reader_conn)
-        mock_reader_ctx.return_value.__exit__ = MagicMock(return_value=False)
+        # _load_previous_hashes reads the monitoring DB → return no rows.
+        reader_conn = MagicMock()
+        reader_cursor = MagicMock()
+        reader_cursor.fetchall.return_value = []
+        reader_conn.execute.return_value = reader_cursor
+        reader_cm = MagicMock()
+        reader_cm.__enter__.return_value = reader_conn
+        reader_cm.__exit__.return_value = False
+        mock_get_mon_reader.return_value = reader_cm
 
-        mock_conn = self._make_mock_conn([
+        # schema_snapshot makes 3 fetchall calls on one cursor (fingerprints,
+        # indexes, table sizes). With no previous hashes, no SHOW CREATE TABLE.
+        schema_conn = self._multi_fetchall_conn([
             MOCK_SCHEMA_FINGERPRINT, MOCK_INDEX_FINGERPRINT, MOCK_TABLE_SIZES,
         ])
-        # Mock SHOW CREATE TABLE
-        show_cursor = MagicMock()
-        show_cursor.fetchone.return_value = ("users", "CREATE TABLE users (id INT)")
-        mock_conn.cursor.side_effect = [mock_conn.cursor.return_value, show_cursor, show_cursor]
 
-        mock_conn_ctx.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        mock_conn_ctx.return_value.__exit__ = MagicMock(return_value=False)
+        # Collector order: schema_snapshot, unused_indexes, redundant_indexes,
+        # global_variables.
+        ctx = self._make_ctx([
+            schema_conn,
+            self._conn([]),   # unused_indexes
+            self._conn([]),   # redundant_indexes
+            self._conn([{"Variable_name": "max_connections", "Value": "151"}]),
+        ])
 
-        # Mock index analysis connections
-        mock_idx_conn = self._make_mock_conn([[]])  # empty results
-        mock_idx_conn_ctx.return_value.__enter__ = MagicMock(return_value=mock_idx_conn)
-        mock_idx_conn_ctx.return_value.__exit__ = MagicMock(return_value=False)
-
-        # Mock global variables connection
-        mock_var_conn = self._make_mock_conn([[
-            {"Variable_name": "max_connections", "Value": "151"},
-        ]])
-        mock_var_conn_ctx.return_value.__enter__ = MagicMock(return_value=mock_var_conn)
-        mock_var_conn_ctx.return_value.__exit__ = MagicMock(return_value=False)
-
-        results = run_slow_loop()
+        results = run_slow_loop(ctx)
         assert results.get("schema_snapshot", False), f"Schema snapshot failed: {results}"
         assert self._count_rows("schema_snapshots") > 0
 
