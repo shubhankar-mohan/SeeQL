@@ -53,7 +53,7 @@ services:
 
       # --- LLM Agent (Vertex AI — Claude or Gemini) ---
       SEEQL_AGENT_ENABLED: ${SEEQL_AGENT_ENABLED:-true}
-      SEEQL_AGENT_MODEL: ${SEEQL_AGENT_MODEL:-claude-sonnet-4-6}
+      SEEQL_AGENT_MODEL: ${SEEQL_AGENT_MODEL:-claude-opus-4-6}
 
       # --- Alerting ---
       SEEQL_ALERTING_ENABLED: ${SEEQL_ALERTING_ENABLED:-false}

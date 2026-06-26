@@ -43,7 +43,7 @@ services:
 
       # --- LLM Agent (optional — Claude via Anthropic API) ---
       SEEQL_AGENT_ENABLED: ${SEEQL_AGENT_ENABLED:-false}
-      SEEQL_AGENT_MODEL: ${SEEQL_AGENT_MODEL:-claude-sonnet-4-6}
+      SEEQL_AGENT_MODEL: ${SEEQL_AGENT_MODEL:-claude-opus-4-6}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
 
       # --- Alerting (optional) ---
