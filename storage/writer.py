@@ -275,6 +275,105 @@ def write_agent_analysis_one(row: dict) -> int:
         return cursor.lastrowid
 
 
+def write_inbound_alert(row: dict) -> int:
+    """
+    Insert a single inbound_alerts row and return its lastrowid.
+
+    Used by the webhook router so the caller can reference the stored alert
+    from the investigations row it creates immediately after.
+    """
+    cols = [
+        "provider", "received_at", "server_id", "external_id",
+        "alert_type", "severity", "summary", "payload",
+        "signature_verified", "callback_url", "processed_at",
+    ]
+    placeholders = ", ".join(["?"] * len(cols))
+    col_names = ", ".join(cols)
+    sql = f"INSERT INTO inbound_alerts ({col_names}) VALUES ({placeholders})"
+
+    def _get(col: str):
+        val = row.get(col)
+        if val is None and col == "server_id":
+            return "default"
+        return _serialize_value(val)
+
+    values = tuple(_get(c) for c in cols)
+    with get_mon_connection() as conn:
+        cursor = conn.execute(sql, values)
+        return cursor.lastrowid
+
+
+def write_investigation(row: dict) -> int:
+    """
+    Insert a single investigations row and return its lastrowid.
+
+    Used when the webhook router accepts a new alert. The returned id is
+    the job key used when scheduling the ad-hoc investigator job.
+    """
+    cols = [
+        "inbound_alert_id", "incident_window_id", "server_id",
+        "started_at", "ended_at", "status", "phase3_next_run_at",
+        "root_cause_summary", "confidence", "analysis_id",
+        "query_count_total", "abort_reason",
+    ]
+    placeholders = ", ".join(["?"] * len(cols))
+    col_names = ", ".join(cols)
+    sql = f"INSERT INTO investigations ({col_names}) VALUES ({placeholders})"
+
+    def _get(col: str):
+        val = row.get(col)
+        if val is None and col == "server_id":
+            return "default"
+        if val is None and col == "status":
+            return "queued"
+        if val is None and col == "query_count_total":
+            return 0
+        return _serialize_value(val)
+
+    values = tuple(_get(c) for c in cols)
+    with get_mon_connection() as conn:
+        cursor = conn.execute(sql, values)
+        return cursor.lastrowid
+
+
+def update_investigation(investigation_id: int, **fields) -> int:
+    """
+    Update selected fields on an investigations row.
+
+    Only known columns are updated; unknown keys are silently ignored so
+    callers can pass a free-form dict without worrying about typos blowing
+    up at runtime. Returns rowcount (0 or 1).
+    """
+    allowed = {
+        "incident_window_id", "ended_at", "status", "phase3_next_run_at",
+        "root_cause_summary", "confidence", "analysis_id",
+        "query_count_total", "abort_reason",
+    }
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    if not updates:
+        return 0
+
+    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    sql = f"UPDATE investigations SET {set_clause} WHERE id = ?"
+    values = tuple(_serialize_value(updates[k]) for k in updates) + (investigation_id,)
+
+    with get_mon_connection() as conn:
+        cursor = conn.execute(sql, values)
+        return cursor.rowcount
+
+
+def write_investigation_samples(rows: list[dict]) -> int:
+    return _batch_insert("investigation_samples", [
+        "investigation_id", "sampled_at", "sample_type", "query_count", "data",
+    ], rows)
+
+
+def write_investigation_findings(rows: list[dict]) -> int:
+    return _batch_insert("investigation_findings", [
+        "investigation_id", "created_at", "phase", "kind", "severity", "content",
+    ], rows)
+
+
 def write_anomaly_events(rows: list[dict]) -> list[int]:
     """
     Insert anomaly_events rows one at a time so the caller can track each

@@ -10,7 +10,7 @@ individually.
 
 import os
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from config import get_config
@@ -45,6 +45,10 @@ RETENTION_TABLES = {
     "replication_lag_snapshots": "snapshot_time",
     "anomaly_events": "detected_at",
     "incident_windows": "start_time",
+    "inbound_alerts": "received_at",
+    "investigations": "started_at",
+    "investigation_samples": "sampled_at",
+    "investigation_findings": "created_at",
 }
 
 # Per-table retention overrides. If a table is listed here, it uses its own
@@ -57,6 +61,10 @@ PER_TABLE_RETENTION_DAYS = {
     "ddl_changes": 365,         # 1 year — schema history
     "agent_analyses": 180,      # 6 months — LLM reasoning log
     "alert_history": 180,       # 6 months
+    "inbound_alerts": 180,      # 6 months — raw webhook payloads (debug)
+    "investigations": 180,      # 6 months — investigation records
+    "investigation_samples": 30,  # 1 month — Phase 3 sampling data
+    "investigation_findings": 180,  # 6 months — per-phase findings
 }
 
 
@@ -88,7 +96,7 @@ def _delete_older_than(conn, retention_days: int) -> int:
     """Delete rows older than retention_days from all tables, respecting
     per-table overrides. Returns total deleted."""
     total_deleted = 0
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
 
     for table, ts_col in RETENTION_TABLES.items():
         table_days = _retention_for(table, retention_days)
@@ -175,7 +183,7 @@ def run_retention_cleanup() -> dict[str, int]:
     """
     config = get_config()
     retention_days = config.get("retention", {}).get("days", 90)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
 
     logger.info(
         f"Running retention cleanup: default {retention_days}d "

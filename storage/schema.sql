@@ -573,3 +573,93 @@ CREATE TABLE IF NOT EXISTS incident_windows (
 
 CREATE INDEX IF NOT EXISTS idx_incident_status ON incident_windows(status, start_time);
 CREATE INDEX IF NOT EXISTS idx_incident_server ON incident_windows(server_id, start_time);
+
+
+-- ---------------------------------------------------------------------------
+-- 27. Inbound Alerts (webhook receipts)
+--     Every external alert received via POST /webhooks/{provider}. Raw payload
+--     is kept alongside the normalized fields so adapters can be debugged or
+--     replayed. (provider, external_id) is the dedup key.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS inbound_alerts (
+    id                  INTEGER PRIMARY KEY,
+    provider            TEXT NOT NULL,                      -- generic | gcp | pagerduty | grafana
+    received_at         TEXT NOT NULL,
+    server_id           TEXT NOT NULL DEFAULT 'default',
+    external_id         TEXT,                               -- provider-supplied idempotency key
+    alert_type          TEXT NOT NULL,                      -- canonical SeeQL trigger vocab
+    severity            TEXT NOT NULL,                      -- critical | warning | info
+    summary             TEXT,
+    payload             TEXT NOT NULL,                      -- raw JSON (verbatim)
+    signature_verified  INTEGER NOT NULL DEFAULT 0,
+    callback_url        TEXT,
+    processed_at        TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_ia_received ON inbound_alerts(received_at);
+CREATE INDEX IF NOT EXISTS idx_ia_dedup    ON inbound_alerts(provider, external_id, received_at);
+CREATE INDEX IF NOT EXISTS idx_ia_sid_time ON inbound_alerts(server_id, received_at);
+
+
+-- ---------------------------------------------------------------------------
+-- 28. Investigations
+--     The 3-phase root-cause investigator lives here. Each inbound alert
+--     spawns one investigation row; state progresses through the phases.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS investigations (
+    id                 INTEGER PRIMARY KEY,
+    inbound_alert_id   INTEGER NOT NULL,                   -- FK → inbound_alerts.id
+    incident_window_id INTEGER,                            -- FK → incident_windows.id (optional)
+    server_id          TEXT NOT NULL DEFAULT 'default',
+    started_at         TEXT NOT NULL,
+    ended_at           TEXT,
+    status             TEXT NOT NULL DEFAULT 'queued',
+                                                           -- queued | phase1 | phase2 | phase3 |
+                                                           -- completed | aborted | load_guard_paused
+    phase3_next_run_at TEXT,
+    root_cause_summary TEXT,
+    confidence         REAL,                               -- 0.0 - 1.0
+    analysis_id        INTEGER,                            -- FK → agent_analyses.id
+    query_count_total  INTEGER NOT NULL DEFAULT 0,
+    abort_reason       TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_inv_status  ON investigations(status, started_at);
+CREATE INDEX IF NOT EXISTS idx_inv_sid     ON investigations(server_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_inv_inbound ON investigations(inbound_alert_id);
+
+
+-- ---------------------------------------------------------------------------
+-- 29. Investigation Samples (Phase 3 rolling snapshots)
+--     Narrow, budgeted samples taken during Phase 3. `query_count` is the
+--     cost accounting field the Phase-3 sampler checks against the per-minute
+--     budget before running the next sample.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS investigation_samples (
+    id               INTEGER PRIMARY KEY,
+    investigation_id INTEGER NOT NULL,
+    sampled_at       TEXT NOT NULL,
+    sample_type      TEXT NOT NULL,
+                                                         -- processlist | locks | digest_delta |
+                                                         -- status_delta | threads_running | index_delta
+    query_count      INTEGER NOT NULL DEFAULT 1,
+    data             TEXT NOT NULL                       -- JSON
+);
+
+CREATE INDEX IF NOT EXISTS idx_is_inv_time ON investigation_samples(investigation_id, sampled_at);
+
+
+-- ---------------------------------------------------------------------------
+-- 30. Investigation Findings (per-phase hypotheses, evidence, root-causes)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS investigation_findings (
+    id               INTEGER PRIMARY KEY,
+    investigation_id INTEGER NOT NULL,
+    created_at       TEXT NOT NULL,
+    phase            INTEGER NOT NULL,  -- 1 | 2 | 3
+    kind             TEXT NOT NULL,     -- hypothesis | evidence | root_cause | correlation
+    severity         TEXT,
+    content          TEXT NOT NULL      -- JSON
+);
+
+CREATE INDEX IF NOT EXISTS idx_if_inv_phase ON investigation_findings(investigation_id, phase);
