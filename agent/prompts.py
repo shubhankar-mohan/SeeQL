@@ -180,6 +180,31 @@ INCIDENT_TRIGGERS = {
         "2. Assess the current state and identify the root cause\n"
         "3. Provide specific mitigation steps"
     ),
+    "missing_index": (
+        "## Immediate Steps:\n"
+        "1. Review the Missing-index correlation block above BEFORE calling any live tools\n"
+        "2. Call `run_explain(digest)` on the top suspect digest — this is cheap (cache hit)\n"
+        "3. If EXPLAIN shows type=ALL or key=NULL, call `get_table_schema(schema, table)` + "
+        "`get_index_stats(schema, table)` to see existing indexes\n"
+        "4. BEFORE recommending CREATE INDEX, cross-check the correlation's "
+        "`unused_indexes` list — never suggest a duplicate of an already-unused index\n"
+        "5. Recommend a specific CREATE INDEX (column list matching the WHERE/JOIN predicates) "
+        "with expected impact (row-scan reduction)"
+    ),
+    "webhook_generic": (
+        "## Immediate Steps:\n"
+        "1. Scan the pre-computed timeline for anomalies correlated with the alert's fired_at\n"
+        "2. Check `get_recent_analyses()` — did we already report this pattern?\n"
+        "3. Use snapshot tools first (`get_lock_graph`, `get_query_history`, `search_slow_log`)\n"
+        "4. Escalate to live tools ONLY if snapshot data leaves the root cause ambiguous"
+    ),
+    "ddl_change": (
+        "## Immediate Steps:\n"
+        "1. Pull the recent `ddl_changes` row from the timeline — note before/after DDL\n"
+        "2. `get_query_history` on digests referencing the changed table\n"
+        "3. If a regression appeared post-DDL, `run_explain` on the regressed digest\n"
+        "4. Recommend: revert, add missing index, or query rewrite — be specific"
+    ),
 }
 
 
@@ -234,4 +259,53 @@ seconds.
 <yes/no + why>
 ```
 """
+
+
+# ---------------------------------------------------------------------------
+# Webhook investigator prompt (CP4)
+# ---------------------------------------------------------------------------
+WEBHOOK_INVESTIGATION_PROMPT = """\
+An external alerting system fired an alert against a MySQL server SeeQL is \
+monitoring. Your job: identify the ROOT CAUSE with the minimum number of \
+live-MySQL tool calls. The database may already be under stress — do NOT \
+pile on more load unless the snapshot data is insufficient.
+
+**Tool budget (enforced):**
+- Snapshot tools (run_explain cache, get_table_schema, get_query_history, \
+get_lock_graph, search_slow_log, get_recent_analyses): UNLIMITED — exhaust \
+these FIRST.
+- Live-MySQL tools: {live_tool_cap} calls maximum for this investigation.
+- explain_query (expensive): {explain_cap} calls maximum.
+
+## Inbound alert
+- Provider:  {provider}
+- Type:      {alert_type}
+- Severity:  {severity}
+- Fired at:  {fired_at}
+- Server:    {server_id}
+- Summary:   {alert_summary}
+
+{trigger_instructions}
+
+## Missing-index correlation (from SQLite, ZERO MySQL cost)
+{missing_index_evidence}
+
+## Pre-computed timeline (last {timeline_window_minutes} minutes, SQLite)
+{timeline}
+
+## Current state report
+{state_report}
+
+## Output format — MANDATORY, follow exactly
+### Severity: [critical|warning|info]
+### Findings
+- **Root cause**: <1-2 sentences, cite PID/digest/table/timestamp>
+- **Evidence**: <specific tool results, quote data>
+- **Correlations**: <e.g., "DDL on 2026-04-23T11:55 dropped idx_foo; digest 0xABC began regressing 2 min later">
+### Recommendations
+- **Immediate action**: <exact SQL or operational step>
+- **Verification**: <how to confirm the fix worked>
+- **Confidence**: <0.0 - 1.0>
+"""
+
 

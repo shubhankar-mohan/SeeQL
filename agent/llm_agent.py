@@ -9,7 +9,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
 from agent.state_builder import build_state_report
 from agent.tools import TOOL_DEFINITIONS, execute_tool
@@ -363,7 +363,7 @@ def _parse_and_store(text: str, analysis_type: str, input_summary: str,
         logger.warning("Could not parse sections from agent response, storing full text as findings")
 
     analysis = {
-        "analyzed_at": datetime.utcnow().isoformat(),
+        "analyzed_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
         "server_id": server_id,
         "analysis_type": analysis_type,
         "severity": severity,
@@ -421,6 +421,8 @@ def run_llm_analysis(
     prompt: str,
     analysis_type: str = "replay",
     server_id: str | None = None,
+    tool_budget=None,
+    max_tool_rounds_override: int | None = None,
 ) -> dict:
     """
     Public wrapper that dispatches any custom prompt to the configured LLM
@@ -431,6 +433,9 @@ def run_llm_analysis(
     reimplement backend detection or row-id wiring. Raises RuntimeError if
     no LLM backend is configured — callers should catch and fall back to
     the timeline-only rendering.
+
+    The webhook investigator passes `tool_budget` (an `alerting.budget.Budget`)
+    and a lower `max_tool_rounds_override` so Phase 2 stays bounded.
     """
     config = get_config().get("agent", {})
     backend = _detect_backend(config)
@@ -441,21 +446,30 @@ def run_llm_analysis(
         from config.server_registry import get_server_registry
         server_id = get_server_registry().get_default_server_id()
 
-    from agent.tools import set_current_server
+    from agent.tools import set_current_server, set_current_budget
     try:
         set_current_server(server_id)
     except Exception:
         pass
+    set_current_budget(tool_budget)
 
     max_tokens = config.get("max_tokens", 8192)
-    max_tool_rounds = config.get("max_tool_rounds", 10)
+    max_tool_rounds = (
+        max_tool_rounds_override
+        if max_tool_rounds_override is not None
+        else config.get("max_tool_rounds", 10)
+    )
 
-    if backend["type"] == "gemini":
-        text = _run_gemini_loop(backend, max_tokens, max_tool_rounds, prompt)
-    elif backend["type"] == "vertex-claude":
-        text = _run_vertex_claude_loop(backend, max_tokens, max_tool_rounds, prompt)
-    else:
-        text = _run_anthropic_loop(backend, max_tokens, max_tool_rounds, prompt)
+    try:
+        if backend["type"] == "gemini":
+            text = _run_gemini_loop(backend, max_tokens, max_tool_rounds, prompt)
+        elif backend["type"] == "vertex-claude":
+            text = _run_vertex_claude_loop(backend, max_tokens, max_tool_rounds, prompt)
+        else:
+            text = _run_anthropic_loop(backend, max_tokens, max_tool_rounds, prompt)
+    finally:
+        # Clear the budget so subsequent non-investigator calls don't inherit it.
+        set_current_budget(None)
 
     # Parse severity + sections locally (same logic as _parse_and_store) so
     # we can use the one-shot writer and capture the row id.
@@ -477,7 +491,7 @@ def run_llm_analysis(
 
     try:
         analysis_id = writer.write_agent_analysis_one({
-            "analyzed_at": datetime.utcnow().isoformat(),
+            "analyzed_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
             "server_id": server_id,
             "analysis_type": analysis_type,
             "severity": severity,

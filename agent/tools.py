@@ -28,11 +28,23 @@ _LIVE_TOOL_RETRY_DELAY = 0.5
 # Current server context for live tool calls (set by llm_agent before each analysis)
 _current_server_id: str | None = None
 
+# Current tool budget (set by run_llm_analysis when invoked from the webhook
+# investigator). When set, execute_tool rejects calls that the budget disallows
+# by returning a rejection message the LLM sees — same shape as existing
+# tool errors, so the model naturally backs off.
+_current_budget = None  # type: ignore[var-annotated]
+
 
 def set_current_server(server_id: str):
     """Set which server live tools should connect to."""
     global _current_server_id
     _current_server_id = server_id
+
+
+def set_current_budget(budget) -> None:
+    """Set the active tool budget. Pass None to clear."""
+    global _current_budget
+    _current_budget = budget
 
 
 # --- Tool Definitions (Anthropic tool_use format) ---
@@ -339,8 +351,20 @@ def execute_tool(name: str, input_data: dict) -> str:
     if not handler:
         return json.dumps({"error": f"Unknown tool: {name}"})
 
+    # Budget gate (webhook investigator only; no-op when _current_budget is None).
+    budget = _current_budget
+    if budget is not None and not budget.can_call(name):
+        msg = budget.rejection_message(name)
+        logger.info(f"Tool {name} rejected by budget: {msg}")
+        return json.dumps({"error": msg, "budget_rejected": True})
+
     try:
         result = handler(input_data)
+        if budget is not None:
+            try:
+                budget.record(name)
+            except Exception:
+                logger.debug(f"budget.record({name}) failed; continuing")
         return json.dumps(result, default=str)
     except Exception as e:
         logger.error(f"Tool {name} failed: {e}")
@@ -793,8 +817,8 @@ def _tool_get_recent_analyses(input_data: dict) -> dict:
 # --- Helpers ---
 
 def _now_iso() -> str:
-    from datetime import datetime
-    return datetime.utcnow().isoformat()
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
 
 
 def _parse_innodb_sections(text: str) -> dict:
