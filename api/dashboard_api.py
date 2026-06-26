@@ -514,6 +514,90 @@ def incidents_recent(
 
 
 # ---------------------------------------------------------------------------
+# Investigations (webhook-triggered root-cause; CP7)
+# ---------------------------------------------------------------------------
+
+@router.get("/investigations/recent")
+def investigations_recent(
+    limit: int = QueryParam(default=10, le=50),
+    status: str = QueryParam(default=None),
+    server: str = QueryParam(default=None),
+):
+    """
+    Recent investigations for the dashboard widget.
+
+    Joins inbound_alerts for the alert metadata. Returns an array of
+    dicts with ISO timestamps, alert type / severity, current status,
+    and a duration_seconds if terminal.
+    """
+    server = resolve_server_id(server)
+    where = ["i.server_id = ?"]
+    params: list = [server]
+    if status:
+        where.append("i.status = ?")
+        params.append(status)
+    sql = f"""
+        SELECT i.id, i.server_id, i.status, i.started_at, i.ended_at,
+               i.confidence, i.root_cause_summary,
+               a.provider, a.alert_type, a.severity, a.summary,
+               CAST(ROUND((julianday(COALESCE(i.ended_at, strftime('%Y-%m-%dT%H:%M:%S','now')))
+                           - julianday(i.started_at)) * 86400.0) AS INTEGER)
+                 AS duration_seconds
+        FROM investigations i
+        JOIN inbound_alerts a ON i.inbound_alert_id = a.id
+        WHERE {' AND '.join(where)}
+        ORDER BY i.started_at DESC
+        LIMIT ?
+    """
+    params.append(limit)
+    return query_rows(sql, tuple(params))
+
+
+@router.get("/investigations/{investigation_id}")
+def investigation_detail(investigation_id: int):
+    """
+    Full detail: investigation row + findings + sample counts grouped by
+    sample_type. Consumed by the dashboard detail view.
+    """
+    import json as _json
+    inv_rows = query_rows(
+        """
+        SELECT i.*, a.provider, a.alert_type, a.severity AS alert_severity,
+               a.summary, a.external_id, a.received_at
+        FROM investigations i
+        JOIN inbound_alerts a ON i.inbound_alert_id = a.id
+        WHERE i.id = ?
+        """,
+        (investigation_id,),
+    )
+    if not inv_rows:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="investigation not found")
+    inv = inv_rows[0]
+
+    findings = query_rows(
+        "SELECT id, phase, kind, severity, content, created_at "
+        "FROM investigation_findings WHERE investigation_id = ? ORDER BY id",
+        (investigation_id,),
+    )
+    for f in findings:
+        try:
+            f["content_parsed"] = _json.loads(f["content"] or "{}")
+        except (TypeError, ValueError):
+            f["content_parsed"] = None
+
+    samples = query_rows(
+        "SELECT sample_type, COUNT(*) AS n, "
+        "       MIN(sampled_at) AS first_at, MAX(sampled_at) AS last_at, "
+        "       SUM(query_count) AS query_count "
+        "FROM investigation_samples WHERE investigation_id = ? "
+        "GROUP BY sample_type ORDER BY sample_type",
+        (investigation_id,),
+    )
+    return {"investigation": inv, "findings": findings, "samples": samples}
+
+
+# ---------------------------------------------------------------------------
 # Servers
 # ---------------------------------------------------------------------------
 

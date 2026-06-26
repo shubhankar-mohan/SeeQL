@@ -1,0 +1,107 @@
+<!--
+  Recent Investigations widget (CP7).
+
+  Mirrors the Recent Incidents widget style. Polls /api/v1/investigations/recent
+  every 15s (faster than incidents because phase3 investigations change state
+  rapidly during the sampling window).
+-->
+<div class="bg-white border-[3px] border-pencil p-5 md:p-6 shadow-hard wobbly-md"
+     style="transform: rotate(0.3deg);">
+    <h3 class="font-heading text-2xl mb-3 flex items-center gap-2">
+        <span class="text-marker">&#9733;</span>
+        Recent Investigations
+        <span class="info-tip" data-tip="Webhook-triggered root-cause investigations. Phase 1 = triage (SQLite only), Phase 2 = LLM + budgeted live tools, Phase 3 = continuous sampling until clearance.">i</span>
+    </h3>
+
+    <div id="investigations-widget"
+         hx-get="/api/v1/investigations/recent?limit=8"
+         hx-trigger="load, every 15s"
+         hx-swap="innerHTML"
+         aria-live="polite"
+         aria-label="Active and recent investigations — auto-refreshing every 15 seconds">
+        <div class="text-pencil/40 font-body">Loading investigations&hellip;</div>
+    </div>
+</div>
+
+<script>
+(function() {
+    if (window.__investigationsWidgetWired) return;
+    window.__investigationsWidgetWired = true;
+    document.body.addEventListener('htmx:afterRequest', function(evt) {
+        if (!evt.target || evt.target.id !== 'investigations-widget') return;
+        if (evt.detail.failed) {
+            evt.target.innerHTML =
+              '<div class="text-pencil/40 font-body">Couldn\'t load investigations — check server logs</div>';
+            return;
+        }
+        let data;
+        try {
+            data = JSON.parse(evt.detail.xhr.responseText);
+        } catch (e) {
+            evt.target.innerHTML =
+              '<div class="text-pencil/40 font-body">Investigations response was not JSON</div>';
+            return;
+        }
+        if (!Array.isArray(data) || data.length === 0) {
+            evt.target.innerHTML =
+              '<div class="text-pencil/40 font-body">No investigations yet. Incoming webhooks will appear here.</div>';
+            return;
+        }
+        const sevClass = (s) => {
+            if (s === 'critical') return 'severity-red';
+            if (s === 'warning')  return 'severity-yellow';
+            return '';
+        };
+        const statusBadge = (s) => {
+            const active = ['queued','phase1','phase2','phase3','load_guard_paused'].includes(s);
+            const cls = active ? 'bg-marker text-pencil'
+                               : (s === 'completed' ? 'bg-pencil text-white'
+                                                    : 'bg-red-300 text-pencil');
+            return `<span class="text-xs px-2 py-0.5 ${cls} wobbly-sm">${s}</span>`;
+        };
+        const fmt = (t) => (t || '').replace('T',' ').slice(0,19);
+        const rot = () => ((Math.random() * 0.8 - 0.4).toFixed(2));
+        const dur = (s) => {
+            if (s === null || s === undefined) return '';
+            if (s < 60) return `${s}s`;
+            if (s < 3600) return `${Math.floor(s/60)}m ${s%60}s`;
+            return `${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m`;
+        };
+        evt.target.innerHTML = data.map(i => `
+          <div class="border-[3px] border-pencil p-3 mb-3 wobbly-sm shadow-hard-sm ${sevClass(i.severity)}"
+               style="transform: rotate(${rot()}deg)">
+            <div class="flex items-start justify-between gap-3">
+              <div class="flex-1">
+                <div class="font-heading text-lg">
+                  Investigation #${i.id}
+                  <span class="text-xs px-2 py-0.5 ml-2 bg-pencil/20 wobbly-sm">${i.alert_type || 'default'}</span>
+                </div>
+                <div class="text-xs text-pencil/60 font-body mt-1">
+                  ${i.provider || '?'} &rarr; server <code>${i.server_id}</code> at ${fmt(i.started_at)}
+                  ${i.ended_at ? '(ended ' + fmt(i.ended_at) + ', ' + dur(i.duration_seconds) + ')'
+                               : '(running, ' + dur(i.duration_seconds) + ')'}
+                </div>
+                ${i.root_cause_summary ? `
+                  <div class="mt-2 text-sm font-body">
+                    <span class="text-pencil/60">root cause:</span> ${escapeHtml(i.root_cause_summary)}
+                  </div>` : ''}
+              </div>
+              <div class="flex flex-col items-end gap-1">
+                ${statusBadge(i.status)}
+                ${i.confidence !== null && i.confidence !== undefined
+                    ? `<div class="text-xs text-pencil/60 font-body">conf ${Number(i.confidence).toFixed(2)}</div>` : ''}
+              </div>
+            </div>
+            <div class="mt-2 text-xs font-mono text-pencil/50">
+              seeql investigations show ${i.id}
+            </div>
+          </div>
+        `).join('');
+    });
+    function escapeHtml(s) {
+        return String(s)
+            .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')
+            .replaceAll('"','&quot;').replaceAll("'",'&#39;');
+    }
+})();
+</script>

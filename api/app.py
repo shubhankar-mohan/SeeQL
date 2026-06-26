@@ -46,6 +46,10 @@ def create_app() -> FastAPI:
     from api.agent_routes import router as agent_router
     app.include_router(agent_router)
 
+    # Inbound webhook receiver (CP6)
+    from api.webhook_routes import router as webhook_router
+    app.include_router(webhook_router)
+
     return app
 
 
