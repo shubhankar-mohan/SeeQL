@@ -44,9 +44,13 @@ def get_monitoring_credentials():
     """
     global _monitoring_credentials, _credentials_resolved
 
+    # Only a SUCCESSFUL resolution is cached. A failed/transient resolution
+    # (ADC or GCE metadata endpoint not ready yet, momentarily unreadable
+    # key) is never cached, so the next collection cycle retries and the
+    # GCP collectors self-heal instead of being disabled for the process
+    # lifetime.
     if _credentials_resolved:
         return _monitoring_credentials
-    _credentials_resolved = True
 
     if not _GOOGLE_AVAILABLE:
         return None
@@ -68,12 +72,21 @@ def get_monitoring_credentials():
             pass
 
     if cred_path and os.path.exists(cred_path):
-        logger.info("Loading monitoring credentials from: %s", cred_path)
-        _monitoring_credentials = (
-            google.oauth2.service_account.Credentials.from_service_account_file(
-                cred_path, scopes=SCOPES,
+        try:
+            credentials = (
+                google.oauth2.service_account.Credentials.from_service_account_file(
+                    cred_path, scopes=SCOPES,
+                )
             )
-        )
+        except Exception as e:
+            logger.debug(
+                "Monitoring credentials file unreadable (%s); will retry: %s",
+                cred_path, e,
+            )
+            return None
+        logger.info("Loading monitoring credentials from: %s", cred_path)
+        _monitoring_credentials = credentials
+        _credentials_resolved = True
         return _monitoring_credentials
 
     saved = os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
@@ -81,6 +94,7 @@ def get_monitoring_credentials():
         credentials, _ = google.auth.default(scopes=SCOPES)
         logger.info("Using ADC (gcloud/GCE) for monitoring credentials")
         _monitoring_credentials = credentials
+        _credentials_resolved = True
         return _monitoring_credentials
     except Exception as e:
         logger.debug("ADC unavailable; skipping GCP collectors: %s", e)

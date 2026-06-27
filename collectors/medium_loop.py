@@ -261,12 +261,14 @@ def _build_medium_collectors() -> list[BaseCollector]:
     return collectors
 
 
-MEDIUM_COLLECTORS = _build_medium_collectors()
-
-
 def run_medium_loop(ctx: ServerContext | None = None) -> dict[str, bool]:
-    """Run all medium-loop collectors independently."""
+    """Run all medium-loop collectors independently.
+
+    The collector list is rebuilt on every invocation so GCP collectors
+    register as soon as ``gcp.project_id`` becomes available — config may be
+    loaded, overridden, or env-substituted after this module is imported.
+    """
     results = {}
-    for collector in MEDIUM_COLLECTORS:
+    for collector in _build_medium_collectors():
         results[collector.name] = collector.run(ctx)
     return results

@@ -175,6 +175,92 @@ class TestGlobalStatusCollector:
             assert row["server_id"] == "test-server"
 
 
+class TestMonitoringCredentialsSelfHeal:
+    """Finding 5: a failed/transient credential resolution must NOT be cached.
+
+    Only a successful (non-None) resolution latches; a transient failure
+    (ADC / GCE metadata endpoint not ready) leaves the cache unresolved so
+    the next collection cycle retries and the GCP collectors self-heal.
+    """
+
+    def test_failed_resolution_is_not_latched(self, monkeypatch):
+        import collectors as collectors_pkg
+
+        if not collectors_pkg._GOOGLE_AVAILABLE:
+            pytest.skip("google-auth not installed")
+
+        # Clean, unresolved cache state (auto-restored by monkeypatch).
+        monkeypatch.setattr(collectors_pkg, "_credentials_resolved", False)
+        monkeypatch.setattr(collectors_pkg, "_monitoring_credentials", None)
+
+        # Point the env var at a missing file so the service-account branch
+        # is skipped and resolution deterministically reaches the ADC path.
+        monkeypatch.setenv(
+            "MONITORING_APPLICATION_CREDENTIALS", "/nonexistent/creds.json"
+        )
+
+        # Cycle 1: ADC fails transiently → None, and must stay unresolved.
+        with patch("google.auth.default", side_effect=Exception("metadata not ready")):
+            assert collectors_pkg.get_monitoring_credentials() is None
+        assert collectors_pkg._credentials_resolved is False
+        assert collectors_pkg._monitoring_credentials is None
+
+        # Cycle 2: ADC now succeeds → resolves and caches (self-heal).
+        fake_creds = object()
+        with patch("google.auth.default", return_value=(fake_creds, "proj")):
+            assert collectors_pkg.get_monitoring_credentials() is fake_creds
+        assert collectors_pkg._credentials_resolved is True
+        assert collectors_pkg._monitoring_credentials is fake_creds
+
+
+class TestMediumLoopGcpRegistration:
+    """Finding 6: GCP collectors register per-run, not frozen at import.
+
+    The collector list is rebuilt on each ``run_medium_loop`` call, so GCP
+    collectors appear as soon as ``gcp.project_id`` is configured (config may
+    be loaded / overridden / env-substituted after this module imports).
+    """
+
+    def test_registration_reflects_config_at_call_time(self, monkeypatch):
+        import collectors.medium_loop as ml
+
+        if not ml._GCP_COLLECTORS_AVAILABLE:
+            pytest.skip("gcp extra not installed")
+
+        # Stub the GCP collector singletons so no real cloud calls happen.
+        gcp_metric = MagicMock()
+        gcp_metric.name = "gcp_metrics"
+        gcp_metric.run.return_value = True
+        gcp_slow = MagicMock()
+        gcp_slow.name = "gcp_slow_log"
+        gcp_slow.run.return_value = True
+        monkeypatch.setattr(ml, "_gcp_metric_collector", gcp_metric)
+        monkeypatch.setattr(ml, "_gcp_slow_log_collector", gcp_slow)
+
+        ctx = _mock_ctx_with_data([])
+
+        # Placeholder project_id → GCP collectors must NOT register.
+        monkeypatch.setattr(
+            "config.get_config",
+            lambda: {"gcp": {"project_id": "your-gcp-project-id"}},
+        )
+        results = run_medium_loop(ctx)
+        assert "gcp_metrics" not in results
+        assert "gcp_slow_log" not in results
+        gcp_metric.run.assert_not_called()
+
+        # Real project_id supplied later → same call path now registers them.
+        monkeypatch.setattr(
+            "config.get_config",
+            lambda: {"gcp": {"project_id": "kc-prod-123"}},
+        )
+        results = run_medium_loop(ctx)
+        assert results.get("gcp_metrics") is True
+        assert results.get("gcp_slow_log") is True
+        gcp_metric.run.assert_called_once()
+        gcp_slow.run.assert_called_once()
+
+
 class TestRunFastLoop:
     @patch("collectors.fast_loop.writer")
     def test_returns_results_dict(self, mock_writer):
