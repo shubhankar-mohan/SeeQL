@@ -39,6 +39,12 @@ LIVE_TOOLS: set[str] = {
     "get_table_status",
 }
 EXPENSIVE_TOOL = "explain_query"
+# run_explain falls through to a LIVE `EXPLAIN FORMAT=JSON` against production
+# when no cached plan exists (agent.tools._tool_run_explain), so it must be
+# budgeted like explain_query — not treated as a free snapshot read. We can't
+# tell cache-hit from cache-miss at budget-check time, so cached reads also
+# count; that is the safe direction (bounds live load on a stressed server).
+EXPENSIVE_TOOLS: set[str] = {EXPENSIVE_TOOL, "run_explain"}
 
 
 @dataclass
@@ -65,7 +71,7 @@ class Budget:
 
     def can_call(self, tool_name: str) -> bool:
         """Single entry point used by the tool-execution wrapper."""
-        if tool_name == EXPENSIVE_TOOL:
+        if tool_name in EXPENSIVE_TOOLS:
             return self.can_call_explain()
         if tool_name in LIVE_TOOLS:
             return self.can_call_live()
@@ -73,7 +79,7 @@ class Budget:
 
     def record(self, tool_name: str) -> None:
         """Increment the counter after a successful tool call."""
-        if tool_name == EXPENSIVE_TOOL:
+        if tool_name in EXPENSIVE_TOOLS:
             self._explain_used += 1
         elif tool_name in LIVE_TOOLS:
             self._live_tool_used += 1
@@ -91,11 +97,12 @@ class Budget:
 
     def rejection_message(self, tool_name: str) -> str:
         """Message the LLM sees when a call is budget-rejected."""
-        if tool_name == EXPENSIVE_TOOL:
+        if tool_name in EXPENSIVE_TOOLS:
             return (
                 "Budget exhausted for EXPLAIN queries "
                 f"({self._explain_used}/{self.explain_cap}). "
-                "Use cached run_explain() from snapshot instead."
+                "Rely on EXPLAIN plans already captured in the snapshot data; "
+                "do not run further live EXPLAINs."
             )
         if tool_name in LIVE_TOOLS:
             return (

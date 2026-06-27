@@ -34,10 +34,21 @@ def mon_db_ctx(mon_db):
 class TestBudgetCore:
     def test_snapshot_tools_always_allowed(self):
         b = Budget(investigation_id=1, live_tool_cap=0, explain_cap=0)
-        # Snapshot tools not in LIVE_TOOLS and not EXPENSIVE_TOOL
-        assert b.can_call("run_explain") is True
+        # Snapshot tools not in LIVE_TOOLS and not in EXPENSIVE_TOOLS
+        assert b.can_call("get_query_history") is True
         assert b.can_call("get_table_schema") is True
         assert b.can_call("search_slow_log") is True
+
+    def test_run_explain_budgeted_as_expensive(self):
+        # run_explain falls through to a live EXPLAIN when uncached, so it is
+        # capped by the explain budget rather than treated as a free snapshot.
+        b = Budget(investigation_id=1, live_tool_cap=10, explain_cap=1)
+        assert b.can_call("run_explain") is True
+        b.record("run_explain")
+        assert b.can_call("run_explain") is False
+        # shares the explain counter with explain_query
+        assert b.can_call(EXPENSIVE_TOOL) is False
+        assert b.snapshot()["explain_used"] == 1
 
     def test_live_tool_cap_enforced(self):
         b = Budget(investigation_id=1, live_tool_cap=2)
