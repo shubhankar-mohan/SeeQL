@@ -134,14 +134,22 @@ def _trigger_impl(
 
 def _abort_impl(investigation_id: int, reason: str) -> dict:
     from storage import writer
-    rc = writer.update_investigation(
+    # Guarded update: only non-terminal rows are aborted, so a completed or
+    # already-aborted investigation is never clobbered (rc == 0).
+    rc = writer.abort_investigation(
         investigation_id,
-        status="aborted",
-        abort_reason=reason,
+        reason=reason,
         ended_at=_iso(),
     )
     if rc == 0:
-        return {"error": f"investigation {investigation_id} not found or terminal"}
+        return {
+            "aborted": False,
+            "investigation_id": investigation_id,
+            "error": (
+                f"investigation {investigation_id} not found or already "
+                "in a terminal state"
+            ),
+        }
     return {"aborted": True, "investigation_id": investigation_id, "reason": reason}
 
 

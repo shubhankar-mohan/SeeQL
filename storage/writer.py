@@ -12,7 +12,7 @@ SQLite-specific notes:
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -359,6 +359,30 @@ def update_investigation(investigation_id: int, **fields) -> int:
 
     with get_mon_connection() as conn:
         cursor = conn.execute(sql, values)
+        return cursor.rowcount
+
+
+def abort_investigation(
+    investigation_id: int, reason: str, ended_at: str | None = None
+) -> int:
+    """
+    Mark an investigation as aborted, but only if it is not already in a
+    terminal state. Returns rowcount: 1 if a non-terminal row was aborted,
+    0 if the row was missing or already terminal ('completed'/'aborted') —
+    in which case the caller must NOT report success.
+
+    Kept separate from update_investigation() on purpose: the normal
+    phase-transition path needs its unconditional UPDATE semantics, while
+    aborts must never clobber a finished RCA record.
+    """
+    sql = (
+        "UPDATE investigations "
+        "SET status = 'aborted', abort_reason = ?, ended_at = ? "
+        "WHERE id = ? AND status NOT IN ('completed', 'aborted')"
+    )
+    ended = ended_at or datetime.now(timezone.utc).isoformat()
+    with get_mon_connection() as conn:
+        cursor = conn.execute(sql, (reason, ended, investigation_id))
         return cursor.rowcount
 
 

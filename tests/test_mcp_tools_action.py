@@ -190,7 +190,48 @@ class TestAbortHappyPath:
             from mcp_server.server import create_server
             mcp = create_server()
             res = _call(mcp, "seeql_abort_investigation", {"id": 99999})
+            assert res.get("aborted") is False
             assert "error" in res
+
+    def test_abort_completed_does_not_clobber(self, mon_db):
+        conn, db_path = mon_db
+        with _config_for(db_path, {
+            "action_tools_enabled": True,
+            "allow_abort": True,
+        }):
+            # Seed a *completed* investigation with a finished RCA record.
+            alert_id = writer.write_inbound_alert({
+                "provider": "generic", "received_at": _iso(),
+                "server_id": "prod", "external_id": "a-done",
+                "alert_type": "missing_index", "severity": "warning",
+                "summary": "test", "payload": "{}", "signature_verified": 1,
+            })
+            inv_id = writer.write_investigation({
+                "inbound_alert_id": alert_id, "server_id": "prod",
+                "started_at": _iso(), "ended_at": _iso(),
+                "status": "completed",
+                "root_cause_summary": "Missing idx_foo on members",
+                "confidence": 0.81,
+            })
+
+            from mcp_server.server import create_server
+            mcp = create_server()
+            res = _call(mcp, "seeql_abort_investigation",
+                        {"id": inv_id, "reason": "user_ack"})
+            # Tool must report it did NOT abort a terminal investigation.
+            assert res.get("aborted") is False
+            assert "error" in res
+
+            # The completed RCA record must be untouched.
+            row = conn.execute(
+                "SELECT status, abort_reason, root_cause_summary, confidence "
+                "FROM investigations WHERE id = ?",
+                (inv_id,),
+            ).fetchone()
+            assert row["status"] == "completed"
+            assert row["abort_reason"] is None
+            assert row["root_cause_summary"] == "Missing idx_foo on members"
+            assert row["confidence"] == 0.81
 
 
 class TestExplainQueryGate:
