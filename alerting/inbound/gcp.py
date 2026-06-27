@@ -46,6 +46,25 @@ AUTHORIZATION_HEADER = "authorization"   # OIDC JWT path
 class GCPAdapter:
     provider = "gcp"
 
+    def __init__(self, oidc_audience: str | None = None):
+        # Expected `aud` claim for Google-signed OIDC JWTs. When None it is
+        # read lazily from `webhooks.providers.gcp.oidc_audience` in config.
+        self._oidc_audience = oidc_audience
+
+    def _expected_audience(self) -> str | None:
+        """Resolve the expected OIDC audience: an explicit ctor arg wins,
+        otherwise read `webhooks.providers.gcp.oidc_audience` from config.
+        Returns None when no audience is configured (OIDC is then disabled)."""
+        if self._oidc_audience:
+            return self._oidc_audience
+        try:
+            from config import get_config
+            providers = (get_config().get("webhooks") or {}).get("providers") or {}
+            aud = (providers.get("gcp") or {}).get("oidc_audience")
+            return str(aud) if aud else None
+        except Exception:
+            return None
+
     def verify_signature(
         self,
         body: bytes,
@@ -54,16 +73,22 @@ class GCPAdapter:
     ) -> bool:
         # Preferred: OIDC JWT verification. We keep the heavyweight
         # google-auth import optional so the base install stays light.
+        #
+        # SECURITY: an audience MUST be configured. verify_oauth2_token with
+        # no `audience` accepts ANY Google-signed token (any GCP account) —
+        # an auth bypass. When no audience is configured we skip OIDC entirely
+        # and fall back to HMAC rather than trusting a bare Google-signed token.
         oidc_token = _bearer_token(headers)
         if oidc_token:
-            try:
-                from google.oauth2 import id_token  # type: ignore
-                from google.auth.transport import requests as grequests  # type: ignore
-                id_token.verify_oauth2_token(oidc_token, grequests.Request())
-                return True
-            except Exception:
-                # Fall through to HMAC fallback rather than failing outright.
-                pass
+            audience = self._expected_audience()
+            if audience:
+                try:
+                    if _verify_oidc_token(oidc_token, audience):
+                        return True
+                except Exception:
+                    # Fall through to HMAC fallback rather than failing outright.
+                    pass
+            # No audience configured → OIDC disabled; fall through to HMAC.
 
         # Fallback: shared-secret HMAC over raw body (same scheme as generic).
         if not secret:
@@ -141,6 +166,24 @@ class GCPAdapter:
             context={"policy_name": policy_name, "state": state, "raw_severity": incident.get("severity")},
             raw_payload=dict(payload),
         )
+
+
+def _verify_oidc_token(token: str, audience: str) -> bool:
+    """Verify a Google-issued OIDC JWT against the expected audience.
+
+    Returns True only when the token is Google-signed (issuer + signature +
+    expiry enforced by verify_oauth2_token) AND its `aud` claim equals
+    `audience`. Raises on any failure — the caller treats exceptions as
+    "not verified". The google-auth import is local so the base install
+    stays light.
+    """
+    from google.oauth2 import id_token  # type: ignore
+    from google.auth.transport import requests as grequests  # type: ignore
+
+    # `audience=` enforces the aud-claim match; verify_oauth2_token also
+    # enforces the Google issuer, signature, and expiry checks.
+    id_token.verify_oauth2_token(token, grequests.Request(), audience=audience)
+    return True
 
 
 def _header(headers: Mapping[str, str], name: str) -> str | None:

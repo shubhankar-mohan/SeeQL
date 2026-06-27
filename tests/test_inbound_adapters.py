@@ -194,6 +194,56 @@ class TestGCPAdapter:
         a = GCPAdapter()
         assert a.verify_signature(b"{}", {}, self.SECRET) is False
 
+    def test_oidc_accepted_when_audience_matches(self, monkeypatch):
+        # google-auth verify_oauth2_token succeeds (token Google-signed AND
+        # aud matches) → adapter accepts without touching HMAC.
+        import alerting.inbound.gcp as gcpmod
+        monkeypatch.setattr(gcpmod, "_verify_oidc_token", lambda token, audience: True)
+        a = GCPAdapter(oidc_audience="https://seeql.example.com/webhooks/gcp")
+        headers = {"Authorization": "Bearer good.jwt.token"}
+        assert a.verify_signature(b"{}", headers, self.SECRET) is True
+
+    def test_oidc_rejected_when_audience_mismatch(self, monkeypatch):
+        # verify_oauth2_token raises on an aud-claim mismatch. With no HMAC
+        # signature present the request must be rejected outright (no bypass).
+        import alerting.inbound.gcp as gcpmod
+
+        def _raise(token, audience):
+            raise ValueError("Token has wrong audience")
+
+        monkeypatch.setattr(gcpmod, "_verify_oidc_token", _raise)
+        a = GCPAdapter(oidc_audience="https://seeql.example.com/webhooks/gcp")
+        headers = {"Authorization": "Bearer attacker.jwt.token"}
+        assert a.verify_signature(b"{}", headers, self.SECRET) is False
+
+    def test_oidc_skipped_without_audience_falls_back_to_hmac(self, monkeypatch):
+        # No audience configured → OIDC must NOT be attempted at all (a bare
+        # Google-signed token is not trusted); HMAC fallback still works.
+        import alerting.inbound.gcp as gcpmod
+        called = {"oidc": False}
+
+        def _boom(token, audience):  # pragma: no cover - must never run
+            called["oidc"] = True
+            return True
+
+        monkeypatch.setattr(gcpmod, "_verify_oidc_token", _boom)
+        monkeypatch.setattr(gcpmod.GCPAdapter, "_expected_audience", lambda self: None)
+
+        a = GCPAdapter()
+        body = json.dumps(GCP_HIGH_CPU_OPEN).encode()
+        sig = hmac.new(self.SECRET.encode(), body, hashlib.sha256).hexdigest()
+        headers = {"Authorization": "Bearer google.signed.token", "X-SeeQL-Signature": sig}
+        assert a.verify_signature(body, headers, self.SECRET) is True
+        assert called["oidc"] is False
+
+    def test_oidc_token_without_audience_and_no_hmac_rejected(self, monkeypatch):
+        # Bare Google-signed token, no audience, no HMAC sig → rejected.
+        import alerting.inbound.gcp as gcpmod
+        monkeypatch.setattr(gcpmod.GCPAdapter, "_expected_audience", lambda self: None)
+        a = GCPAdapter()
+        headers = {"Authorization": "Bearer google.signed.token"}
+        assert a.verify_signature(b"{}", headers, self.SECRET) is False
+
     def test_normalize_open_incident(self):
         a = GCPAdapter()
         alert = a.normalize(

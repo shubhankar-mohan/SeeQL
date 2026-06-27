@@ -202,6 +202,32 @@ class TestConcurrencyAndRate:
         })
         assert limited.status_code == 429
 
+    def test_invalid_signature_does_not_consume_rate_budget(self, client):
+        # Rate limit must be charged AFTER signature verification, so a flood
+        # of unauthenticated garbage cannot drain the bucket and 429 a real
+        # signed alert.
+        config_module._config["webhooks"]["rate_limit_per_minute"] = 1
+        _reset_rate_limiter_for_tests()
+
+        for i in range(5):
+            body = json.dumps({"external_id": f"bad-{i}"}).encode()
+            r = client.post(
+                "/webhooks/generic",
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-SeeQL-Signature": "sha256=deadbeef",
+                },
+            )
+            assert r.status_code == 401
+
+        # The single token is still available for the first valid request.
+        ok = _post(client, "/webhooks/generic", {
+            "alert_type": "lock_cascade", "severity": "critical",
+            "summary": "valid", "external_id": "valid-after-flood",
+        })
+        assert ok.status_code == 202
+
 
 class TestPersistence:
     def test_payload_persisted_verbatim(self, client, mon_db):

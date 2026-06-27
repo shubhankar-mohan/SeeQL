@@ -215,10 +215,6 @@ async def receive_webhook(provider: str, request: Request) -> dict:
     if adapter is None:
         raise HTTPException(status_code=404, detail=f"unknown provider '{provider}'")
 
-    rate = int(cfg.get("rate_limit_per_minute", 60) or 60)
-    if not _check_rate_limit(provider, rate):
-        raise HTTPException(status_code=429, detail="rate limit exceeded")
-
     # RAW body first — signature verification MUST happen before JSON parse.
     body: bytes = await request.body()
     headers: dict[str, str] = dict(request.headers)
@@ -232,6 +228,13 @@ async def receive_webhook(provider: str, request: Request) -> dict:
     if not verified:
         logger.info(f"webhook {provider}: signature verification failed")
         raise HTTPException(status_code=401, detail="invalid signature")
+
+    # Rate-limit AFTER authentication only. Consuming a token before verifying
+    # the signature lets unauthenticated garbage drain the per-provider bucket
+    # and 429 legitimate signed alerts. Only authenticated requests pay.
+    rate = int(cfg.get("rate_limit_per_minute", 60) or 60)
+    if not _check_rate_limit(provider, rate):
+        raise HTTPException(status_code=429, detail="rate limit exceeded")
 
     try:
         payload: dict[str, Any] = json.loads(body.decode("utf-8"))

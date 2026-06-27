@@ -11,6 +11,7 @@ how bytes move. Safety rails apply identically.
 
 from __future__ import annotations
 
+import hmac
 import logging
 from typing import Any
 
@@ -158,10 +159,12 @@ def _wrap_with_auth(app, auth: str, token: str | None):
             # every request goes through the token check.
             auth_header = request.headers.get("authorization") or ""
             parts = auth_header.split()
+            # Constant-time compare — `==` short-circuits and leaks the token
+            # via response-timing differences.
             ok = (
                 len(parts) == 2
                 and parts[0].lower() == "bearer"
-                and parts[1] == token
+                and hmac.compare_digest(parts[1], token)
             )
             if not ok:
                 return JSONResponse(

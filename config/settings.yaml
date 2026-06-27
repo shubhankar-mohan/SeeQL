@@ -152,6 +152,12 @@ webhooks:
       enabled: false
       secret: "${SEEQL_GCP_WEBHOOK_SECRET}"
       verify_oidc: true               # Prefer Google-signed OIDC over HMAC
+      oidc_audience: ""               # REQUIRED for OIDC: expected `aud` claim,
+                                      # i.e. this service's public webhook URL
+                                      # (e.g. https://seeql.example.com/webhooks/gcp).
+                                      # If empty, OIDC is disabled and only the HMAC
+                                      # `secret` path is accepted — never a bare
+                                      # Google-signed token without an audience match.
       policy_map:                     # Cloud Monitoring policy → SeeQL trigger
         high-cpu-policy: high_cpu
         lock-wait-policy: lock_cascade
