@@ -62,6 +62,29 @@ def _seed_digest(conn, digest, server_id, table, ratio_multiplier=1000, exec_cou
     )
 
 
+def _seed_zero_rows_digest(
+    conn, digest, server_id, table, rows_examined=1_000_000, exec_count=500
+):
+    """A full scan that examines many rows but returns *zero* — the canonical
+    missing-index symptom (WHERE on an unindexed column with no matches)."""
+    conn.execute(
+        """INSERT INTO query_digest_snapshots
+           (server_id, snapshot_time, digest, digest_text, schema_name,
+            exec_count, total_time_sec, avg_time_sec, max_time_sec, min_time_sec,
+            rows_examined, rows_sent, rows_affected,
+            full_scans, no_index_used)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            server_id, _now_iso(), digest,
+            f"SELECT * FROM {table} WHERE foo = ?",
+            "testdb",
+            exec_count, 10.0, 10.0 / max(exec_count, 1), 2.0, 0.01,
+            rows_examined, 0, 0,
+            5, 5,
+        ),
+    )
+
+
 def _seed_explain(conn, digest, server_id, table, access_type="ALL"):
     explain_json = json.dumps({
         "query_block": {
@@ -134,6 +157,27 @@ class TestCorrelator:
         assert "0xMID" in digests
         assert "0xLOW" not in digests
         assert c.has_findings is True
+
+    def test_zero_rows_sent_full_scan_is_discovered(self, mon_db_ctx):
+        conn, _ = mon_db_ctx
+        # Examines a million rows, returns none — must be flagged even though
+        # rows_sent == 0 (the bug previously excluded it via `rows_sent > 0`).
+        _seed_zero_rows_digest(conn, "0xZERO", "srv1", "members", rows_examined=1_000_000)
+        # A tiny zero-row scan should NOT be flagged (below threshold).
+        _seed_zero_rows_digest(conn, "0xTINY", "srv1", "scratch", rows_examined=5)
+        conn.commit()
+
+        c = correlate_missing_index("srv1", _hours_ago(1), _now_iso())
+        digests = {e.digest for e in c.evidence}
+        assert "0xZERO" in digests
+        assert "0xTINY" not in digests
+        assert c.has_findings is True
+
+        e = next(ev for ev in c.evidence if ev.digest == "0xZERO")
+        assert e.rows_sent == 0
+        assert e.rows_examined == 1_000_000
+        # Ratio falls back to rows_examined when rows_sent == 0 — no div-by-zero.
+        assert e.ratio == 1_000_000.0
 
     def test_suspect_digests_override_discovery(self, mon_db_ctx):
         conn, _ = mon_db_ctx

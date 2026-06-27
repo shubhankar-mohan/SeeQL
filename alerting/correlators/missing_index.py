@@ -259,8 +259,10 @@ def _discover_suspect_digests(
         FROM query_digest_snapshots
         WHERE server_id = ?
           AND snapshot_time BETWEEN ? AND ?
-          AND rows_sent > 0
           AND (
+              -- When rows_sent == 0 (the canonical missing-index symptom: a
+              -- huge scan returning no rows), fall back to rows_examined as the
+              -- effective "ratio" instead of excluding the digest entirely.
               CASE WHEN rows_sent > 0
                    THEN CAST(rows_examined AS REAL) / rows_sent
                    ELSE rows_examined
