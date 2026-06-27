@@ -9,6 +9,7 @@ Tools are defined as Anthropic tool_use schemas and have matching execution
 functions. The Gemini conversion happens in llm_agent.py.
 """
 
+import contextvars
 import json
 import logging
 import time
@@ -25,26 +26,45 @@ _LIVE_QUERY_TIMEOUT = 10
 _LIVE_TOOL_MAX_RETRIES = 2
 _LIVE_TOOL_RETRY_DELAY = 0.5
 
-# Current server context for live tool calls (set by llm_agent before each analysis)
-_current_server_id: str | None = None
+# Per-context server + budget for live tool calls.
+#
+# These MUST be ContextVars, not module globals: investigations run in a
+# ThreadPoolExecutor (multiple concurrent) and the MCP server runs concurrent
+# async tasks. A plain global would let one investigation overwrite or clear
+# another's target server / budget mid-flight. A ContextVar gives each thread
+# its own context (threads start with the default) and each asyncio task its
+# own copy, so set()/get()/reset within one context never leak across others.
+_current_server_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "seeql_current_server_id", default=None
+)
 
 # Current tool budget (set by run_llm_analysis when invoked from the webhook
 # investigator). When set, execute_tool rejects calls that the budget disallows
 # by returning a rejection message the LLM sees — same shape as existing
 # tool errors, so the model naturally backs off.
-_current_budget = None  # type: ignore[var-annotated]
+_current_budget: contextvars.ContextVar = contextvars.ContextVar(
+    "seeql_current_budget", default=None
+)
 
 
 def set_current_server(server_id: str):
-    """Set which server live tools should connect to."""
-    global _current_server_id
-    _current_server_id = server_id
+    """Set which server live tools should connect to (for this context)."""
+    _current_server_id.set(server_id)
+
+
+def get_current_server() -> str | None:
+    """Return the server live tools should connect to for this context."""
+    return _current_server_id.get()
 
 
 def set_current_budget(budget) -> None:
-    """Set the active tool budget. Pass None to clear."""
-    global _current_budget
-    _current_budget = budget
+    """Set the active tool budget for this context. Pass None to clear."""
+    _current_budget.set(budget)
+
+
+def get_current_budget():
+    """Return the active tool budget for this context (or None)."""
+    return _current_budget.get()
 
 
 # --- Tool Definitions (Anthropic tool_use format) ---
@@ -351,8 +371,8 @@ def execute_tool(name: str, input_data: dict) -> str:
     if not handler:
         return json.dumps({"error": f"Unknown tool: {name}"})
 
-    # Budget gate (webhook investigator only; no-op when _current_budget is None).
-    budget = _current_budget
+    # Budget gate (webhook investigator only; no-op when no budget is set).
+    budget = _current_budget.get()
     if budget is not None and not budget.can_call(name):
         msg = budget.rejection_message(name)
         logger.info(f"Tool {name} rejected by budget: {msg}")
@@ -408,7 +428,7 @@ def _tool_run_explain(input_data: dict) -> dict:
         return {"error": f"Cannot EXPLAIN non-SELECT query: {sql_text[:50]}"}
 
     try:
-        with get_prod_connection(_current_server_id) as conn:
+        with get_prod_connection(_current_server_id.get()) as conn:
             cursor = conn.cursor(dictionary=True)
             if schema:
                 cursor.execute(f"USE `{schema}`")
@@ -438,7 +458,7 @@ def _tool_get_table_schema(input_data: dict) -> dict:
 
     # Fall back to production
     try:
-        with get_prod_connection(_current_server_id) as conn:
+        with get_prod_connection(_current_server_id.get()) as conn:
             cursor = conn.cursor()
             cursor.execute(f"SHOW CREATE TABLE `{schema_name}`.`{table_name}`")
             result = cursor.fetchone()
@@ -492,7 +512,7 @@ def _run_live_query(query: str, params: tuple = (), dictionary: bool = True) -> 
     last_err = None
     for attempt in range(_LIVE_TOOL_MAX_RETRIES + 1):
         try:
-            with get_prod_connection(_current_server_id) as conn:
+            with get_prod_connection(_current_server_id.get()) as conn:
                 cursor = conn.cursor(dictionary=dictionary)
                 cursor.execute(f"SET SESSION MAX_EXECUTION_TIME = {_LIVE_QUERY_TIMEOUT * 1000}")
                 cursor.execute(query, params)
@@ -559,7 +579,7 @@ def _tool_get_live_locks(input_data: dict) -> dict:
 
 
 def _tool_get_live_innodb_status(input_data: dict) -> dict:
-    with get_prod_connection(_current_server_id) as conn:
+    with get_prod_connection(_current_server_id.get()) as conn:
         cursor = conn.cursor()
         cursor.execute("SHOW ENGINE INNODB STATUS")
         result = cursor.fetchone()
@@ -721,7 +741,7 @@ def _tool_explain_query(input_data: dict) -> dict:
         return {"error": "Multiple statements not allowed"}
 
     try:
-        with get_prod_connection(_current_server_id) as conn:
+        with get_prod_connection(_current_server_id.get()) as conn:
             cursor = conn.cursor(dictionary=True)
             cursor.execute(f"SET SESSION MAX_EXECUTION_TIME = {_LIVE_QUERY_TIMEOUT * 1000}")
             if schema_name:
