@@ -22,6 +22,7 @@ jobs:
       contents: read
       packages: write
       id-token: write
+      security-events: write    # upload Trivy SARIF to code scanning
     strategy:
       fail-fast: false
       matrix:
@@ -93,11 +94,20 @@ jobs:
             cosign sign --yes "${tag}@${DIGEST}"
           done
 
+      # OCI refs must be lowercase, but github.repository can contain uppercase
+      # (e.g. shubhankar-mohan/SeeQL), which Trivy cannot parse. Lowercase it.
+      - name: Lowercase image ref for Trivy
+        id: imgref
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: echo "ref=${REGISTRY}/${IMAGE_NAME,,}@${DIGEST}" >> "$GITHUB_OUTPUT"
+
       - name: Trivy vulnerability scan
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          image-ref: ${{ steps.imgref.outputs.ref }}
           format: sarif
           output: trivy-${{ matrix.variant }}.sarif
           severity: HIGH,CRITICAL
