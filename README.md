@@ -9,7 +9,8 @@ Cloud SQL, AWS RDS/Aurora, or self-hosted.
 <!-- Screenshot placeholder — capture and drop in docs/screenshots/dashboard.png -->
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Docker](https://img.shields.io/badge/docker-ghcr.io-blue?logo=docker)](https://github.com/shubhankar-mohan/SeeQL/pkgs/container/seeql)
+[![Docker Hub](https://img.shields.io/badge/docker%20hub-shubhankarmohan%2Fseeql-blue?logo=docker)](https://hub.docker.com/r/shubhankarmohan/seeql)
+[![GHCR](https://img.shields.io/badge/ghcr.io-shubhankar--mohan%2Fseeql-blue?logo=docker)](https://github.com/shubhankar-mohan/SeeQL/pkgs/container/seeql)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](pyproject.toml)
 [![Build status](https://img.shields.io/github/actions/workflow/status/shubhankar-mohan/SeeQL/docker-publish.yml?branch=main)](https://github.com/shubhankar-mohan/SeeQL/actions/workflows/docker-publish.yml)
 
@@ -47,7 +48,7 @@ docker run -d --name seeql \
   -e PROD_DB_DATABASE=your_database \
   -v seeql-data:/app/data \
   -v seeql-logs:/app/logs \
-  ghcr.io/shubhankar-mohan/seeql:latest
+  shubhankarmohan/seeql:latest
 ```
 
 Then:
@@ -70,9 +71,12 @@ open http://localhost:8080                 # dashboard
 **Pull:**
 
 ```bash
+# Docker Hub
+docker pull shubhankarmohan/seeql:latest
+# or GitHub Container Registry (GHCR)
 docker pull ghcr.io/shubhankar-mohan/seeql:latest
-# or the GCP variant (adds Cloud Monitoring + Cloud Logging collectors)
-docker pull ghcr.io/shubhankar-mohan/seeql:latest-gcp
+# GCP variant (adds Cloud Monitoring + Cloud Logging collectors)
+docker pull shubhankarmohan/seeql:latest-gcp
 ```
 
 Images are built for `linux/amd64` and `linux/arm64` (works on Apple Silicon,
