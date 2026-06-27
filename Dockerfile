@@ -6,8 +6,10 @@
 #
 # Variants (pick at build time via --build-arg INSTALL_EXTRAS=...):
 #   api       (default)  — generic image, works against any MySQL 8.0+
-#   api,gcp              — adds Cloud Monitoring, Cloud Logging, and
-#                          google-genai (Vertex AI Gemini) support
+#   api,gcp              — adds Cloud Monitoring and Cloud Logging support
+#
+# google-genai (Vertex AI / Gemini backend) is installed in every variant so
+# the documented default model (gemini-2.0-flash) works out of the box.
 #
 # Build args:
 #   SEEQL_VERSION    Image version label (default: dev)
@@ -57,7 +59,9 @@ COPY agent/ ./agent/
 COPY alerting/ ./alerting/
 COPY seeql/ ./seeql/
 
-RUN pip wheel --wheel-dir /wheels ".[${INSTALL_EXTRAS}]"
+# google-genai is built unconditionally so the default (api-only) runtime
+# image can import the Gemini/Vertex backend without the [gcp] extra.
+RUN pip wheel --wheel-dir /wheels ".[${INSTALL_EXTRAS}]" google-genai
 
 # ---------- Stage 2: runtime ----------
 FROM ${PYTHON_IMAGE} AS runtime
@@ -89,7 +93,7 @@ WORKDIR /app
 
 # Install from the pre-built wheels — no network access needed
 COPY --from=builder /wheels /wheels
-RUN pip install --no-index --find-links=/wheels "seeql[${INSTALL_EXTRAS}]" \
+RUN pip install --no-index --find-links=/wheels "seeql[${INSTALL_EXTRAS}]" google-genai \
     && rm -rf /wheels \
     && find /usr/local/lib/python3.12 -type d -name '__pycache__' -prune -exec rm -rf {} +
 
