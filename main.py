@@ -448,10 +448,9 @@ def cmd_investigations(args):
         return
 
     if sub_cmd == "abort":
-        rc = writer.update_investigation(
+        rc = writer.abort_investigation(
             args.id,
-            status="aborted",
-            abort_reason=args.reason,
+            reason=args.reason,
             ended_at=datetime.now(timezone.utc).isoformat(),
         )
         if rc == 0:

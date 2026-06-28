@@ -381,10 +381,18 @@ def execute_tool(name: str, input_data: dict) -> str:
     try:
         result = handler(input_data)
         if budget is not None:
-            try:
-                budget.record(name)
-            except Exception:
-                logger.debug(f"budget.record({name}) failed; continuing")
+            # Cache-first tools (run_explain, get_table_schema) only consume
+            # budget when they actually hit production; a cache/snapshot hit or
+            # a no-op error return must not burn the (small) explain/live cap.
+            cache_first = name in ("run_explain", "get_table_schema")
+            consumed_live = (not cache_first) or (
+                isinstance(result, dict) and result.get("source") == "live"
+            )
+            if consumed_live:
+                try:
+                    budget.record(name)
+                except Exception:
+                    logger.debug(f"budget.record({name}) failed; continuing")
         return json.dumps(result, default=str)
     except Exception as e:
         logger.error(f"Tool {name} failed: {e}")

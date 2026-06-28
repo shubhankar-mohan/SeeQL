@@ -36,7 +36,7 @@ class TestBudgetCore:
         b = Budget(investigation_id=1, live_tool_cap=0, explain_cap=0)
         # Snapshot tools not in LIVE_TOOLS and not in EXPENSIVE_TOOLS
         assert b.can_call("get_query_history") is True
-        assert b.can_call("get_table_schema") is True
+        assert b.can_call("get_lock_graph") is True
         assert b.can_call("search_slow_log") is True
 
     def test_run_explain_budgeted_as_expensive(self):

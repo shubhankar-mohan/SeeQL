@@ -468,8 +468,15 @@ def run_llm_analysis(
         else:
             text = _run_anthropic_loop(backend, max_tokens, max_tool_rounds, prompt)
     finally:
-        # Clear the budget so subsequent non-investigator calls don't inherit it.
+        # Clear the per-investigation context so later calls on this (possibly
+        # pooled) thread don't inherit a stale budget or target server.
+        # ContextVars are NOT reset between APScheduler jobs that reuse a worker
+        # thread, so reset both explicitly.
         set_current_budget(None)
+        try:
+            set_current_server(None)
+        except Exception:
+            pass
 
     # Parse severity + sections locally (same logic as _parse_and_store) so
     # we can use the one-shot writer and capture the row id.

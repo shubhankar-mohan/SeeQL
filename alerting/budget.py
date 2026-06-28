@@ -37,6 +37,9 @@ LIVE_TOOLS: set[str] = {
     "get_live_transactions",
     "get_index_stats",
     "get_table_status",
+    # get_table_schema reads snapshots first but falls through to a live
+    # SHOW CREATE TABLE on a miss, so its live path is budgeted too.
+    "get_table_schema",
 }
 EXPENSIVE_TOOL = "explain_query"
 # run_explain falls through to a LIVE `EXPLAIN FORMAT=JSON` against production
