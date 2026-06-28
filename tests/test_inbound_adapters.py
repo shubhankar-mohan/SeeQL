@@ -194,52 +194,73 @@ class TestGCPAdapter:
         a = GCPAdapter()
         assert a.verify_signature(b"{}", {}, self.SECRET) is False
 
-    def test_oidc_accepted_when_audience_matches(self, monkeypatch):
-        # google-auth verify_oauth2_token succeeds (token Google-signed AND
-        # aud matches) → adapter accepts without touching HMAC.
+    def test_oidc_accepted_when_audience_and_sa_match(self, monkeypatch):
+        # Token Google-signed, aud matches, AND email allow-listed → accept
+        # without touching HMAC.
         import alerting.inbound.gcp as gcpmod
-        monkeypatch.setattr(gcpmod, "_verify_oidc_token", lambda token, audience: True)
+        monkeypatch.setattr(gcpmod, "_verify_oidc_token",
+                            lambda token, audience, allowed: True)
+        monkeypatch.setattr(gcpmod.GCPAdapter, "_allowed_sa_emails",
+                            lambda self: {"svc@x.iam.gserviceaccount.com"})
         a = GCPAdapter(oidc_audience="https://seeql.example.com/webhooks/gcp")
         headers = {"Authorization": "Bearer good.jwt.token"}
         assert a.verify_signature(b"{}", headers, self.SECRET) is True
 
-    def test_oidc_rejected_when_audience_mismatch(self, monkeypatch):
-        # verify_oauth2_token raises on an aud-claim mismatch. With no HMAC
+    def test_oidc_rejected_when_sa_not_allowlisted(self, monkeypatch):
+        # aud matches but the token's SA email is NOT allow-listed → the
+        # audience-only bypass is closed; with no HMAC sig the request fails.
+        import alerting.inbound.gcp as gcpmod
+        monkeypatch.setattr(
+            gcpmod, "_verify_oidc_token",
+            lambda token, audience, allowed: "attacker@evil.gserviceaccount.com" in allowed,
+        )
+        monkeypatch.setattr(gcpmod.GCPAdapter, "_allowed_sa_emails",
+                            lambda self: {"svc@x.iam.gserviceaccount.com"})
+        a = GCPAdapter(oidc_audience="https://seeql.example.com/webhooks/gcp")
+        headers = {"Authorization": "Bearer attacker.but.google.signed.token"}
+        assert a.verify_signature(b"{}", headers, self.SECRET) is False
+
+    def test_oidc_rejected_when_verification_raises(self, monkeypatch):
+        # verify_oauth2_token raises (bad signature / wrong aud). With no HMAC
         # signature present the request must be rejected outright (no bypass).
         import alerting.inbound.gcp as gcpmod
 
-        def _raise(token, audience):
+        def _raise(token, audience, allowed):
             raise ValueError("Token has wrong audience")
 
         monkeypatch.setattr(gcpmod, "_verify_oidc_token", _raise)
+        monkeypatch.setattr(gcpmod.GCPAdapter, "_allowed_sa_emails",
+                            lambda self: {"svc@x.iam.gserviceaccount.com"})
         a = GCPAdapter(oidc_audience="https://seeql.example.com/webhooks/gcp")
         headers = {"Authorization": "Bearer attacker.jwt.token"}
         assert a.verify_signature(b"{}", headers, self.SECRET) is False
 
-    def test_oidc_skipped_without_audience_falls_back_to_hmac(self, monkeypatch):
-        # No audience configured → OIDC must NOT be attempted at all (a bare
-        # Google-signed token is not trusted); HMAC fallback still works.
+    def test_oidc_skipped_without_full_config_falls_back_to_hmac(self, monkeypatch):
+        # Audience set but NO allow-list → OIDC must NOT be attempted (an
+        # audience-only token is forgeable); HMAC fallback still works.
         import alerting.inbound.gcp as gcpmod
         called = {"oidc": False}
 
-        def _boom(token, audience):  # pragma: no cover - must never run
+        def _boom(token, audience, allowed):  # pragma: no cover - must never run
             called["oidc"] = True
             return True
 
         monkeypatch.setattr(gcpmod, "_verify_oidc_token", _boom)
-        monkeypatch.setattr(gcpmod.GCPAdapter, "_expected_audience", lambda self: None)
+        monkeypatch.setattr(gcpmod.GCPAdapter, "_allowed_sa_emails", lambda self: set())
 
-        a = GCPAdapter()
+        a = GCPAdapter(oidc_audience="https://seeql.example.com/webhooks/gcp")
         body = json.dumps(GCP_HIGH_CPU_OPEN).encode()
         sig = hmac.new(self.SECRET.encode(), body, hashlib.sha256).hexdigest()
         headers = {"Authorization": "Bearer google.signed.token", "X-SeeQL-Signature": sig}
         assert a.verify_signature(body, headers, self.SECRET) is True
         assert called["oidc"] is False
 
-    def test_oidc_token_without_audience_and_no_hmac_rejected(self, monkeypatch):
-        # Bare Google-signed token, no audience, no HMAC sig → rejected.
+    def test_oidc_token_without_config_and_no_hmac_rejected(self, monkeypatch):
+        # Bare Google-signed token, OIDC not fully configured, no HMAC sig →
+        # rejected (no bypass).
         import alerting.inbound.gcp as gcpmod
         monkeypatch.setattr(gcpmod.GCPAdapter, "_expected_audience", lambda self: None)
+        monkeypatch.setattr(gcpmod.GCPAdapter, "_allowed_sa_emails", lambda self: set())
         a = GCPAdapter()
         headers = {"Authorization": "Bearer google.signed.token"}
         assert a.verify_signature(b"{}", headers, self.SECRET) is False

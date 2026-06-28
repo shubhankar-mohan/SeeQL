@@ -155,9 +155,14 @@ webhooks:
       oidc_audience: ""               # REQUIRED for OIDC: expected `aud` claim,
                                       # i.e. this service's public webhook URL
                                       # (e.g. https://seeql.example.com/webhooks/gcp).
-                                      # If empty, OIDC is disabled and only the HMAC
-                                      # `secret` path is accepted — never a bare
-                                      # Google-signed token without an audience match.
+      oidc_allowed_sa: []             # REQUIRED for OIDC (with oidc_audience):
+                                      # Cloud Monitoring notification SA email(s)
+                                      # allowed to POST, e.g.
+                                      # ["svc-123@gcp-sa-monitoring-notification.iam.gserviceaccount.com"].
+                                      # The audience is forgeable; this allow-list
+                                      # is the trust anchor. If either this or
+                                      # oidc_audience is empty, OIDC is disabled
+                                      # and only the HMAC `secret` path is accepted.
       policy_map:                     # Cloud Monitoring policy → SeeQL trigger
         high-cpu-policy: high_cpu
         lock-wait-policy: lock_cascade

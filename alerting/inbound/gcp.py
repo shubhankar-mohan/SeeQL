@@ -28,6 +28,7 @@ investigator treats CLOSED-only incidents as informational.
 
 import hmac
 import hashlib
+import logging
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
@@ -41,6 +42,21 @@ from alerting.inbound.normalizer import (
 
 SIGNATURE_HEADER = "x-seeql-signature"  # HMAC fallback
 AUTHORIZATION_HEADER = "authorization"   # OIDC JWT path
+
+logger = logging.getLogger(__name__)
+_oidc_misconfig_warned = False
+
+
+def _warn_oidc_misconfig() -> None:
+    """Warn once when an OIDC token arrives but OIDC isn't fully configured."""
+    global _oidc_misconfig_warned
+    if not _oidc_misconfig_warned:
+        logger.warning(
+            "GCP webhook received an OIDC bearer token but OIDC is not fully "
+            "configured (need both webhooks.providers.gcp.oidc_audience and "
+            "oidc_allowed_sa); falling back to HMAC. Set both to accept OIDC."
+        )
+        _oidc_misconfig_warned = True
 
 
 class GCPAdapter:
@@ -65,6 +81,21 @@ class GCPAdapter:
         except Exception:
             return None
 
+    def _allowed_sa_emails(self) -> set[str]:
+        """Lower-cased set of service-account emails allowed via OIDC, from
+        `webhooks.providers.gcp.oidc_allowed_sa` in config. The audience match
+        alone is forgeable, so this allow-list is the real trust anchor. An
+        empty set disables OIDC (HMAC-only)."""
+        try:
+            from config import get_config
+            providers = (get_config().get("webhooks") or {}).get("providers") or {}
+            raw = (providers.get("gcp") or {}).get("oidc_allowed_sa") or []
+            if isinstance(raw, str):
+                raw = [raw]
+            return {str(e).strip().lower() for e in raw if str(e).strip()}
+        except Exception:
+            return set()
+
     def verify_signature(
         self,
         body: bytes,
@@ -74,21 +105,27 @@ class GCPAdapter:
         # Preferred: OIDC JWT verification. We keep the heavyweight
         # google-auth import optional so the base install stays light.
         #
-        # SECURITY: an audience MUST be configured. verify_oauth2_token with
-        # no `audience` accepts ANY Google-signed token (any GCP account) —
-        # an auth bypass. When no audience is configured we skip OIDC entirely
-        # and fall back to HMAC rather than trusting a bare Google-signed token.
+        # SECURITY: OIDC requires BOTH a configured audience AND an allow-list
+        # of accepted service-account emails. The audience (the public webhook
+        # URL) is not secret, so an audience match alone is forgeable by any
+        # Google identity; the SA-email allow-list is the real trust anchor.
+        # If either is unset, OIDC is disabled and we fall back to HMAC.
         oidc_token = _bearer_token(headers)
         if oidc_token:
             audience = self._expected_audience()
-            if audience:
+            allowed = self._allowed_sa_emails()
+            if audience and allowed:
                 try:
-                    if _verify_oidc_token(oidc_token, audience):
+                    if _verify_oidc_token(oidc_token, audience, allowed):
                         return True
                 except Exception:
                     # Fall through to HMAC fallback rather than failing outright.
                     pass
-            # No audience configured → OIDC disabled; fall through to HMAC.
+            else:
+                _warn_oidc_misconfig()
+            # OIDC needs both an audience and an allow-listed SA; otherwise it
+            # is disabled and we fall back to HMAC rather than trust a
+            # forgeable audience-only token.
 
         # Fallback: shared-secret HMAC over raw body (same scheme as generic).
         if not secret:
@@ -168,22 +205,26 @@ class GCPAdapter:
         )
 
 
-def _verify_oidc_token(token: str, audience: str) -> bool:
-    """Verify a Google-issued OIDC JWT against the expected audience.
+def _verify_oidc_token(token: str, audience: str, allowed_emails: set[str]) -> bool:
+    """Verify a Google-issued OIDC JWT against the expected audience AND the
+    allow-listed service-account email(s).
 
-    Returns True only when the token is Google-signed (issuer + signature +
-    expiry enforced by verify_oauth2_token) AND its `aud` claim equals
-    `audience`. Raises on any failure — the caller treats exceptions as
-    "not verified". The google-auth import is local so the base install
-    stays light.
+    The audience match alone is NOT authentication: the audience is the public
+    webhook URL, so any Google identity can mint a token with that `aud`. We
+    therefore also require the token's `email` claim to be one of the configured
+    Cloud Monitoring service accounts. Returns True only when the token is
+    Google-signed (issuer + signature + expiry enforced by verify_oauth2_token),
+    `aud` equals `audience`, AND `email` is allow-listed. Raises on any failure
+    — the caller treats exceptions as "not verified".
     """
     from google.oauth2 import id_token  # type: ignore
     from google.auth.transport import requests as grequests  # type: ignore
 
-    # `audience=` enforces the aud-claim match; verify_oauth2_token also
-    # enforces the Google issuer, signature, and expiry checks.
-    id_token.verify_oauth2_token(token, grequests.Request(), audience=audience)
-    return True
+    # `audience=` enforces the aud-claim match; verify_oauth2_token also enforces
+    # the Google issuer, signature, and expiry checks and returns the claims.
+    claims = id_token.verify_oauth2_token(token, grequests.Request(), audience=audience)
+    email = str(claims.get("email") or "").lower()
+    return bool(email) and email in allowed_emails
 
 
 def _header(headers: Mapping[str, str], name: str) -> str | None:

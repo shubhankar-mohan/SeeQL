@@ -37,22 +37,21 @@ router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 # ---------------------------------------------------------------------------
 
 _BUCKET_LOCK = threading.Lock()
-_buckets: dict[str, dict] = {}  # provider -> {tokens, last_refill}
+_buckets: dict[str, dict] = {}     # provider  -> {tokens, last}  (post-auth)
+_ip_buckets: dict[str, dict] = {}  # client-ip -> {tokens, last}  (pre-auth)
 
 
-def _check_rate_limit(provider: str, rate_per_minute: int) -> bool:
-    """
-    Simple token-bucket: capacity = rate_per_minute, refilled linearly.
-    Returns True if the request is allowed, False if throttled.
-    """
+def _take_token(store: dict, key: str, rate_per_minute: int) -> bool:
+    """Shared token-bucket: capacity = rate_per_minute, refilled linearly.
+    Returns True if a token was available (allowed), False if throttled."""
     if rate_per_minute <= 0:
         return True
     now = time.monotonic()
     with _BUCKET_LOCK:
-        b = _buckets.get(provider)
+        b = store.get(key)
         if b is None:
             b = {"tokens": float(rate_per_minute), "last": now}
-            _buckets[provider] = b
+            store[key] = b
         else:
             elapsed = now - b["last"]
             refill = elapsed * (rate_per_minute / 60.0)
@@ -64,10 +63,22 @@ def _check_rate_limit(provider: str, rate_per_minute: int) -> bool:
         return False
 
 
+def _check_rate_limit(provider: str, rate_per_minute: int) -> bool:
+    """Per-provider post-auth rate limit."""
+    return _take_token(_buckets, provider, rate_per_minute)
+
+
+def _check_ip_rate_limit(ip: str, rate_per_minute: int) -> bool:
+    """Coarse per-client-IP pre-auth limit: caps unauthenticated floods without
+    letting them drain the per-provider bucket that authenticated alerts use."""
+    return _take_token(_ip_buckets, ip, rate_per_minute)
+
+
 def _reset_rate_limiter_for_tests() -> None:
-    """Test hook — clears the per-provider buckets."""
+    """Test hook — clears the rate-limit buckets."""
     with _BUCKET_LOCK:
         _buckets.clear()
+        _ip_buckets.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +225,15 @@ async def receive_webhook(provider: str, request: Request) -> dict:
     adapter = get_adapter(provider)
     if adapter is None:
         raise HTTPException(status_code=404, detail=f"unknown provider '{provider}'")
+
+    # Coarse pre-auth rate limit keyed by client IP, so an unauthenticated flood
+    # throttles only the attacker (legit senders use other IPs) and can't drain
+    # the per-provider bucket that authenticated alerts use. NOTE: behind a
+    # proxy/LB this sees the proxy IP unless X-Forwarded-For is honored.
+    client_ip = request.client.host if request.client else "unknown"
+    ip_rate = int(cfg.get("ip_rate_limit_per_minute", 240) or 240)
+    if not _check_ip_rate_limit(client_ip, ip_rate):
+        raise HTTPException(status_code=429, detail="rate limit exceeded")
 
     # RAW body first — signature verification MUST happen before JSON parse.
     body: bytes = await request.body()

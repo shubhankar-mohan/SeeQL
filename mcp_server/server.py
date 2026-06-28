@@ -164,7 +164,7 @@ def _wrap_with_auth(app, auth: str, token: str | None):
             ok = (
                 len(parts) == 2
                 and parts[0].lower() == "bearer"
-                and hmac.compare_digest(parts[1], token)
+                and hmac.compare_digest(parts[1].encode("utf-8"), token.encode("utf-8"))
             )
             if not ok:
                 return JSONResponse(
