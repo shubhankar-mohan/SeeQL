@@ -44,6 +44,12 @@ LIVE_TOOLS: set[str] = {
     "seeql_get_live_innodb_status",
     "seeql_get_index_stats",
     "seeql_get_table_status",
+    # These read cached/snapshot data first but fall through to a LIVE query
+    # against production on a miss, so they must count against the live budget
+    # (otherwise an MCP client can exhaust the explain budget and then issue
+    # uncapped live EXPLAIN / SHOW CREATE TABLE via these).
+    "seeql_run_explain",
+    "seeql_get_table_schema",
 }
 EXPENSIVE_TOOL = "seeql_explain_query"
 ACTION_TOOLS: set[str] = {
@@ -102,7 +108,7 @@ class MCPSafety:
                 raise ToolRejected(
                     f"session budget exhausted for EXPLAIN calls "
                     f"({self._explain_used}/{self.explain_calls_per_session}). "
-                    f"Use seeql_run_explain (cached) instead."
+                    f"Rely on EXPLAIN plans already captured in snapshots instead."
                 )
             if tool_name in LIVE_TOOLS and self._live_used >= self.live_calls_per_session:
                 raise ToolRejected(

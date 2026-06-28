@@ -106,12 +106,12 @@ def register(mcp, safety: MCPSafety) -> None:
 # ---------------------------------------------------------------------------
 
 def _get_table_schema_impl(schema: str, table: str, server: str | None) -> dict:
-    # agent.tools._tool_get_table_schema uses the `_current_server_id` module
-    # variable for its live fallback. Set it for this call.
+    # agent.tools._tool_get_table_schema uses the current-server ContextVar for
+    # its live fallback, and reads schema_name / table_name from the payload.
     from agent.tools import _tool_get_table_schema, set_current_server
     sid = server or _default_server()
     set_current_server(sid)
-    return _tool_get_table_schema({"schema": schema, "table": table})
+    return _tool_get_table_schema({"schema_name": schema, "table_name": table})
 
 
 def _list_unused_indexes_impl(server: str | None, limit: int) -> list[dict]:

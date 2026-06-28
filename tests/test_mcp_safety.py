@@ -41,8 +41,15 @@ class TestServerAllowlist:
 class TestBudget:
     def test_snapshot_tools_never_rejected(self):
         s = MCPSafety(live_calls_per_session=0, explain_calls_per_session=0)
-        for t in ("seeql_list_servers", "seeql_run_explain", "seeql_get_query_history"):
+        for t in ("seeql_list_servers", "seeql_list_incidents", "seeql_get_query_history"):
             s.check_budget(t)  # no raise
+
+    def test_run_explain_counts_against_live_budget(self):
+        # seeql_run_explain falls through to a live EXPLAIN on a cache miss, so
+        # it must be budgeted (previously it was uncapped).
+        s = MCPSafety(live_calls_per_session=0)
+        with pytest.raises(ToolRejected):
+            s.check_budget("seeql_run_explain")
 
     def test_live_tool_cap_enforced(self):
         s = MCPSafety(live_calls_per_session=2)

@@ -163,7 +163,7 @@ def _explain_query_impl(
     agent_tools.set_current_server(sid)
     payload = {"query": sql}
     if schema:
-        payload["schema"] = schema
+        payload["schema_name"] = schema
     return agent_tools._tool_explain_query(payload)
 
 
