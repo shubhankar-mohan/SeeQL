@@ -18,6 +18,11 @@ jobs:
   build:
     name: Build ${{ matrix.variant }}
     runs-on: ubuntu-latest
+    env:
+      # Whether Docker Hub publishing is configured. Job-level so it can read
+      # the secret. When false the Docker Hub login + image are skipped and we
+      # publish only to GHCR — a missing/expired token must not break GHCR.
+      HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
     permissions:
       contents: read
       packages: write
@@ -49,18 +54,29 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Docker Hub
+        if: ${{ env.HAS_DOCKERHUB == 'true' }}
         uses: docker/login-action@v3
         with:
           username: shubhankarmohan
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Resolve target image list
+        id: imglist
+        run: |
+          {
+            echo "images<<EOF"
+            echo "${REGISTRY}/${IMAGE_NAME}"
+            if [ "${HAS_DOCKERHUB}" = "true" ]; then
+              echo "docker.io/shubhankarmohan/seeql"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Compute image metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-            docker.io/shubhankarmohan/seeql
+          images: ${{ steps.imglist.outputs.images }}
           flavor: |
             suffix=${{ matrix.suffix }},onlatest=true
           tags: |
