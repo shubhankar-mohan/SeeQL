@@ -192,6 +192,7 @@ class TestMonitoringCredentialsSelfHeal:
         # Clean, unresolved cache state (auto-restored by monkeypatch).
         monkeypatch.setattr(collectors_pkg, "_credentials_resolved", False)
         monkeypatch.setattr(collectors_pkg, "_monitoring_credentials", None)
+        monkeypatch.setattr(collectors_pkg, "_credentials_failed_at", 0.0)
 
         # Point the env var at a missing file so the service-account branch
         # is skipped and resolution deterministically reaches the ADC path.
@@ -204,6 +205,10 @@ class TestMonitoringCredentialsSelfHeal:
             assert collectors_pkg.get_monitoring_credentials() is None
         assert collectors_pkg._credentials_resolved is False
         assert collectors_pkg._monitoring_credentials is None
+
+        # The transient failure backs off rather than latching permanently;
+        # simulate the backoff window elapsing so the next cycle retries.
+        monkeypatch.setattr(collectors_pkg, "_credentials_failed_at", 0.0)
 
         # Cycle 2: ADC now succeeds → resolves and caches (self-heal).
         fake_creds = object()

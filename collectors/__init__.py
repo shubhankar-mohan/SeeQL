@@ -10,11 +10,18 @@ any MySQL without a cloud dependency.
 
 import logging
 import os
+import time
 
 logger = logging.getLogger(__name__)
 
 _monitoring_credentials = None
 _credentials_resolved = False
+# After a failed resolution we back off instead of re-probing every cycle: the
+# ADC path briefly unsets GOOGLE_APPLICATION_CREDENTIALS (which a Vertex client
+# may need), so probing every 5-minute medium loop would churn it. We still
+# retry periodically so credentials self-heal once they become available.
+_credentials_failed_at = 0.0
+_CREDENTIALS_RETRY_BACKOFF_SEC = 1800
 
 try:
     import google.auth  # noqa: F401  (probe-import only)
@@ -42,7 +49,7 @@ def get_monitoring_credentials():
          with ``GOOGLE_APPLICATION_CREDENTIALS`` temporarily unset so a
          Vertex AI SA does not override monitoring access.
     """
-    global _monitoring_credentials, _credentials_resolved
+    global _monitoring_credentials, _credentials_resolved, _credentials_failed_at
 
     # Only a SUCCESSFUL resolution is cached. A failed/transient resolution
     # (ADC or GCE metadata endpoint not ready yet, momentarily unreadable
@@ -51,6 +58,11 @@ def get_monitoring_credentials():
     # lifetime.
     if _credentials_resolved:
         return _monitoring_credentials
+
+    # ...but don't re-probe on every cycle after a failure (the ADC path
+    # briefly unsets GOOGLE_APPLICATION_CREDENTIALS); back off, then retry.
+    if _credentials_failed_at and (time.monotonic() - _credentials_failed_at) < _CREDENTIALS_RETRY_BACKOFF_SEC:
+        return None
 
     if not _GOOGLE_AVAILABLE:
         return None
@@ -83,6 +95,7 @@ def get_monitoring_credentials():
                 "Monitoring credentials file unreadable (%s); will retry: %s",
                 cred_path, e,
             )
+            _credentials_failed_at = time.monotonic()
             return None
         logger.info("Loading monitoring credentials from: %s", cred_path)
         _monitoring_credentials = credentials
@@ -98,6 +111,7 @@ def get_monitoring_credentials():
         return _monitoring_credentials
     except Exception as e:
         logger.debug("ADC unavailable; skipping GCP collectors: %s", e)
+        _credentials_failed_at = time.monotonic()
         return None
     finally:
         if saved is not None:
