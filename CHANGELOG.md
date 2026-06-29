@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Configuration is now a single mounted YAML file (Prometheus-style).** Mount
+  your config at `/etc/seeql/seeql.yml` (or pass `--config` / set `SEEQL_CONFIG`);
+  copy `seeql.example.yml` to start. Connections and the multi-server list live
+  only in this file — use a `servers:` block for multiple hosts — with secrets
+  injected via `${VAR}`. **Breaking:** the `PROD_DB_*` and `SEEQL_SERVER_*`
+  environment overrides were removed; move those into the config file. A small
+  set of operational env vars remains (`SEEQL_CONFIG`, `SEEQL_MON_DB_PATH`,
+  `SEEQL_DB_MAX_SIZE_MB`, `SEEQL_LOG_MAX_SIZE_MB`, `SEEQL_RETENTION_DAYS`,
+  `SEEQL_LOG_LEVEL`, `SEEQL_ENV`).
+
 ### Added
 - **Incident replay** (`seeql replay --from X --to Y`, `--incident N`, `--latest`)
   — chronological timeline reconstruction + optional LLM root cause narration

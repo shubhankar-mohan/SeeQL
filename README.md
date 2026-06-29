@@ -37,15 +37,24 @@ Cloud SQL, AWS RDS/Aurora, or self-hosted.
 
 ## Quickstart
 
-One `docker run` against any MySQL 8.0+ — no GCP account required.
+One config file + one `docker run`, against any MySQL 8.0+ — no GCP account required.
 
 ```bash
+# 1. Create your config (see seeql.example.yml for all options):
+cat > seeql.yml <<'YAML'
+servers:
+  prod:
+    host: your-mysql-host
+    user: dba_agent
+    password: ${PROD_DB_PASSWORD}    # injected via -e below
+    database: your_database          # optional (default schema for EXPLAIN)
+YAML
+
+# 2. Run it — mount the config, pass the secret:
 docker run -d --name seeql \
   -p 8080:8080 \
-  -e PROD_DB_HOST=your-mysql-host \
-  -e PROD_DB_USER=dba_agent \
+  -v "$PWD/seeql.yml":/etc/seeql/seeql.yml:ro \
   -e PROD_DB_PASSWORD=your_password \
-  -e PROD_DB_DATABASE=your_database \
   -v seeql-data:/app/data \
   -v seeql-logs:/app/logs \
   shubhankarmohan/seeql:latest
@@ -59,10 +68,13 @@ curl http://localhost:8080/metrics | head  # Prometheus metrics
 open http://localhost:8080                 # dashboard
 ```
 
-> **LLM agent is opt-in.** The quickstart above collects metrics and runs
-> anomaly detection without any LLM. Add `-e ANTHROPIC_API_KEY=sk-ant-...`
-> and `-e SEEQL_AGENT_ENABLED=true` to get Claude-written root-cause
-> narrations on detected incidents.
+> **Multiple hosts?** Add more entries under `servers:` — one per MySQL
+> instance (all databases inside an instance are monitored automatically).
+> See [docs/config.md](docs/config.md).
+>
+> **LLM agent is opt-in.** Metrics + anomaly detection run without any LLM. Add
+> `agent: {enabled: true, model: claude-opus-4-6}` to `seeql.yml` and pass
+> `-e ANTHROPIC_API_KEY=sk-ant-...` for Claude-written root-cause narrations.
 
 ---
 
@@ -86,7 +98,8 @@ Graviton, Raspberry Pi).
 
 ```bash
 # Generic
-cp .env.example .env             # fill in PROD_DB_* values
+cp seeql.example.yml seeql.yml   # edit: your servers / hosts
+cp .env.example .env             # set PROD_DB_PASSWORD (+ any other secrets)
 docker compose up -d
 
 # GCP Cloud SQL

@@ -17,12 +17,12 @@ your operational setup.
 One command:
 
 ```bash
+# Create your config first (copy seeql.example.yml):
+#   servers: { prod: { host: ..., user: dba_agent, password: ${PROD_DB_PASSWORD} } }
 docker run -d --name seeql \
   -p 8080:8080 \
-  -e PROD_DB_HOST=your-mysql-host \
-  -e PROD_DB_USER=dba_agent \
+  -v "$PWD/seeql.yml":/etc/seeql/seeql.yml:ro \
   -e PROD_DB_PASSWORD=your_password \
-  -e PROD_DB_DATABASE=your_database \
   -v seeql-data:/app/data \
   -v seeql-logs:/app/logs \
   --restart unless-stopped \
@@ -49,11 +49,13 @@ Two compose files ship in-repo:
 
 ```bash
 # Generic
-cp .env.example .env                  # edit PROD_DB_* values
+cp seeql.example.yml seeql.yml        # edit: your servers / hosts
+cp .env.example .env                  # set PROD_DB_PASSWORD (+ any secrets)
 docker compose up -d
 
-# GCP
-cp .env.example .env                  # also set GCP_PROJECT_ID etc.
+# GCP (add a per-server `gcp:` block in seeql.yml)
+cp seeql.example.yml seeql.yml
+cp .env.example .env                  # set GOOGLE_APPLICATION_CREDENTIALS path
 docker compose -f docker-compose.gcp.yml up -d
 ```
 
@@ -61,7 +63,7 @@ Includes a `--profile dev` MySQL 8.0 for local testing:
 
 ```bash
 docker compose --profile dev up
-# Then export PROD_DB_HOST=mysql-dev and re-run seeql container
+# Then point seeql.yml at host: mysql-dev and re-run the seeql container
 ```
 
 ## GCP Cloud SQL
@@ -140,9 +142,11 @@ spec:
         ports:
         - containerPort: 8080
         envFrom:
-        - secretRef: { name: seeql-secrets }     # PROD_DB_PASSWORD, ANTHROPIC_API_KEY
-        - configMapRef: { name: seeql-config }   # PROD_DB_HOST, etc.
+        - secretRef: { name: seeql-secrets }     # PROD_DB_PASSWORD, ANTHROPIC_API_KEY, … (used as ${VAR})
         volumeMounts:
+        - name: config                           # your seeql.yml, from a ConfigMap
+          mountPath: /etc/seeql
+          readOnly: true
         - name: data
           mountPath: /app/data
         readinessProbe:
@@ -156,6 +160,8 @@ spec:
           requests: { cpu: 100m, memory: 256Mi }
           limits:   { cpu: 500m, memory: 1Gi }
       volumes:
+      - name: config
+        configMap: { name: seeql-config }        # kubectl create configmap seeql-config --from-file=seeql.yml
       - name: data
         persistentVolumeClaim: { claimName: seeql-data }
 ---

@@ -1,12 +1,25 @@
 # Configuration reference
 
-SeeQL reads config from, in precedence order (lowest → highest):
+SeeQL is configured by a **single YAML file you mount** (Prometheus-style).
+Built-in defaults are baked into the image; your file overrides only what you set.
 
-1. [`config/settings.yaml`](../config/settings.yaml) — stock defaults, shipped
-2. `settings.local.yaml` — your overrides (gitignored)
-3. Environment variables — override any YAML value at runtime
+Load order (lowest → highest precedence):
 
-Env vars win. Secrets should go through env vars, not YAML.
+1. [`config/settings.yaml`](../config/settings.yaml) — built-in operational
+   defaults (intervals, retention, anomaly thresholds, alert rules), shipped in
+   the image; you rarely touch it.
+2. Your **config file** — resolved from `--config <path>` → `SEEQL_CONFIG` env →
+   `/etc/seeql/seeql.yml` → (legacy) `settings.local.yaml`. Deep-merged over the
+   defaults. Copy [`seeql.example.yml`](../seeql.example.yml) to start.
+3. `${VAR}` substitution — secrets only, pulled from the environment.
+
+Connections and the server list live **only** in the config file — there are no
+`PROD_DB_*` / `SEEQL_SERVER_*` env overrides. Pass secrets into the file as
+`${VAR}` (e.g. `password: ${PROD_DB_PASSWORD}`).
+
+A few **operational** knobs stay as env vars (like Prometheus's `--storage.*` /
+`--log.level` flags): `SEEQL_CONFIG`, `SEEQL_MON_DB_PATH`, `SEEQL_DB_MAX_SIZE_MB`,
+`SEEQL_LOG_MAX_SIZE_MB`, `SEEQL_RETENTION_DAYS`, `SEEQL_LOG_LEVEL`, `SEEQL_ENV`.
 
 ## Production database (required)
 
@@ -21,15 +34,46 @@ production_db:
   connect_timeout: 10
 ```
 
-Env overrides:
+This `production_db:` block configures a single host inside your config file.
+Secrets come from the environment via `${VAR}` — there are no `PROD_DB_*`
+overrides. For more than one host, use a `servers:` block instead (below).
 
-| Variable | YAML key |
-|----------|----------|
-| `PROD_DB_HOST` | `production_db.host` |
-| `PROD_DB_PORT` | `production_db.port` |
-| `PROD_DB_USER` | `production_db.user` |
-| `PROD_DB_PASSWORD` | `production_db.password` |
-| `PROD_DB_DATABASE` | `production_db.database` |
+> One MySQL **instance** with many databases needs only the single block above —
+> all schemas in the instance are monitored automatically (use `excluded_schemas`
+> to skip any). `database` is only the default schema for `EXPLAIN`.
+
+## Multiple hosts
+
+One entry per MySQL **instance** (host:port). All databases/schemas inside an
+instance are monitored automatically — you do not need an entry per database.
+Add a second entry only for a second host.
+
+```yaml
+servers:
+  prod-primary:
+    display_name: "Prod Primary"
+    environment: production           # production | staging | dev (UI grouping)
+    role: primary                     # primary | replica
+    host: 10.0.0.1
+    user: dba_agent
+    password: ${PROD_DB_PASSWORD}     # from the environment
+    database: app_db                  # optional: default schema for EXPLAIN
+    # Per-server GCP (Cloud SQL metrics + slow log); omit for non-GCP MySQL:
+    # gcp: { project_id: my-proj, cloud_sql_instance_id: prod-primary, region: asia-south1 }
+  analytics-replica:
+    role: replica
+    cluster_id: prod
+    primary_server_id: prod-primary
+    host: 10.0.0.2
+    user: dba_agent
+    password: ${ANALYTICS_DB_PASSWORD}
+```
+
+Per-server fields: `display_name, environment, role, cluster_id,
+primary_server_id, host, port, user, password, database, pool_size,
+connect_timeout, gcp`. The scheduler runs every active server and the dashboard
+gets a per-server dropdown. (A single host may use a top-level `production_db:`
+block instead of `servers:`.)
 
 ## Monitoring database
 
