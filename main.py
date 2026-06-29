@@ -575,6 +575,12 @@ def _main_inner():
     parser.add_argument("--api", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--api-only", action="store_true", help=argparse.SUPPRESS)
 
+    parser.add_argument(
+        "--config", metavar="PATH",
+        help="Path to the SeeQL config file (overrides SEEQL_CONFIG; "
+             "default: /etc/seeql/seeql.yml). See seeql.example.yml.",
+    )
+
     # Subcommand architecture
     sub = parser.add_subparsers(dest="cmd", metavar="<command>")
 
@@ -653,6 +659,10 @@ def _main_inner():
                        help="HTTP bind address (default: mcp.http.bind, or 127.0.0.1)")
 
     args = parser.parse_args()
+    # --config sets the config-file path that config.load_config() resolves.
+    # Set it before anything calls get_config().
+    if getattr(args, "config", None):
+        os.environ["SEEQL_CONFIG"] = args.config
     setup_logging()
 
     # Legacy flags win if set (with a one-liner deprecation warning)

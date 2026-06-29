@@ -80,12 +80,17 @@ def _load_yaml_if_exists(path: Path, config: dict) -> dict:
 def load_config() -> dict:
     """
     Load configuration with this priority (highest wins):
-        1. Environment variables (via ${VAR} substitution)
-        2. settings.local.yaml (git-ignored, machine-specific)
-        3. settings.{SEEQL_ENV}.yaml (environment-specific)
-        4. settings.yaml (checked-in defaults)
+        1. ${VAR} substitution from the environment (for secrets)
+        2. User config file: --config / SEEQL_CONFIG / /etc/seeql/seeql.yml,
+           or the legacy settings.local.yaml (deep-merged)
+        3. settings.{SEEQL_ENV}.yaml (dev/test internals)
+        4. settings.yaml (built-in operational defaults, baked in the image)
+
+    Connections and the list of monitored servers live in the user config file
+    (see seeql.example.yml) — there are NO PROD_DB_* / SEEQL_SERVER_* env
+    overrides. Inject secrets into the file via ${VAR} placeholders.
     """
-    # Load .env file from project root
+    # Load .env (secrets) from project root so ${VAR} placeholders resolve.
     if load_dotenv is not None:
         dotenv_path = _PROJECT_ROOT / ".env"
         if dotenv_path.exists():
@@ -95,98 +100,68 @@ def load_config() -> dict:
         raise FileNotFoundError(f"Default config not found: {_DEFAULT_CONFIG}")
 
     with open(_DEFAULT_CONFIG) as f:
-        config = yaml.safe_load(f)
+        config = yaml.safe_load(f) or {}
 
-    # Environment-specific config (e.g. settings.dev.yaml, settings.test.yaml)
+    # Environment-specific internals (settings.dev.yaml, settings.test.yaml)
     env_name = os.environ.get("SEEQL_ENV", "production")
-    env_config_path = _CONFIG_DIR / f"settings.{env_name}.yaml"
-    config = _load_yaml_if_exists(env_config_path, config)
+    config = _load_yaml_if_exists(_CONFIG_DIR / f"settings.{env_name}.yaml", config)
 
-    # Local overrides — check both config/ dir and project root
-    config = _load_yaml_if_exists(_CONFIG_DIR / "settings.local.yaml", config)
-    config = _load_yaml_if_exists(_PROJECT_ROOT / "settings.local.yaml", config)
+    # User config file — the canonical place to configure servers/agent/etc.
+    user_path = _resolve_user_config_path()
+    if user_path is not None:
+        config = _load_yaml_if_exists(user_path, config)
 
     config = _substitute_env_vars(config)
-
-    # Apply SEEQL_* env var overrides (for Docker runtime config)
-    _apply_env_overrides(config)
-
+    _apply_operational_env_overrides(config)
     return config
 
 
-def _apply_env_overrides(config: dict):
-    """Override config values from SEEQL_* and PROD_DB_* environment variables.
+def _resolve_user_config_path():
+    """Resolve the user config file path (returns a Path or None).
 
-    This allows passing all config at docker run time without needing
-    settings.local.yaml or .env files inside the container.
+    Priority: ``SEEQL_CONFIG`` (set directly or via ``--config``) → the default
+    container path ``/etc/seeql/seeql.yml`` → the legacy ``settings.local.yaml``
+    (config/ then project root). Returns None when nothing is found — the agent
+    then runs on built-in defaults only (no DB configured; ``seeql doctor``
+    flags this).
+    """
+    explicit = os.environ.get("SEEQL_CONFIG")
+    if explicit:
+        p = Path(explicit)
+        if not p.exists():
+            logger.warning(f"SEEQL_CONFIG points to a missing file: {p}")
+        return p
+    default = Path("/etc/seeql/seeql.yml")
+    if default.exists():
+        return default
+    for legacy in (_CONFIG_DIR / "settings.local.yaml", _PROJECT_ROOT / "settings.local.yaml"):
+        if legacy.exists():
+            return legacy
+    return None
+
+
+def _apply_operational_env_overrides(config: dict):
+    """Apply the handful of *operational* env vars that behave like CLI flags
+    (data path, storage caps, log level) — analogous to Prometheus's
+    ``--storage.tsdb.*`` / ``--log.level`` flags.
+
+    Connection and server CONFIG is intentionally NOT settable via env — it
+    lives in the config file (see seeql.example.yml). Secrets reach the file via
+    ${VAR} substitution.
     """
     _env = os.environ.get
-
-    # Production DB
-    if _env("PROD_DB_HOST"):
-        config.setdefault("production_db", {})["host"] = _env("PROD_DB_HOST")
-    if _env("PROD_DB_PORT"):
-        config.setdefault("production_db", {})["port"] = int(_env("PROD_DB_PORT"))
-    if _env("PROD_DB_USER"):
-        config.setdefault("production_db", {})["user"] = _env("PROD_DB_USER")
-    if _env("PROD_DB_PASSWORD"):
-        config.setdefault("production_db", {})["password"] = _env("PROD_DB_PASSWORD")
-    if _env("PROD_DB_DATABASE"):
-        config.setdefault("production_db", {})["database"] = _env("PROD_DB_DATABASE")
-
-    # GCP
-    if _env("GCP_PROJECT_ID"):
-        config.setdefault("gcp", {})["project_id"] = _env("GCP_PROJECT_ID")
-    if _env("GCP_REGION"):
-        config.setdefault("gcp", {})["region"] = _env("GCP_REGION")
-    if _env("GCP_CLOUD_SQL_INSTANCE"):
-        config.setdefault("gcp", {})["cloud_sql_instance_id"] = _env("GCP_CLOUD_SQL_INSTANCE")
-    if _env("MONITORING_APPLICATION_CREDENTIALS"):
-        config.setdefault("gcp", {})["monitoring_credentials_file"] = _env("MONITORING_APPLICATION_CREDENTIALS")
-
-    # Collection intervals
-    if _env("SEEQL_FAST_INTERVAL"):
-        config.setdefault("intervals", {})["fast_loop"] = int(_env("SEEQL_FAST_INTERVAL"))
-    if _env("SEEQL_MEDIUM_INTERVAL"):
-        config.setdefault("intervals", {})["medium_loop"] = int(_env("SEEQL_MEDIUM_INTERVAL"))
-    if _env("SEEQL_SLOW_INTERVAL"):
-        config.setdefault("intervals", {})["slow_loop"] = int(_env("SEEQL_SLOW_INTERVAL"))
-
-    # Monitoring DB path (useful for Docker bind-mounts and test subprocesses)
     if _env("SEEQL_MON_DB_PATH"):
         config.setdefault("monitoring_db", {})["path"] = _env("SEEQL_MON_DB_PATH")
-
-    # Size limits
     if _env("SEEQL_DB_MAX_SIZE_MB"):
         config.setdefault("monitoring_db", {})["max_size_mb"] = int(_env("SEEQL_DB_MAX_SIZE_MB"))
     if _env("SEEQL_LOG_MAX_SIZE_MB"):
         config.setdefault("logging", {})["max_total_mb"] = int(_env("SEEQL_LOG_MAX_SIZE_MB"))
     if _env("SEEQL_RETENTION_DAYS"):
         config.setdefault("retention", {})["days"] = int(_env("SEEQL_RETENTION_DAYS"))
-
-    # Agent
-    if _env("SEEQL_AGENT_ENABLED"):
-        config.setdefault("agent", {})["enabled"] = _env("SEEQL_AGENT_ENABLED").lower() == "true"
-    if _env("SEEQL_AGENT_MODEL"):
-        config.setdefault("agent", {})["model"] = _env("SEEQL_AGENT_MODEL")
-
-    # Alerting
-    if _env("SEEQL_ALERTING_ENABLED"):
-        config.setdefault("alerting", {})["enabled"] = _env("SEEQL_ALERTING_ENABLED").lower() == "true"
-    if _env("SLACK_WEBHOOK_URL") and not _env("SLACK_WEBHOOK_URL", "").startswith("${"):
-        alerting = config.setdefault("alerting", {})
-        channels = alerting.setdefault("channels", {})
-        slack = channels.setdefault("slack", {})
-        slack["enabled"] = True
-        slack["webhook_url"] = _env("SLACK_WEBHOOK_URL")
-
-    # Prometheus
-    if _env("SEEQL_PROM_CACHE_TTL"):
-        config.setdefault("prometheus", {})["cache_ttl_seconds"] = int(_env("SEEQL_PROM_CACHE_TTL"))
-
-    # Logging
     if _env("SEEQL_LOG_LEVEL"):
         config.setdefault("logging", {})["level"] = _env("SEEQL_LOG_LEVEL")
+    if _env("SEEQL_PROM_CACHE_TTL"):
+        config.setdefault("prometheus", {})["cache_ttl_seconds"] = int(_env("SEEQL_PROM_CACHE_TTL"))
 
 
 # ---------------------------------------------------------------------------

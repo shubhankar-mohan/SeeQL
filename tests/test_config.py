@@ -145,3 +145,42 @@ class TestAccessors:
         sql = get_excluded_schemas_sql()
         assert "'mysql'" in sql
         assert "'performance_schema'" in sql
+
+
+class TestUserConfigFile:
+    """The mounted config file (SEEQL_CONFIG / --config) overlays the defaults."""
+
+    def test_seeql_config_overlays_defaults(self, tmp_path, monkeypatch):
+        import config as config_module
+        cfg_file = tmp_path / "seeql.yml"
+        cfg_file.write_text(
+            "servers:\n"
+            "  prod-primary:\n"
+            "    host: 10.0.0.1\n"
+            "    user: dba_agent\n"
+            "    password: ${PROD_DB_PASSWORD}\n"
+            "    role: primary\n"
+        )
+        monkeypatch.setenv("SEEQL_CONFIG", str(cfg_file))
+        monkeypatch.setenv("PROD_DB_PASSWORD", "secret-xyz")
+
+        cfg = config_module.load_config()
+        # User file merged in...
+        assert cfg["servers"]["prod-primary"]["host"] == "10.0.0.1"
+        # ...with ${VAR} secrets resolved...
+        assert cfg["servers"]["prod-primary"]["password"] == "secret-xyz"
+        # ...and built-in defaults still present (not clobbered).
+        assert "intervals" in cfg and "monitoring_db" in cfg
+
+    def test_missing_seeql_config_is_not_fatal(self, tmp_path, monkeypatch):
+        import config as config_module
+        monkeypatch.setenv("SEEQL_CONFIG", str(tmp_path / "does-not-exist.yml"))
+        cfg = config_module.load_config()   # must not raise
+        assert "intervals" in cfg            # defaults still load
+
+    def test_resolve_prefers_explicit_path(self, tmp_path, monkeypatch):
+        from config import _resolve_user_config_path
+        p = tmp_path / "custom.yml"
+        p.write_text("servers: {}\n")
+        monkeypatch.setenv("SEEQL_CONFIG", str(p))
+        assert _resolve_user_config_path() == p

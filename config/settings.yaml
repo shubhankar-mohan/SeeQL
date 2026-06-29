@@ -7,6 +7,9 @@
 
 # --- Production MySQL (Cloud SQL 8.0.43) — READ ONLY access ---
 production_db:
+  # NOTE: connection config belongs in your mounted config file (see
+  # seeql.example.yml). These are inert placeholders the config file overrides;
+  # for multiple hosts use a `servers:` block in that file instead.
   host: "10.0.0.1"                  # Cloud SQL private IP
   port: 3306
   user: "dba_agent"                 # Dedicated monitoring user (SELECT + PROCESS only)
