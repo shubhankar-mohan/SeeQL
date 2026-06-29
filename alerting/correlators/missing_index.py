@@ -259,28 +259,15 @@ def _discover_suspect_digests(
         FROM query_digest_snapshots
         WHERE server_id = ?
           AND snapshot_time BETWEEN ? AND ?
-          -- Only let rows_sent == 0 in for read queries (SELECT/WITH): a full
-          -- scan returning no rows is the canonical missing-index symptom.
-          -- Writes (UPDATE/DELETE) always have rows_sent == 0, and ranking them
-          -- by raw rows_examined would crowd out the real SELECT candidates.
-          AND (
-              rows_sent > 0
-              OR UPPER(TRIM(digest_text)) LIKE 'SELECT%'
-              OR UPPER(TRIM(digest_text)) LIKE 'WITH%'
-          )
-          AND (
-              CASE WHEN rows_sent > 0
-                   THEN CAST(rows_examined AS REAL) / rows_sent
-                   ELSE rows_examined
-              END
-          ) >= ?
+          -- Rank by rows_examined per returned row (rows_sent floored at 1, so
+          -- a full scan returning zero rows scores on the same scale instead of
+          -- being dropped). rows_sent == 0 is kept for BOTH zero-row SELECTs
+          -- AND write statements (UPDATE/DELETE ... WHERE unindexed_col):
+          -- write-side full scans are a primary lock-cascade cause this project
+          -- targets, so they must remain eligible — not filtered out.
+          AND CAST(rows_examined AS REAL) / MAX(rows_sent, 1) >= ?
         GROUP BY digest
-        ORDER BY MAX(
-            CASE WHEN rows_sent > 0
-                 THEN CAST(rows_examined AS REAL) / rows_sent
-                 ELSE rows_examined
-            END
-        ) DESC
+        ORDER BY MAX(CAST(rows_examined AS REAL) / MAX(rows_sent, 1)) DESC
         LIMIT ?
     """
     rows = conn.execute(
