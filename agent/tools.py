@@ -67,6 +67,13 @@ def get_current_budget():
     return _current_budget.get()
 
 
+# Tools that read cached/snapshot data first and only fall through to a LIVE
+# production query on a miss. They self-gate and self-charge their live path
+# inside the handler (see execute_tool), so cache hits are never blocked and an
+# erroring live attempt still counts against the budget.
+_CACHE_FIRST_TOOLS = {"run_explain", "get_table_schema"}
+
+
 # --- Tool Definitions (Anthropic tool_use format) ---
 
 TOOL_DEFINITIONS = [
@@ -372,27 +379,24 @@ def execute_tool(name: str, input_data: dict) -> str:
         return json.dumps({"error": f"Unknown tool: {name}"})
 
     # Budget gate (webhook investigator only; no-op when no budget is set).
+    # Cache-first tools are NOT gated/charged here: they may serve a free
+    # cache/snapshot hit, and they self-gate + self-charge their live
+    # fall-through inside the handler (so cache reads are never blocked and an
+    # erroring live attempt is still counted).
     budget = _current_budget.get()
-    if budget is not None and not budget.can_call(name):
+    cache_first = name in _CACHE_FIRST_TOOLS
+    if budget is not None and not cache_first and not budget.can_call(name):
         msg = budget.rejection_message(name)
         logger.info(f"Tool {name} rejected by budget: {msg}")
         return json.dumps({"error": msg, "budget_rejected": True})
 
     try:
         result = handler(input_data)
-        if budget is not None:
-            # Cache-first tools (run_explain, get_table_schema) only consume
-            # budget when they actually hit production; a cache/snapshot hit or
-            # a no-op error return must not burn the (small) explain/live cap.
-            cache_first = name in ("run_explain", "get_table_schema")
-            consumed_live = (not cache_first) or (
-                isinstance(result, dict) and result.get("source") == "live"
-            )
-            if consumed_live:
-                try:
-                    budget.record(name)
-                except Exception:
-                    logger.debug(f"budget.record({name}) failed; continuing")
+        if budget is not None and not cache_first:
+            try:
+                budget.record(name)
+            except Exception:
+                logger.debug(f"budget.record({name}) failed; continuing")
         return json.dumps(result, default=str)
     except Exception as e:
         logger.error(f"Tool {name} failed: {e}")
@@ -435,6 +439,15 @@ def _tool_run_explain(input_data: dict) -> dict:
     if not sql_text.strip().upper().startswith(("SELECT", "WITH")):
         return {"error": f"Cannot EXPLAIN non-SELECT query: {sql_text[:50]}"}
 
+    # About to hit production. Gate + charge the investigator budget HERE (not
+    # at dispatch) so the cache hit above stays free and an erroring live
+    # EXPLAIN still counts against the cap. (No-op when no budget is set.)
+    budget = _current_budget.get()
+    if budget is not None:
+        if not budget.can_call("run_explain"):
+            return {"error": budget.rejection_message("run_explain"), "budget_rejected": True}
+        budget.record("run_explain")
+
     try:
         with get_prod_connection(_current_server_id.get()) as conn:
             cursor = conn.cursor(dictionary=True)
@@ -449,9 +462,9 @@ def _tool_run_explain(input_data: dict) -> dict:
                     "explain": json.loads(explain_json),
                 }
     except Exception as e:
-        return {"error": f"EXPLAIN failed: {e}"}
+        return {"error": f"EXPLAIN failed: {e}", "source": "live"}
 
-    return {"error": "No EXPLAIN result"}
+    return {"error": "No EXPLAIN result", "source": "live"}
 
 
 def _tool_get_table_schema(input_data: dict) -> dict:
@@ -464,6 +477,14 @@ def _tool_get_table_schema(input_data: dict) -> dict:
         if row and row["create_stmt"]:
             return {"source": "snapshot", "create_statement": row["create_stmt"]}
 
+    # About to hit production. Gate + charge the investigator budget HERE so the
+    # snapshot hit above stays free and an erroring live call still counts.
+    budget = _current_budget.get()
+    if budget is not None:
+        if not budget.can_call("get_table_schema"):
+            return {"error": budget.rejection_message("get_table_schema"), "budget_rejected": True}
+        budget.record("get_table_schema")
+
     # Fall back to production
     try:
         with get_prod_connection(_current_server_id.get()) as conn:
@@ -473,9 +494,9 @@ def _tool_get_table_schema(input_data: dict) -> dict:
             if result:
                 return {"source": "live", "create_statement": result[1]}
     except Exception as e:
-        return {"error": f"Failed to get schema: {e}"}
+        return {"error": f"Failed to get schema: {e}", "source": "live"}
 
-    return {"error": f"Table {schema_name}.{table_name} not found"}
+    return {"error": f"Table {schema_name}.{table_name} not found", "source": "live"}
 
 
 def _tool_get_query_history(input_data: dict) -> dict:

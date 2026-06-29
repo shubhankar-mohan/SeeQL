@@ -56,6 +56,10 @@ ACTION_TOOLS: set[str] = {
     "seeql_trigger_investigation",
     "seeql_abort_investigation",
 }
+# Cache-first tools: charged against the live budget ONLY when they actually
+# hit production (result source=='live'); a cache/snapshot hit is free so a
+# read-only session can keep reading cached plans.
+_CACHE_FIRST_TOOLS: set[str] = {"seeql_run_explain", "seeql_get_table_schema"}
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +260,13 @@ def wrap_tool(
 
         try:
             result = fn(*args, **kwargs)
-            safety.record_call(tool_name)
+            # Cache-first tools only consume the live budget when they actually
+            # hit production (result source=='live'); a cache/snapshot hit is
+            # free, so a read-only session can keep reading cached plans.
+            if tool_name not in _CACHE_FIRST_TOOLS or (
+                isinstance(result, dict) and result.get("source") == "live"
+            ):
+                safety.record_call(tool_name)
             return result
         except ToolRejected as e:
             return {"error": str(e), "rejected_by": "mcp_safety"}
