@@ -39,6 +39,7 @@ router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 _BUCKET_LOCK = threading.Lock()
 _buckets: dict[str, dict] = {}     # provider  -> {tokens, last}  (post-auth)
 _ip_buckets: dict[str, dict] = {}  # client-ip -> {tokens, last}  (pre-auth)
+_MAX_BUCKETS = 50_000              # cap per-IP cardinality to bound memory
 
 
 def _take_token(store: dict, key: str, rate_per_minute: int) -> bool:
@@ -50,6 +51,11 @@ def _take_token(store: dict, key: str, rate_per_minute: int) -> bool:
     with _BUCKET_LOCK:
         b = store.get(key)
         if b is None:
+            if len(store) >= _MAX_BUCKETS:
+                # Bound memory (the per-IP store is keyed by arbitrary client
+                # IPs): evict the least-recently-seen bucket.
+                oldest = min(store, key=lambda k: store[k]["last"])
+                store.pop(oldest, None)
             b = {"tokens": float(rate_per_minute), "last": now}
             store[key] = b
         else:
@@ -72,6 +78,19 @@ def _check_ip_rate_limit(ip: str, rate_per_minute: int) -> bool:
     """Coarse per-client-IP pre-auth limit: caps unauthenticated floods without
     letting them drain the per-provider bucket that authenticated alerts use."""
     return _take_token(_ip_buckets, ip, rate_per_minute)
+
+
+def _resolve_client_ip(request: Request, trust_proxy: bool) -> str:
+    """Best-effort client IP for the pre-auth rate limit. Behind a TLS-
+    terminating proxy/LB, request.client.host is the proxy IP (so every request
+    would share one bucket); set webhooks.trust_proxy=true to use the first
+    X-Forwarded-For hop instead. Falls back to 'unknown'."""
+    if trust_proxy:
+        xff = request.headers.get("x-forwarded-for", "")
+        first = xff.split(",")[0].strip() if xff else ""
+        if first:
+            return first
+    return request.client.host if request.client else "unknown"
 
 
 def _reset_rate_limiter_for_tests() -> None:
@@ -228,9 +247,10 @@ async def receive_webhook(provider: str, request: Request) -> dict:
 
     # Coarse pre-auth rate limit keyed by client IP, so an unauthenticated flood
     # throttles only the attacker (legit senders use other IPs) and can't drain
-    # the per-provider bucket that authenticated alerts use. NOTE: behind a
-    # proxy/LB this sees the proxy IP unless X-Forwarded-For is honored.
-    client_ip = request.client.host if request.client else "unknown"
+    # the per-provider bucket that authenticated alerts use. Behind a proxy/LB,
+    # set webhooks.trust_proxy=true so the real client IP is read from
+    # X-Forwarded-For (otherwise all requests share the proxy's single bucket).
+    client_ip = _resolve_client_ip(request, bool(cfg.get("trust_proxy", False)))
     ip_rate = int(cfg.get("ip_rate_limit_per_minute", 240) or 240)
     if not _check_ip_rate_limit(client_ip, ip_rate):
         raise HTTPException(status_code=429, detail="rate limit exceeded")

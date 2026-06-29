@@ -141,7 +141,11 @@ webhooks:
   enabled: false                      # Master switch for POST /webhooks/<provider>
   dedup_window_minutes: 5             # Same (provider, external_id) within window
                                       # attaches to the existing investigation
-  rate_limit_per_minute: 60           # Per-provider token bucket
+  rate_limit_per_minute: 60           # Per-provider token bucket (post-auth)
+  ip_rate_limit_per_minute: 240       # Coarse per-client-IP token bucket (pre-auth)
+  trust_proxy: false                  # If behind a proxy/LB, set true to read the
+                                      # client IP from X-Forwarded-For (otherwise
+                                      # every request shares the proxy's IP bucket)
   callback_enabled: false             # POST findings back to alert.callback_url
   providers:
     generic:
