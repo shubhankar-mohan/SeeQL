@@ -1,0 +1,63 @@
+# =============================================================================
+# SeeQL configuration — copy to seeql.yml, edit, and mount it into the container:
+#
+#   docker run -d \
+#     -v ./seeql.yml:/etc/seeql/seeql.yml:ro \
+#     -e PROD_DB_PASSWORD=secret \
+#     ghcr.io/shubhankar-mohan/seeql:latest
+#
+# (Or with docker-compose: the shipped compose already mounts ./seeql.yml.)
+#
+# Only the keys you set here override the built-in defaults (collection
+# intervals, retention, anomaly thresholds, alert rules, MCP/webhook defaults).
+# Pass secrets as environment variables and reference them below as ${VAR}.
+# =============================================================================
+
+# --- Monitored MySQL servers ---------------------------------------------------
+# One entry per MySQL *instance* (host:port). ALL databases/schemas inside an
+# instance are monitored automatically — you do NOT need an entry per database.
+# Add a second entry only for a second host.
+servers:
+  prod-primary:
+    display_name: "Prod Primary"
+    environment: production           # production | staging | dev  (UI grouping)
+    role: primary                     # primary | replica
+    host: 10.0.0.1
+    port: 3306
+    user: dba_agent                   # needs SELECT + PROCESS (+ performance_schema)
+    password: ${PROD_DB_PASSWORD}     # injected via env — never hard-code secrets
+    database: app_db                  # optional: default schema for EXPLAIN
+    pool_size: 5
+    # Per-server GCP (Cloud SQL CPU/mem/disk metrics + slow-query log).
+    # Omit entirely for a non-GCP MySQL.
+    # gcp:
+    #   project_id: my-project
+    #   cloud_sql_instance_id: prod-primary
+    #   region: asia-south1
+
+  # Add more hosts as needed:
+  # analytics-replica:
+  #   display_name: "Analytics Replica"
+  #   role: replica
+  #   cluster_id: prod                # links replica -> primary in the UI
+  #   primary_server_id: prod-primary
+  #   host: 10.0.0.2
+  #   user: dba_agent
+  #   password: ${ANALYTICS_DB_PASSWORD}
+
+# --- LLM agent (optional) ------------------------------------------------------
+# agent:
+#   enabled: true
+#   model: claude-opus-4-6            # or gemini-2.0-flash
+#   # Claude via the Anthropic API needs ANTHROPIC_API_KEY in the environment.
+
+# --- Alerting (optional) -------------------------------------------------------
+# alerting:
+#   enabled: true
+#   channels:
+#     slack:
+#       enabled: true
+#       webhook_url: ${SLACK_WEBHOOK_URL}
+
+# Everything else (intervals, limits, retention, anomaly detection, MCP,
+# inbound webhooks) uses built-in defaults — override here only if needed.

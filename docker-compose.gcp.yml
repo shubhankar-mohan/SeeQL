@@ -31,46 +31,23 @@ services:
     #   args:
     #     INSTALL_EXTRAS: api,gcp
     container_name: seeql
+    # All configuration lives in your mounted seeql.yml (copy seeql.example.yml;
+    # add a per-server `gcp:` block for Cloud SQL). .env holds ONLY secrets (${VAR}).
+    env_file:
+      - .env
     ports:
       - "${SEEQL_API_PORT:-8080}:8080"
     volumes:
+      - ./seeql.yml:/etc/seeql/seeql.yml:ro   # your config — copy seeql.example.yml
       - seeql-data:/app/data
       - seeql-logs:/app/logs
       - ${GOOGLE_APPLICATION_CREDENTIALS:-./vertex-sa.json}:/app/gcp-sa.json:ro
     environment:
-      # --- MySQL ---
-      PROD_DB_HOST: ${PROD_DB_HOST}
-      PROD_DB_PORT: ${PROD_DB_PORT:-3306}
-      PROD_DB_USER: ${PROD_DB_USER:-dba_agent}
-      PROD_DB_PASSWORD: ${PROD_DB_PASSWORD}
-      PROD_DB_DATABASE: ${PROD_DB_DATABASE}
-
-      # --- GCP ---
-      GOOGLE_APPLICATION_CREDENTIALS: /app/gcp-sa.json
-      GCP_PROJECT_ID: ${GCP_PROJECT_ID}
-      GCP_REGION: ${GCP_REGION:-us-central1}
-      GCP_CLOUD_SQL_INSTANCE: ${GCP_CLOUD_SQL_INSTANCE}
-
-      # --- LLM Agent (Vertex AI — Claude or Gemini) ---
-      SEEQL_AGENT_ENABLED: ${SEEQL_AGENT_ENABLED:-true}
-      SEEQL_AGENT_MODEL: ${SEEQL_AGENT_MODEL:-claude-opus-4-6}
-
-      # --- Alerting ---
-      SEEQL_ALERTING_ENABLED: ${SEEQL_ALERTING_ENABLED:-false}
-      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
-
-      # --- Intervals / retention ---
-      SEEQL_FAST_INTERVAL: ${SEEQL_FAST_INTERVAL:-30}
-      SEEQL_MEDIUM_INTERVAL: ${SEEQL_MEDIUM_INTERVAL:-300}
-      SEEQL_SLOW_INTERVAL: ${SEEQL_SLOW_INTERVAL:-1800}
-      SEEQL_DB_MAX_SIZE_MB: ${SEEQL_DB_MAX_SIZE_MB:-5000}
-      SEEQL_LOG_MAX_SIZE_MB: ${SEEQL_LOG_MAX_SIZE_MB:-500}
-      SEEQL_RETENTION_DAYS: ${SEEQL_RETENTION_DAYS:-90}
-
-      # --- Logging ---
-      SEEQL_LOG_LEVEL: ${SEEQL_LOG_LEVEL:-INFO}
-      SEEQL_API_PORT: "8080"
+      SEEQL_CONFIG: /etc/seeql/seeql.yml
       SEEQL_ENV: production
+      SEEQL_API_PORT: "8080"
+      # GCP service-account key for Vertex AI / Cloud SQL (read by google libs)
+      GOOGLE_APPLICATION_CREDENTIALS: /app/gcp-sa.json
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5)"]

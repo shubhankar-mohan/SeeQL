@@ -28,42 +28,20 @@ services:
     #   args:
     #     INSTALL_EXTRAS: api
     container_name: seeql
+    # All configuration lives in your mounted seeql.yml (copy seeql.example.yml).
+    # .env holds ONLY secrets, referenced from seeql.yml as ${VAR}.
+    env_file:
+      - .env
     ports:
       - "${SEEQL_API_PORT:-8080}:8080"
     volumes:
+      - ./seeql.yml:/etc/seeql/seeql.yml:ro   # your config — copy seeql.example.yml
       - seeql-data:/app/data
       - seeql-logs:/app/logs
     environment:
-      # --- MySQL (required) ---
-      PROD_DB_HOST: ${PROD_DB_HOST}
-      PROD_DB_PORT: ${PROD_DB_PORT:-3306}
-      PROD_DB_USER: ${PROD_DB_USER:-dba_agent}
-      PROD_DB_PASSWORD: ${PROD_DB_PASSWORD}
-      PROD_DB_DATABASE: ${PROD_DB_DATABASE}
-
-      # --- LLM Agent (optional — Claude via Anthropic API) ---
-      SEEQL_AGENT_ENABLED: ${SEEQL_AGENT_ENABLED:-false}
-      SEEQL_AGENT_MODEL: ${SEEQL_AGENT_MODEL:-claude-opus-4-6}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-
-      # --- Alerting (optional) ---
-      SEEQL_ALERTING_ENABLED: ${SEEQL_ALERTING_ENABLED:-false}
-      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
-
-      # --- Collection intervals (seconds) ---
-      SEEQL_FAST_INTERVAL: ${SEEQL_FAST_INTERVAL:-30}
-      SEEQL_MEDIUM_INTERVAL: ${SEEQL_MEDIUM_INTERVAL:-300}
-      SEEQL_SLOW_INTERVAL: ${SEEQL_SLOW_INTERVAL:-1800}
-
-      # --- Storage limits ---
-      SEEQL_DB_MAX_SIZE_MB: ${SEEQL_DB_MAX_SIZE_MB:-5000}
-      SEEQL_LOG_MAX_SIZE_MB: ${SEEQL_LOG_MAX_SIZE_MB:-500}
-      SEEQL_RETENTION_DAYS: ${SEEQL_RETENTION_DAYS:-90}
-
-      # --- Logging ---
-      SEEQL_LOG_LEVEL: ${SEEQL_LOG_LEVEL:-INFO}
-      SEEQL_API_PORT: "8080"
+      SEEQL_CONFIG: /etc/seeql/seeql.yml
       SEEQL_ENV: production
+      SEEQL_API_PORT: "8080"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5)"]

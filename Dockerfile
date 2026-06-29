@@ -111,6 +111,10 @@ COPY seeql/ ./seeql/
 COPY templates/ ./templates/
 COPY static/ ./static/
 
+# Reference config (users mount their own at /etc/seeql/seeql.yml)
+COPY seeql.example.yml /etc/seeql/seeql.example.yml
+ENV SEEQL_CONFIG=/etc/seeql/seeql.yml
+
 # Non-root user, writable data + logs
 RUN useradd --create-home --shell /usr/sbin/nologin seeql \
     && mkdir -p /app/data /app/logs \
