@@ -76,6 +76,7 @@ def run_analysis(analysis_type: str = "routine", trigger_type: str | None = None
     # Skip quiet periods if configured (only for routine, never for incidents)
     if analysis_type == "routine" and config.get("skip_quiet", True) and _is_quiet(report):
         logger.info("State is quiet, skipping analysis")
+        set_current_server(None)
         return None
 
     # Select prompt template
@@ -93,6 +94,7 @@ def run_analysis(analysis_type: str = "routine", trigger_type: str | None = None
     # Determine backend: Gemini (Vertex AI) or Claude (Anthropic)
     backend = _detect_backend(config)
     if backend is None:
+        set_current_server(None)
         return None
 
     logger.info(f"Running {analysis_type} analysis with {backend['type']} ({backend['model']})")
@@ -107,6 +109,10 @@ def run_analysis(analysis_type: str = "routine", trigger_type: str | None = None
     except Exception as e:
         logger.error(f"Agent analysis failed: {e}")
         return None
+    finally:
+        # Symmetric with run_llm_analysis: reset the target-server ContextVar so
+        # a pooled worker thread can't leak it into a later call.
+        set_current_server(None)
 
     # Parse and store the result
     analysis = _parse_and_store(result, analysis_type, state_md, server_id)
