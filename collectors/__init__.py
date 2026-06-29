@@ -16,12 +16,13 @@ logger = logging.getLogger(__name__)
 
 _monitoring_credentials = None
 _credentials_resolved = False
-# After a failed resolution we back off instead of re-probing every cycle: the
-# ADC path briefly unsets GOOGLE_APPLICATION_CREDENTIALS (which a Vertex client
-# may need), so probing every 5-minute medium loop would churn it. We still
-# retry periodically so credentials self-heal once they become available.
+# After a failed resolution we briefly back off so that multiple collectors in
+# the same cycle don't each re-probe (the ADC path momentarily unsets
+# GOOGLE_APPLICATION_CREDENTIALS). The window is intentionally short so creds
+# still self-heal within ~one medium loop after a startup blip — NOT a long
+# latch that would blind the GCP collectors for many minutes.
 _credentials_failed_at = 0.0
-_CREDENTIALS_RETRY_BACKOFF_SEC = 1800
+_CREDENTIALS_RETRY_BACKOFF_SEC = 60
 
 try:
     import google.auth  # noqa: F401  (probe-import only)
