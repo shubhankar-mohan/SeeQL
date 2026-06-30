@@ -489,7 +489,15 @@ def cmd_mcp(args):
               file=sys.stderr)
         sys.exit(2)
 
-    from mcp_server.server import run_stdio, run_http
+    try:
+        from mcp_server.server import run_stdio, run_http
+    except ImportError as e:
+        print(
+            f"The MCP server needs the 'mcp' dependency, which isn't installed ({e}).\n"
+            "Install it with:  pip install 'seeql[mcp]'   (or: pip install 'mcp>=1.2')",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     if args.http:
         http_cfg = dict(mcp_cfg.get("http") or {})
@@ -508,8 +516,17 @@ def cmd_mcp(args):
 
 def cmd_api(with_scheduler: bool = True):
     """Start the API server, optionally with the scheduler."""
-    import uvicorn
-    from api.app import create_app
+    try:
+        import uvicorn
+        from api.app import create_app
+    except ImportError as e:
+        print(
+            f"The API server / dashboard needs the web dependencies, which aren't "
+            f"installed ({e}).\n"
+            "Install them with:  pip install 'seeql[api]'",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     port = int(os.environ.get("SEEQL_API_PORT", "8080"))
     app = create_app()

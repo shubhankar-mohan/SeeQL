@@ -55,16 +55,31 @@ class CheckResult:
 # ---------------------------------------------------------------------------
 # Individual checks
 # ---------------------------------------------------------------------------
+def _default_server_target() -> tuple[str, int, str]:
+    """(host, port, user) for the default server in the registry.
+
+    This is the server `check_prod_connection()` actually tests. Reading it from
+    the registry (rather than the legacy `production_db:` config section) keeps
+    doctor's output honest for installs configured the documented way with a
+    `servers:` block — the registry handles both shapes.
+    """
+    from config.server_registry import get_server_registry
+    reg = get_server_registry()
+    srv = reg.get_server(reg.get_default_server_id())
+    db = (srv.db_config if srv else {}) or {}
+    return db.get("host", "?"), db.get("port", 3306), db.get("user", "?")
+
+
 def check_config_loads() -> CheckResult:
     """E004 — Can we even parse the config?"""
     try:
         from config import get_config
-        cfg = get_config()
-        host = cfg.get("production_db", {}).get("host", "?")
+        get_config()
+        host, port, _ = _default_server_target()
         return CheckResult(
             name="Config loads",
             passed=True,
-            detail=f"production_db.host = {host}",
+            detail=f"default server -> {host}:{port}",
         )
     except Exception as e:
         return CheckResult(
@@ -159,16 +174,13 @@ def check_prod_reachable() -> CheckResult:
     """E001 / E006 — Can we log in to the production MySQL?"""
     try:
         from storage.connection import check_prod_connection
-        from config import get_config
-        cfg = get_config().get("production_db", {})
-        host = cfg.get("host", "?")
-        port = cfg.get("port", 3306)
+        host, port, user = _default_server_target()
         ok = check_prod_connection()
         if ok:
             return CheckResult(
                 name="Production MySQL reachable",
                 passed=True,
-                detail=f"{host}:{port} as {cfg.get('user', '?')}",
+                detail=f"{host}:{port} as {user}",
             )
         return CheckResult(
             name="Production MySQL reachable",

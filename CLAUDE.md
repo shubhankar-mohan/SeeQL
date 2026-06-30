@@ -197,7 +197,7 @@ Key packages and files beyond the original collector scaffolding:
 - [x] APScheduler-based collection orchestration (4 jobs: fast, medium, slow, retention)
 - [x] Retry logic for transient MySQL errors
 - [x] Dockerfile with healthcheck
-- [x] CLI with argparse subparsers: `check`, `run`, `serve`, `replay`, `incidents`, `doctor`, `init`, `demo`, `init-db` (legacy `--check`/`--once`/`--api` flags still supported with deprecation warning)
+- [x] CLI with argparse subparsers: `check`, `init-db`, `run`, `serve`, `doctor`, `replay`, `incidents`, `investigations`, `mcp` (legacy `--check`/`--once`/`--api` flags still supported with deprecation warning)
 - [x] GCP Cloud Monitoring API collector (CPU, memory, disk IO)
 - [x] Cloud Logging slow query log collector
 - [x] `SHOW ENGINE INNODB STATUS` parser (`parsers/innodb_status.py`)
