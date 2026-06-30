@@ -8,6 +8,7 @@ credentials are configured, so the rest of the agent runs fine against
 any MySQL without a cloud dependency.
 """
 
+import importlib.util
 import logging
 import os
 import time
@@ -24,16 +25,20 @@ _credentials_resolved = False
 _credentials_failed_at = 0.0
 _CREDENTIALS_RETRY_BACKOFF_SEC = 60
 
-try:
-    import google.auth  # noqa: F401  (probe-import only)
-    import google.oauth2.service_account  # noqa: F401
-    _GOOGLE_AVAILABLE = True
-except ImportError:
-    _GOOGLE_AVAILABLE = False
-    logger.debug(
-        "google-auth not installed; GCP Cloud Monitoring / Cloud Logging "
-        "collectors will skip. Install the [gcp] extra to enable them."
-    )
+def _google_sdk_available() -> bool:
+    """Whether the google-auth SDK is importable, WITHOUT importing it.
+
+    We use ``find_spec`` rather than a module-level ``import`` so that merely
+    importing a collector (every loop imports this package) never eagerly loads
+    ``google.oauth2.service_account`` — that pulls in the ``cryptography`` Rust
+    OpenSSL bindings, which are only needed on the service-account-key path. A
+    pure-MySQL or ADC-based deployment shouldn't drag in (or risk a load-time
+    crash on) the crypto stack it never uses.
+    """
+    try:
+        return importlib.util.find_spec("google.auth") is not None
+    except (ImportError, ValueError):
+        return False
 
 
 def get_monitoring_credentials():
@@ -65,11 +70,10 @@ def get_monitoring_credentials():
     if _credentials_failed_at and (time.monotonic() - _credentials_failed_at) < _CREDENTIALS_RETRY_BACKOFF_SEC:
         return None
 
-    if not _GOOGLE_AVAILABLE:
+    if not _google_sdk_available():
         return None
 
     import google.auth
-    import google.oauth2.service_account
 
     SCOPES = [
         "https://www.googleapis.com/auth/monitoring.read",
@@ -85,6 +89,9 @@ def get_monitoring_credentials():
             pass
 
     if cred_path and os.path.exists(cred_path):
+        # Imported lazily, only on the service-account-key path: this is what
+        # loads the cryptography Rust OpenSSL bindings.
+        import google.oauth2.service_account
         try:
             credentials = (
                 google.oauth2.service_account.Credentials.from_service_account_file(

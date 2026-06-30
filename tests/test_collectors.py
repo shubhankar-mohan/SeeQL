@@ -186,7 +186,7 @@ class TestMonitoringCredentialsSelfHeal:
     def test_failed_resolution_is_not_latched(self, monkeypatch):
         import collectors as collectors_pkg
 
-        if not collectors_pkg._GOOGLE_AVAILABLE:
+        if not collectors_pkg._google_sdk_available():
             pytest.skip("google-auth not installed")
 
         # Clean, unresolved cache state (auto-restored by monkeypatch).
