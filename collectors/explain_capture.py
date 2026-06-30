@@ -125,7 +125,7 @@ class ExplainCaptureCollector(BaseCollector):
 
         except Exception as e:
             logger.debug(
-                f"EXPLAIN failed for digest {query_info.get('digest', '?')[:16]}: {e}"
+                f"EXPLAIN failed for digest {(query_info.get('digest') or '?')[:16]}: {e}"
             )
             return None
 

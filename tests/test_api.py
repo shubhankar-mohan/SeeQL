@@ -78,6 +78,74 @@ class TestDashboardRoutes:
         assert resp.headers["location"] == "/dashboard"
 
 
+class TestNullDataResilience:
+    """Regression guards for the bug class that kept shipping: `digest_text` is
+    the only nullable column in query_digest_snapshots, and routes that slice or
+    format it (`x[:N]`, `:.2f`) crashed with a 500 when it came back NULL.
+    Each test seeds a NULL-`digest_text` row and asserts the route still renders."""
+
+    def _seed_and_reset(self, rows):
+        import sqlite3
+        import config as config_module
+        db_path = config_module._config["monitoring_db"]["path"]
+        conn = sqlite3.connect(db_path)
+        for sql, params in rows:
+            conn.execute(sql, params)
+        conn.commit()
+        conn.close()
+        # Make seeded rows + the synthesized 'default' server visible.
+        import api.query_helpers as qh
+        if qh._reader_conn is not None:
+            qh._reader_conn.close()
+            qh._reader_conn = None
+        import config.server_registry as sr
+        sr._registry = None
+
+    def test_state_report_with_null_digest_text(self, api_client):
+        self._seed_and_reset([(
+            """INSERT INTO query_digest_snapshots
+               (snapshot_time, server_id, digest, digest_text, schema_name,
+                exec_count, total_time_sec, avg_time_sec, max_time_sec,
+                rows_examined, rows_sent)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            ("2026-06-30T03:00:00", "default", "0xNULLTXT", None, "shop",
+             100, 5.0, 0.05, 0.2, 5000, 5),
+        )])
+        resp = api_client.get("/api/v1/state-report")
+        assert resp.status_code == 200
+
+    def test_todo_regression_with_null_digest_text(self, api_client):
+        self._seed_and_reset([
+            ("""INSERT INTO query_digest_snapshots
+                (snapshot_time, server_id, digest, digest_text, schema_name,
+                 exec_count, total_time_sec, avg_time_sec, max_time_sec,
+                 rows_examined, rows_sent)
+                VALUES (datetime('now','-5 minutes'),?,?,?,?,?,?,?,?,?,?)""",
+             ("default", "0xREGNULL", None, "shop", 100, 30.0, 0.30, 0.5, 9000, 9)),
+            ("""INSERT INTO query_digest_snapshots
+                (snapshot_time, server_id, digest, digest_text, schema_name,
+                 exec_count, total_time_sec, avg_time_sec, max_time_sec,
+                 rows_examined, rows_sent)
+                VALUES (datetime('now','-3 days'),?,?,?,?,?,?,?,?,?,?)""",
+             ("default", "0xREGNULL", None, "shop", 50, 1.0, 0.02, 0.05, 100, 5)),
+        ])
+        resp = api_client.get("/dashboard/todo")
+        assert resp.status_code == 200
+
+    def test_query_detail_with_null_sample_and_text(self, api_client):
+        self._seed_and_reset([(
+            """INSERT INTO query_digest_snapshots
+               (snapshot_time, server_id, digest, digest_text, query_sample_text,
+                schema_name, exec_count, total_time_sec, avg_time_sec, max_time_sec,
+                rows_examined, rows_sent)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ("2026-06-30T03:00:00", "default", "0xNOSAMPLE", None, None, "shop",
+             10, 1.0, 0.1, 0.3, 5000, 5),
+        )])
+        resp = api_client.get("/dashboard/partials/query-detail/0xNOSAMPLE")
+        assert resp.status_code == 200
+
+
 class TestCollectEndpoints:
     @patch("collectors.fast_loop.writer")
     @patch("storage.connection.get_prod_connection")

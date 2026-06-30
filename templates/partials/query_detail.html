@@ -20,7 +20,7 @@
         </div>
         <div class="relative group">
             <pre class="bg-white border border-dashed border-erased p-3 text-sm overflow-x-auto font-mono wobbly-sm"
-                 style="font-family: monospace; white-space: pre-wrap; word-break: break-all;">{{ query_info.query_sample_text or query_info.digest_text }}</pre>
+                 style="font-family: monospace; white-space: pre-wrap; word-break: break-all;">{{ query_info.query_sample_text or query_info.digest_text or '' }}</pre>
             <button onclick="SeeQL.copyToClipboard(this.previousElementSibling.textContent, this)"
                     class="copy-btn absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity p-1 border border-pencil/30 bg-white wobbly-sm"
                     title="Copy query">
@@ -92,7 +92,7 @@
             <div class="relative group mt-2">
                 <pre class="bg-white border border-dashed border-erased p-2 text-xs overflow-x-auto font-mono wobbly-sm"
                      style="font-family: monospace; white-space: pre-wrap;">-- Run EXPLAIN on this query
-EXPLAIN {{ (query_info.query_sample_text or query_info.digest_text)[:500] }}</pre>
+EXPLAIN {{ (query_info.query_sample_text or query_info.digest_text or '')[:500] }}</pre>
                 <button onclick="SeeQL.copyToClipboard(this.previousElementSibling.textContent, this)"
                         class="copy-btn absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity p-1 border border-pencil/30 bg-white wobbly-sm"
                         title="Copy">

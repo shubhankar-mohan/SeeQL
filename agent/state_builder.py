@@ -313,7 +313,7 @@ def _render_markdown(report: StateReport) -> str:
         for i, q in enumerate(cs["top_queries"][:10], 1):
             lines.append(
                 f"{i}. digest=`{q.get('digest', '?')}` schema=`{q.get('schema_name', '?')}` "
-                f"`{q.get('digest_text', '?')[:80]}` — "
+                f"`{(q.get('digest_text') or '?')[:80]}` — "
                 f"total={q.get('total_time_sec', 0):.2f}s, "
                 f"avg={q.get('avg_time_sec', 0):.4f}s, "
                 f"execs={q.get('exec_count', 0)}, "
@@ -327,7 +327,7 @@ def _render_markdown(report: StateReport) -> str:
         for q in cs["missing_index_candidates"]:
             lines.append(
                 f"- digest=`{q.get('digest', '?')}` schema=`{q.get('schema_name', '?')}` "
-                f"`{q.get('digest_text', '?')[:80]}` — "
+                f"`{(q.get('digest_text') or '?')[:80]}` — "
                 f"ratio={q.get('ratio', 0):.0f}x, "
                 f"examined={q.get('rows_examined', 0)}, sent={q.get('rows_sent', 0)}"
             )
@@ -430,7 +430,7 @@ def _render_markdown(report: StateReport) -> str:
         for q in new_q[:10]:
             lines.append(
                 f"- digest=`{q.get('digest', '?')}` schema=`{q.get('schema_name', '?')}` "
-                f"`{q.get('digest_text', '?')[:80]}`"
+                f"`{(q.get('digest_text') or '?')[:80]}`"
             )
         lines.append("")
 
@@ -440,7 +440,7 @@ def _render_markdown(report: StateReport) -> str:
         for r in regs:
             lines.append(
                 f"- digest=`{r.get('digest', '?')}` schema=`{r.get('schema_name', '?')}` "
-                f"`{r.get('digest_text', '?')[:60]}` — "
+                f"`{(r.get('digest_text') or '?')[:60]}` — "
                 f"was {r.get('baseline_avg', 0):.4f}s, now {r.get('recent_avg', 0):.4f}s "
                 f"({r.get('regression_factor', 0):.1f}x slower)"
             )
@@ -507,7 +507,7 @@ def _render_markdown(report: StateReport) -> str:
                 last = avgs[-1]["avg"]
                 lines.append(
                     f"- digest=`{t.get('digest', '?')}` "
-                    f"`{t.get('digest_text', '?')[:60]}`: "
+                    f"`{(t.get('digest_text') or '?')[:60]}`: "
                     f"30d ago={first:.4f}s → today={last:.4f}s"
                 )
         lines.append("")

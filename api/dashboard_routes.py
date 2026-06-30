@@ -482,7 +482,7 @@ def dashboard_todo(request: Request, server: str = None):
             "frequency": f"{(reg.get('recent_execs') or 0):,} execs in last hour",
             "diagnosis": reg_rem.get("diagnosis", ""),
             "steps": reg_rem.get("steps", []),
-            "queries": [f"EXPLAIN {reg.get('digest_text', '')[:200]}"],
+            "queries": [f"EXPLAIN {(reg.get('digest_text') or '')[:200]}"],
         })
 
     # DDL changes — only show if they correlate with query regressions or are recent
