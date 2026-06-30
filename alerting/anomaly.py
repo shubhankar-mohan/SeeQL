@@ -483,8 +483,14 @@ def _detect_anomalies_uncached(
         if baseline is None:
             continue
 
-        high_z = z_threshold_override or config.get("high_z")
+        # A metric with high_z/low_z = None has opted OUT of that side of
+        # detection (e.g. buffer_pool_hit_ratio disables high-side because a high
+        # hit ratio is good). An alert-path z override must not re-enable it —
+        # only tighten/loosen a side that is already active.
+        high_z = config.get("high_z")
         low_z = config.get("low_z")
+        if z_threshold_override and high_z is not None:
+            high_z = z_threshold_override
         if z_threshold_override and low_z is not None:
             low_z = -z_threshold_override
 

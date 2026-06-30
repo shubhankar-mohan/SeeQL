@@ -89,6 +89,62 @@ def anomaly_db(tmp_path, test_config):
     reset_connections()
 
 
+class TestHighZOptOutRespected:
+    """buffer_pool_hit_ratio sets high_z=None because a HIGH hit ratio is good.
+    The alert path calls detect_anomalies(z_threshold_override=3.0); that override
+    must NOT re-enable high-side detection for an opted-out metric (it used to,
+    firing a spurious CRITICAL alert whenever the hit ratio improved)."""
+
+    def _seed_improving_hit_ratio(self, tmp_path, test_config):
+        db_path = tmp_path / "hz_test.db"
+        test_config["monitoring_db"]["path"] = str(db_path)
+        config_module._config = test_config
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript(SCHEMA_SQL_PATH.read_text())
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        # Baseline hit ratio ~0.98 with small variance (reads ~20k / 1e6 req)
+        # so stddev > 0 (otherwise compute_baseline bails on zero-stddev).
+        reads_series = [18000, 22000, 19000, 21000, 20000, 18500,
+                        21500, 19500, 20500, 20000, 19000, 21000] * 3
+        for i, reads in enumerate(reads_series):
+            ts = (now - timedelta(minutes=180 - i * 5)).strftime("%Y-%m-%d %H:%M:%S")
+            conn.execute(
+                "INSERT INTO global_status_snapshots (snapshot_time, variable_name, raw_value) VALUES (?, ?, ?)",
+                (ts, "Innodb_buffer_pool_reads", reads),
+            )
+            conn.execute(
+                "INSERT INTO global_status_snapshots (snapshot_time, variable_name, raw_value) VALUES (?, ?, ?)",
+                (ts, "Innodb_buffer_pool_read_requests", 1_000_000),
+            )
+        # Current: hit ratio IMPROVES sharply (reads drop to 2000 -> ratio 0.998,
+        # many sigma ABOVE the ~0.98 baseline).
+        cur = (now - timedelta(seconds=30)).strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute(
+            "INSERT INTO global_status_snapshots (snapshot_time, variable_name, raw_value) VALUES (?, ?, ?)",
+            (cur, "Innodb_buffer_pool_reads", 2000),
+        )
+        conn.execute(
+            "INSERT INTO global_status_snapshots (snapshot_time, variable_name, raw_value) VALUES (?, ?, ?)",
+            (cur, "Innodb_buffer_pool_read_requests", 1_000_000),
+        )
+        conn.commit()
+        conn.close()
+        return db_path
+
+    def test_improving_hit_ratio_no_high_anomaly_under_override(self, tmp_path, test_config):
+        from alerting.anomaly import detect_anomalies, METRIC_CONFIGS
+        from storage.connection import reset_connections
+
+        assert METRIC_CONFIGS["buffer_pool_hit_ratio"]["high_z"] is None  # opted out
+        self._seed_improving_hit_ratio(tmp_path, test_config)
+        reset_connections()
+        anomalies = detect_anomalies(z_threshold_override=3.0)
+        bad = [a for a in anomalies
+               if a.metric == "buffer_pool_hit_ratio" and a.direction == "high"]
+        assert bad == [], f"high-side buffer-pool anomaly must not fire on improvement: {bad}"
+        reset_connections()
+
+
 class TestAnomalyDetection:
     def test_compute_baseline_threads_running(self, anomaly_db):
         from alerting.anomaly import compute_baseline, METRIC_CONFIGS

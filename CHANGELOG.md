@@ -73,6 +73,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   analyses stored an empty `recommendations` column because the prompt uses a
   singular `### Recommendation` header the parser didn't match — parsing now
   handles both formats. Added the first direct tests for the provider loops.
+- **Spurious CRITICAL anomaly when the buffer-pool hit ratio *improved*.**
+  `buffer_pool_hit_ratio` intentionally disables high-side detection (a high hit
+  ratio is good), but the alert-path z override re-enabled it via `override or
+  config["high_z"]`, firing a critical alert — and disagreeing with the state
+  report, which used no override. The override now only tightens a side that is
+  already active, mirroring the existing `low_z` handling.
+- **One malformed `retention.overrides` value aborted the entire daily cleanup.**
+  A non-numeric override (e.g. a YAML typo `alert_history: ninety`) raised
+  `ValueError` outside the per-table try/except, so no table was cleaned and the
+  DB grew unbounded. Bad overrides now fall back to the default with a warning.
+- **`query_regression` rule dropped real alerts on NULL `digest_text`.** The
+  message sliced `digest_text[:60]` unguarded; a NULL value raised TypeError that
+  the engine swallowed, silently discarding a genuine regression alert. Guarded.
 - **`seeql doctor` reported the wrong MySQL host.** The "Config loads" and
   "Production MySQL reachable" lines read the legacy `production_db` section for
   display while the actual reachability test used the `servers:` registry, so an

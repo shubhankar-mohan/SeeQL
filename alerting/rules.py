@@ -128,7 +128,7 @@ def evaluate_query_regression(rule_config: dict, server_id: str = "default") -> 
         rule_name=_ns("query_regression", server_id),
         severity=Severity(rule_config.get("severity", "warning")),
         message=(
-            f"[{server_id}] Query regression: `{top['digest_text'][:60]}` is "
+            f"[{server_id}] Query regression: `{(top['digest_text'] or '?')[:60]}` is "
             f"{top['factor']:.1f}x slower than 7d baseline"
         ),
         context={

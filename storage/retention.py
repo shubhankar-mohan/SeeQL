@@ -80,7 +80,16 @@ def _retention_for(table: str, default_days: int) -> int:
     """
     cfg_overrides = get_config().get("retention", {}).get("overrides", {}) or {}
     if table in cfg_overrides:
-        return int(cfg_overrides[table])
+        try:
+            return int(cfg_overrides[table])
+        except (TypeError, ValueError):
+            # A malformed override (e.g. a YAML typo like `alert_history: ninety`)
+            # must not abort the whole retention run — fall back to the default.
+            logger.warning(
+                "Invalid retention override for %r (%r); using default %d days",
+                table, cfg_overrides[table], default_days,
+            )
+            return default_days
     if table in PER_TABLE_RETENTION_DAYS:
         return PER_TABLE_RETENTION_DAYS[table]
     return default_days
