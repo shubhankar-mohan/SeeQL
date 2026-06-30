@@ -16,6 +16,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   set of operational env vars remains (`SEEQL_CONFIG`, `SEEQL_MON_DB_PATH`,
   `SEEQL_DB_MAX_SIZE_MB`, `SEEQL_LOG_MAX_SIZE_MB`, `SEEQL_RETENTION_DAYS`,
   `SEEQL_LOG_LEVEL`, `SEEQL_ENV`).
+- **`seeql run`/`serve` now self-initialize the monitoring schema.** Startup
+  previously ran only migrations, which never created the 30-table base schema,
+  so a fresh deployment needed a separate `seeql init-db`. The idempotent
+  `schema.sql` is now applied on every startup, so the default `seeql serve`
+  works against an empty monitoring DB with no manual init step.
 
 ### Added
 - **Incident replay** (`seeql replay --from X --to Y`, `--incident N`, `--latest`)
@@ -43,6 +48,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unresolved incident windows from the last 24h.
 
 ### Fixed
+- **`/dashboard/todo` returned a 500 on an empty or sparse database.** The
+  route formatted SQL aggregates (`AVG`/`SUM`/`MAX` over query digests, table
+  IO, slow-log repeaters, and storage) with format specs like `:.2f` / `:,`;
+  when those aggregates came back `NULL` it raised `TypeError: unsupported
+  format string passed to NoneType`. Every formatted aggregate is now
+  None-coalesced.
+- **Startup crash where `cryptography`'s native bindings can't load.**
+  `collectors/__init__.py` probed GCP availability with a module-level
+  `import google.oauth2.service_account`, which eagerly loads the cryptography
+  Rust OpenSSL bindings. Because every collection loop imports the package,
+  `import collectors` — and therefore the scheduler, `seeql serve`, and the
+  `/status` route — pulled in that crypto stack on startup, crashing anywhere
+  those bindings can't initialize (e.g. some emulated arm64 environments).
+  Availability is now probed with `importlib.util.find_spec` (no import) and
+  the `service_account` import is deferred to the only path that needs it
+  (loading a service-account key file); pure-MySQL and ADC deployments no
+  longer load the crypto stack at all.
 - **Buffer Pool Hit Ratio was always 0.** Root cause:
   `information_schema.INNODB_BUFFER_POOL_STATS.HIT_RATE` is an instantaneous
   sample over the last ~1 second and returns 0 when no page gets occur in
