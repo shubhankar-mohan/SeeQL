@@ -104,21 +104,30 @@ def cmd_check():
     print("\nAll checks passed.")
 
 
-def cmd_init_db():
-    """Initialize the monitoring SQLite database schema."""
+def _apply_base_schema():
+    """Apply storage/schema.sql to the monitoring DB.
+
+    schema.sql is fully idempotent (every CREATE uses IF NOT EXISTS), so this is
+    safe to run on every startup — it creates the base tables on a fresh DB and
+    is a no-op on an existing one.
+    """
     from storage.connection import get_mon_connection
-    from storage.migrations import run_all_migrations
 
     schema_path = Path(__file__).parent / "storage" / "schema.sql"
     if not schema_path.exists():
         print(f"Schema file not found: {schema_path}")
         sys.exit(1)
 
-    sql = schema_path.read_text()
+    with get_mon_connection() as conn:
+        conn.executescript(schema_path.read_text())
+
+
+def cmd_init_db():
+    """Initialize the monitoring SQLite database schema."""
+    from storage.migrations import run_all_migrations
 
     print("Initializing monitoring database schema (SQLite)...")
-    with get_mon_connection() as conn:
-        conn.executescript(sql)
+    _apply_base_schema()
 
     # Run migrations (adds server_id columns, creates servers table)
     run_all_migrations()
@@ -167,10 +176,15 @@ def cmd_run():
 
 
 def _run_startup_migrations():
-    """Run schema migrations and sync server registry on startup."""
+    """Ensure the base schema exists, run migrations, sync the server registry.
+
+    Applying the base schema here means `seeql run`/`serve` work against a fresh
+    monitoring DB without a separate `seeql init-db` step.
+    """
     from storage.migrations import run_all_migrations
     from config.server_registry import get_server_registry
 
+    _apply_base_schema()
     run_all_migrations()
     get_server_registry().sync_to_db()
 
