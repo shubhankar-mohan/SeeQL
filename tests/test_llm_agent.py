@@ -54,7 +54,7 @@ class TestDetectBackend:
         assert b is not None
         assert b["type"] == "anthropic"
         assert b["model"].startswith("claude")
-        assert any("not a supported model" in r.message for r in caplog.records)
+        assert any("no matching backend" in r.message for r in caplog.records)
 
     def test_unsupported_model_coerced_to_gemini_warns(self, monkeypatch, caplog):
         monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/tmp/fake.json")
@@ -64,7 +64,7 @@ class TestDetectBackend:
         assert b is not None
         assert b["type"] == "gemini"
         assert b["model"] == "gemini-2.0-flash"
-        assert any("not a supported model" in r.message for r in caplog.records)
+        assert any("no matching backend" in r.message for r in caplog.records)
 
     def test_no_creds_returns_none(self, monkeypatch):
         monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
@@ -74,6 +74,111 @@ class TestDetectBackend:
             {"model": "claude-x", "anthropic_api_key": "${ANTHROPIC_API_KEY}"}
         )
         assert b is None
+
+
+class TestOpenAIBackend:
+    """OpenAI + any OpenAI-compatible endpoint (custom base_url)."""
+
+    def test_explicit_provider_openai_with_key(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.setattr(llm_agent, "get_config", lambda: {"gcp": {}})
+        b = llm_agent._detect_backend(
+            {"provider": "openai", "model": "gpt-4o", "openai_api_key": "sk-x"}
+        )
+        assert b is not None
+        assert b["type"] == "openai"
+        assert b["model"] == "gpt-4o"
+        assert b["api_key"] == "sk-x"
+
+    def test_openai_compatible_base_url_only(self, monkeypatch):
+        """A custom OpenAI-compatible server (e.g. Ollama) — base_url, no key."""
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.setattr(llm_agent, "get_config", lambda: {"gcp": {}})
+        b = llm_agent._detect_backend(
+            {"provider": "openai", "model": "llama3.1",
+             "openai_base_url": "http://localhost:11434/v1"}
+        )
+        assert b is not None
+        assert b["type"] == "openai"
+        assert b["base_url"] == "http://localhost:11434/v1"
+
+    def test_gpt_model_name_inferred(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setattr(llm_agent, "get_config", lambda: {"gcp": {}})
+        b = llm_agent._detect_backend({"model": "gpt-4o", "openai_api_key": "sk-x"})
+        assert b is not None and b["type"] == "openai"
+
+    def test_provider_openai_without_creds_returns_none(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.setattr(llm_agent, "get_config", lambda: {"gcp": {}})
+        assert llm_agent._detect_backend({"provider": "openai", "model": "gpt-4o"}) is None
+
+    def test_openai_env_var_key_picked_up(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env")
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.setattr(llm_agent, "get_config", lambda: {"gcp": {}})
+        b = llm_agent._detect_backend({"model": "gpt-4o"})
+        assert b is not None and b["type"] == "openai" and b["api_key"] == "sk-from-env"
+
+    def _run_with_responses(self, responses, base_url=None, api_key="sk-x"):
+        """Drive _run_openai_loop with a fake OpenAI client returning `responses`
+        (one per round)."""
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.side_effect = responses
+        with patch("openai.OpenAI", return_value=fake_client) as ctor:
+            out = llm_agent._run_openai_loop(
+                {"model": "gpt-4o", "api_key": api_key, "base_url": base_url},
+                max_tokens=100, max_rounds=3, user_msg="hi",
+            )
+        return out, ctor
+
+    @staticmethod
+    def _resp(content=None, tool_calls=None):
+        msg = MagicMock()
+        msg.content = content
+        msg.tool_calls = tool_calls
+        choice = MagicMock()
+        choice.message = msg
+        r = MagicMock()
+        r.choices = [choice]
+        return r
+
+    def test_text_only_response(self):
+        out, _ = self._run_with_responses([self._resp(content="All healthy.")])
+        assert out == "All healthy."
+
+    def test_empty_choices_does_not_crash(self):
+        r = MagicMock()
+        r.choices = []
+        out, _ = self._run_with_responses([r])
+        assert out == ""
+
+    def test_tool_call_then_final(self, monkeypatch):
+        # First round asks for a tool; second round returns text.
+        tc = MagicMock()
+        tc.id = "call_1"
+        tc.function.name = "get_lock_graph"
+        tc.function.arguments = "{}"
+        monkeypatch.setattr(llm_agent, "execute_tool", lambda name, args: "no locks")
+        out, _ = self._run_with_responses([
+            self._resp(content=None, tool_calls=[tc]),
+            self._resp(content="Done: no locks."),
+        ])
+        assert out == "Done: no locks."
+
+    def test_base_url_without_key_gets_placeholder(self):
+        _, ctor = self._run_with_responses(
+            [self._resp(content="ok")],
+            base_url="http://localhost:11434/v1", api_key=None,
+        )
+        # base_url passed; SDK constructed with a non-empty placeholder key so a
+        # keyless OpenAI-compatible server (Ollama, vLLM) doesn't trip the SDK.
+        kwargs = ctor.call_args.kwargs
+        assert kwargs.get("base_url") == "http://localhost:11434/v1"
+        assert kwargs.get("api_key") == "not-needed"
 
 
 class TestGeminiResponseShapes:

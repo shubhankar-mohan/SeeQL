@@ -68,13 +68,22 @@ gcp:
 
 # --- LLM Agent ---
 agent:
-  enabled: true                    # Set to true + provide API key to enable
-  model: "claude-opus-4-6"
+  enabled: true                    # Set to true + provide credentials to enable
+  # Model name drives backend selection (or set `provider` to force one).
+  #   gemini-*  -> Gemini via Vertex AI (needs GCP creds)
+  #   claude-*  -> Claude via Vertex AI (GCP creds) or the Anthropic API (key)
+  #   gpt-*/o*  -> OpenAI (needs openai_api_key)
+  model: "gemini-2.0-flash"
+  # provider: openai               # Force a backend: openai | anthropic | vertex-claude | gemini
   max_tokens: 8192
   max_tool_rounds: 10
   schedule_seconds: 900             # 15 minutes
   skip_quiet: true                  # Skip analysis when nothing interesting is happening
   anthropic_api_key: "${ANTHROPIC_API_KEY}"
+  openai_api_key: "${OPENAI_API_KEY}"
+  # Point at any OpenAI-compatible server (Azure OpenAI, Ollama, vLLM, Groq,
+  # OpenRouter, LM Studio, …) to use a different LLM. Leave unset for OpenAI.
+  # openai_base_url: "${OPENAI_BASE_URL}"
   state_builder:
     trend_threshold: 0.2            # 20% change = "up" or "down"
     regression_threshold: 3.0       # 3x slowdown = regression

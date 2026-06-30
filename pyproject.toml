@@ -48,6 +48,10 @@ api = ["fastapi>=0.104", "uvicorn[standard]>=0.24", "jinja2>=3.1", "aiofiles>=23
 # investigations, incidents, state reports, missing-index correlation,
 # plus live-MySQL reads behind a session budget.
 mcp = ["mcp>=1.2"]
+# OpenAI extra: the LLM agent's OpenAI backend. The same `openai` client also
+# talks to any OpenAI-compatible endpoint (Azure OpenAI, Ollama, vLLM, Groq,
+# OpenRouter, LM Studio, …) via `agent.openai_base_url` — the "any other LLM" path.
+openai = ["openai>=1.40"]
 # GCP extra: Cloud Monitoring + Cloud Logging collectors, plus google-genai
 # for Gemini / Vertex AI Claude via the google SDK path.
 gcp = [

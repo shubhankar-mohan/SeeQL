@@ -37,6 +37,19 @@ for tool in TOOL_DEFINITIONS:
         }
     GEMINI_TOOL_DEFINITIONS.append(gemini_td)
 
+# OpenAI / OpenAI-compatible tool definitions (converted from Anthropic format)
+OPENAI_TOOL_DEFINITIONS = [
+    {
+        "type": "function",
+        "function": {
+            "name": tool["name"],
+            "description": tool["description"],
+            "parameters": tool["input_schema"],
+        },
+    }
+    for tool in TOOL_DEFINITIONS
+]
+
 
 def run_analysis(analysis_type: str = "routine", trigger_type: str | None = None,
                   server_id: str | None = None) -> dict | None:
@@ -104,6 +117,8 @@ def run_analysis(analysis_type: str = "routine", trigger_type: str | None = None
             result = _run_gemini_loop(backend, max_tokens, max_tool_rounds, user_msg)
         elif backend["type"] == "vertex-claude":
             result = _run_vertex_claude_loop(backend, max_tokens, max_tool_rounds, user_msg)
+        elif backend["type"] == "openai":
+            result = _run_openai_loop(backend, max_tokens, max_tool_rounds, user_msg)
         else:
             result = _run_anthropic_loop(backend, max_tokens, max_tool_rounds, user_msg)
     except Exception as e:
@@ -119,73 +134,113 @@ def run_analysis(analysis_type: str = "routine", trigger_type: str | None = None
     return analysis
 
 
+def _looks_like_openai(model: str) -> bool:
+    """Heuristic: an OpenAI-family model name (gpt-*, o1/o3/o4-*, openai/*)."""
+    m = (model or "").lower()
+    return (
+        m.startswith(("gpt-", "gpt", "o1", "o3", "o4", "openai/", "chatgpt"))
+    )
+
+
+def _cfg_value(config: dict, key: str) -> str | None:
+    """Read a config secret, treating an unsubstituted ${VAR} placeholder as unset."""
+    v = config.get(key)
+    if isinstance(v, str) and v.startswith("${"):
+        return None
+    return v or None
+
+
 def _detect_backend(config: dict) -> dict | None:
     """Detect which LLM backend to use.
 
-    Selection is model-name-driven:
-      - model starts with "claude" + GCP creds  → Claude via Vertex AI (AnthropicVertex)
-      - model starts with "claude" + API key     → Claude via Anthropic API
-      - model starts with "gemini" + GCP creds   → Gemini via Vertex AI
-      - otherwise                                → default to Gemini if GCP creds, else Claude API
+    An explicit `agent.provider` takes precedence; otherwise selection is
+    model-name-driven, then falls back to whatever credentials are available.
+
+    Supported providers:
+      - "vertex-claude" : Claude via Vertex AI       (claude-* model + GCP creds)
+      - "anthropic"     : Claude via the Anthropic API (claude-* model + API key)
+      - "gemini"        : Gemini via Vertex AI         (gemini-* model + GCP creds)
+      - "openai"        : OpenAI **or any OpenAI-compatible endpoint** — set
+                          `openai_base_url` to point at Azure OpenAI, Ollama,
+                          vLLM, Groq, OpenRouter, LM Studio, etc. This is the
+                          "bring your own / any other LLM" path.
     """
     gcp_config = get_config().get("gcp", {})
     project_id = gcp_config.get("project_id")
     model = config.get("model", "gemini-2.0-flash")
     has_gcp_creds = bool(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") and project_id)
 
-    # Claude model requested
-    if model.startswith("claude"):
-        # Prefer Vertex AI if GCP credentials available
-        if has_gcp_creds:
-            return {
-                "type": "vertex-claude",
-                "model": model,
-                "project_id": project_id,
-                "region": gcp_config.get("vertex_region", "us-east5"),
-            }
-        # Fall back to Anthropic API key
-        api_key = config.get("anthropic_api_key")
-        if api_key and not api_key.startswith("${"):
-            return {
-                "type": "anthropic",
-                "model": model,
-                "api_key": api_key,
-            }
+    anthropic_key = _cfg_value(config, "anthropic_api_key")
+    openai_key = _cfg_value(config, "openai_api_key") or os.environ.get("OPENAI_API_KEY")
+    openai_base_url = _cfg_value(config, "openai_base_url") or os.environ.get("OPENAI_BASE_URL")
 
-    # Gemini model (default) via Vertex AI
+    def _vertex_claude():
+        return {"type": "vertex-claude", "model": model, "project_id": project_id,
+                "region": gcp_config.get("vertex_region", "us-east5")}
+
+    def _anthropic():
+        return {"type": "anthropic", "model": model, "api_key": anthropic_key}
+
+    def _gemini(m):
+        return {"type": "gemini", "model": m, "project_id": project_id,
+                "region": gcp_config.get("vertex_region", "us-central1")}
+
+    def _openai():
+        return {"type": "openai", "model": model, "api_key": openai_key,
+                "base_url": openai_base_url}
+
+    # --- Explicit provider override (required for OpenAI-compatible servers
+    #     whose model names don't match any prefix) -----------------------------
+    provider = (config.get("provider") or "").strip().lower().replace("_", "-") or None
+    if provider:
+        if provider in ("openai", "openai-compatible", "custom"):
+            if openai_key or openai_base_url:
+                return _openai()
+            logger.warning("provider=openai but no openai_api_key / openai_base_url configured")
+            return None
+        if provider == "anthropic":
+            return _anthropic() if anthropic_key else _missing("ANTHROPIC_API_KEY")
+        if provider == "vertex-claude":
+            return _vertex_claude() if has_gcp_creds else _missing("GCP credentials")
+        if provider == "gemini":
+            return _gemini(model if model.startswith("gemini") else "gemini-2.0-flash") \
+                if has_gcp_creds else _missing("GCP credentials")
+        logger.warning("Unknown agent.provider %r; falling back to auto-detection.", provider)
+
+    # --- Model-name-driven detection ------------------------------------------
+    if _looks_like_openai(model) and (openai_key or openai_base_url):
+        return _openai()
+    if model.startswith("claude"):
+        if has_gcp_creds:
+            return _vertex_claude()
+        if anthropic_key:
+            return _anthropic()
+    if model.startswith("gemini") and has_gcp_creds:
+        return _gemini(model)
+
+    # --- Fallback by whatever credentials exist -------------------------------
     if has_gcp_creds:
         if not model.startswith("gemini"):
-            logger.warning(
-                "Model %r is not a supported model; falling back to gemini-2.0-flash "
-                "via Vertex AI. SeeQL supports Claude (claude-*) and Gemini (gemini-*) "
-                "only — there is no OpenAI/other-provider backend.", model,
-            )
+            logger.warning("Model %r has no matching backend/creds; using gemini-2.0-flash "
+                           "via Vertex AI (GCP creds present).", model)
             model = "gemini-2.0-flash"
-        return {
-            "type": "gemini",
-            "model": model,
-            "project_id": project_id,
-            "region": gcp_config.get("vertex_region", "us-central1"),
-        }
-
-    # Last resort: Anthropic API key with any model
-    api_key = config.get("anthropic_api_key")
-    if api_key and not api_key.startswith("${"):
+        return _gemini(model)
+    if anthropic_key:
         if not model.startswith("claude"):
-            logger.warning(
-                "Model %r is not a supported model; falling back to "
-                "claude-sonnet-4-20250514 via the Anthropic API. SeeQL supports "
-                "Claude (claude-*) and Gemini (gemini-*) only — there is no "
-                "OpenAI/other-provider backend.", model,
-            )
+            logger.warning("Model %r has no matching backend/creds; using "
+                           "claude-sonnet-4-20250514 via the Anthropic API.", model)
             model = "claude-sonnet-4-20250514"
-        return {
-            "type": "anthropic",
-            "model": model,
-            "api_key": api_key,
-        }
+        return _anthropic()
+    if openai_key or openai_base_url:
+        return _openai()
 
-    logger.warning("No LLM credentials configured (need GOOGLE_APPLICATION_CREDENTIALS or ANTHROPIC_API_KEY)")
+    logger.warning("No LLM credentials configured (need GOOGLE_APPLICATION_CREDENTIALS, "
+                   "ANTHROPIC_API_KEY, or OPENAI_API_KEY / openai_base_url).")
+    return None
+
+
+def _missing(what: str) -> None:
+    logger.warning("Configured agent.provider requires %s, which is not available.", what)
     return None
 
 
@@ -301,6 +356,95 @@ def _run_anthropic_loop(backend: dict, max_tokens: int, max_rounds: int, user_ms
     import anthropic
     client = anthropic.Anthropic(api_key=backend["api_key"])
     return _run_claude_loop(client, backend["model"], max_tokens, max_rounds, user_msg)
+
+
+def _run_openai_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: str) -> str:
+    """Tool-use loop for OpenAI and any OpenAI-compatible endpoint.
+
+    A `base_url` in the backend points the OpenAI SDK at a compatible server
+    (Azure OpenAI, Ollama, vLLM, Groq, OpenRouter, LM Studio, …), so this single
+    loop covers "OpenAI" and "bring your own / any other LLM".
+    """
+    try:
+        from openai import OpenAI
+    except ImportError as e:
+        raise RuntimeError(
+            "The OpenAI backend needs the 'openai' package. Install it with "
+            "`pip install 'seeql[openai]'`."
+        ) from e
+
+    api_key = backend.get("api_key")
+    base_url = backend.get("base_url")
+    # OpenAI-compatible servers (Ollama, vLLM, …) usually ignore the key but the
+    # SDK still requires a non-empty value, so supply a placeholder for base_url.
+    if base_url and not api_key:
+        api_key = "not-needed"
+    client_kwargs = {}
+    if api_key:
+        client_kwargs["api_key"] = api_key
+    if base_url:
+        client_kwargs["base_url"] = base_url
+    client = OpenAI(**client_kwargs)
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_msg},
+    ]
+    final_text = ""
+    total_tool_calls = 0
+
+    for round_num in range(max_rounds):
+        logger.info(f"  Agent round {round_num + 1}/{max_rounds}")
+        response = client.chat.completions.create(
+            model=backend["model"],
+            max_tokens=max_tokens,
+            tools=OPENAI_TOOL_DEFINITIONS,
+            messages=messages,
+            temperature=0,
+        )
+        choices = response.choices or []
+        if not choices:
+            logger.warning("OpenAI-compatible endpoint returned no choices; ending tool loop")
+            break
+        msg = choices[0].message
+        if msg.content:
+            final_text = msg.content
+
+        tool_calls = msg.tool_calls or []
+        if not tool_calls:
+            logger.info(f"  Agent completed after {round_num + 1} rounds, {total_tool_calls} tool calls")
+            break
+
+        # Echo the assistant turn (must include the tool_calls), then the results.
+        messages.append({
+            "role": "assistant",
+            "content": msg.content or "",
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                }
+                for tc in tool_calls
+            ],
+        })
+        for tc in tool_calls:
+            try:
+                args = json.loads(tc.function.arguments or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            logger.info(f"  Tool call [{total_tool_calls + 1}]: {tc.function.name}({json.dumps(args)[:200]})")
+            result = execute_tool(tc.function.name, args)
+            total_tool_calls += 1
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": result if isinstance(result, str) else json.dumps(result),
+            })
+    else:
+        logger.warning(f"  Agent hit max rounds ({max_rounds}) with {total_tool_calls} tool calls")
+
+    return final_text
 
 
 def _run_claude_loop(client, model: str, max_tokens: int, max_rounds: int, user_msg: str) -> str:
@@ -532,6 +676,8 @@ def run_llm_analysis(
             text = _run_gemini_loop(backend, max_tokens, max_tool_rounds, prompt)
         elif backend["type"] == "vertex-claude":
             text = _run_vertex_claude_loop(backend, max_tokens, max_tool_rounds, prompt)
+        elif backend["type"] == "openai":
+            text = _run_openai_loop(backend, max_tokens, max_tool_rounds, prompt)
         else:
             text = _run_anthropic_loop(backend, max_tokens, max_tool_rounds, prompt)
     finally:
