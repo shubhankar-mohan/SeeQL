@@ -475,11 +475,11 @@ def dashboard_todo(request: Request, server: str = None):
     for reg in regressions:
         diagnostic_items.append({
             "icon": "&#9650;",
-            "title": f"{reg.get('factor', 0):.1f}x regression: {reg['baseline_avg']:.4f}s -> {reg['recent_avg']:.4f}s",
+            "title": f"{(reg.get('factor') or 0):.1f}x regression: {(reg['baseline_avg'] or 0):.4f}s -> {(reg['recent_avg'] or 0):.4f}s",
             "detail": f"{(reg.get('digest_text') or '')[:100]}",
             "query_preview": "",
             "timestamp": "",
-            "frequency": f"{reg.get('recent_execs', 0):,} execs in last hour",
+            "frequency": f"{(reg.get('recent_execs') or 0):,} execs in last hour",
             "diagnosis": reg_rem.get("diagnosis", ""),
             "steps": reg_rem.get("steps", []),
             "queries": [f"EXPLAIN {reg.get('digest_text', '')[:200]}"],
@@ -621,9 +621,9 @@ def dashboard_todo(request: Request, server: str = None):
             rw_ratio = t["reads"] / t["writes"] if t["writes"] and t["writes"] > 0 else float('inf')
             hotspot_lines.append(
                 f"{t['object_schema']}.{t['table_name']}: "
-                f"{t['reads']:,} reads, {t['writes']:,} writes "
+                f"{(t['reads'] or 0):,} reads, {(t['writes'] or 0):,} writes "
                 f"({'read-heavy' if rw_ratio > 10 else 'write-heavy' if rw_ratio < 0.5 else 'mixed'}, "
-                f"{t['io_sec']:.2f}s IO)"
+                f"{(t['io_sec'] or 0):.2f}s IO)"
             )
         insights.append({
             "icon": "&#128293;",
@@ -644,7 +644,7 @@ def dashboard_todo(request: Request, server: str = None):
         ORDER BY COUNT(*) DESC LIMIT 5
     """)
     if slow_repeaters:
-        lines = [f"{r['cnt']}x | avg {r['avg_time']:.2f}s | max {r['max_time']:.2f}s | {r['sql_text'][:80]}"
+        lines = [f"{r['cnt']}x | avg {(r['avg_time'] or 0):.2f}s | max {(r['max_time'] or 0):.2f}s | {r['sql_text'][:80]}"
                  for r in slow_repeaters]
         insights.append({
             "icon": "&#128034;",
@@ -667,8 +667,8 @@ def dashboard_todo(request: Request, server: str = None):
             total = (s["data_mb"] or 0) + (s["index_mb"] or 0)
             lines.append(
                 f"{s['table_schema']}.{s['table_name']}: "
-                f"{total:.0f}MB ({s['data_mb']:.0f} data + {s['index_mb']:.0f} idx), "
-                f"~{s['table_rows']:,} rows"
+                f"{total:.0f}MB ({(s['data_mb'] or 0):.0f} data + {(s['index_mb'] or 0):.0f} idx), "
+                f"~{(s['table_rows'] or 0):,} rows"
                 + (f" — high index overhead ({s['idx_ratio']:.1f}x)" if s["idx_ratio"] and s["idx_ratio"] > 1.5 else "")
             )
         insights.append({

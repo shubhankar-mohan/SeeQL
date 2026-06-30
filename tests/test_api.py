@@ -64,6 +64,14 @@ class TestDashboardRoutes:
         resp = api_client.get("/dashboard/queries")
         assert resp.status_code == 200
 
+    def test_todo_renders_with_null_aggregates(self, api_client):
+        """The todo route formats SQL aggregates (AVG/SUM/MAX) that come back
+        NULL on an empty DB. Guards against `unsupported format string passed
+        to NoneType` — every formatted aggregate must be None-coalesced."""
+        resp = api_client.get("/dashboard/todo")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers["content-type"]
+
     def test_root_redirects_to_dashboard(self, api_client):
         resp = api_client.get("/", follow_redirects=False)
         assert resp.status_code in (302, 307)
