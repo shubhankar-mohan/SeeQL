@@ -155,6 +155,11 @@ def _detect_backend(config: dict) -> dict | None:
     # Gemini model (default) via Vertex AI
     if has_gcp_creds:
         if not model.startswith("gemini"):
+            logger.warning(
+                "Model %r is not a supported model; falling back to gemini-2.0-flash "
+                "via Vertex AI. SeeQL supports Claude (claude-*) and Gemini (gemini-*) "
+                "only — there is no OpenAI/other-provider backend.", model,
+            )
             model = "gemini-2.0-flash"
         return {
             "type": "gemini",
@@ -167,6 +172,12 @@ def _detect_backend(config: dict) -> dict | None:
     api_key = config.get("anthropic_api_key")
     if api_key and not api_key.startswith("${"):
         if not model.startswith("claude"):
+            logger.warning(
+                "Model %r is not a supported model; falling back to "
+                "claude-sonnet-4-20250514 via the Anthropic API. SeeQL supports "
+                "Claude (claude-*) and Gemini (gemini-*) only — there is no "
+                "OpenAI/other-provider backend.", model,
+            )
             model = "claude-sonnet-4-20250514"
         return {
             "type": "anthropic",
@@ -212,10 +223,24 @@ def _run_gemini_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: 
             ),
         )
 
+        # Gemini can return no candidates (safety/recitation block, or
+        # MAX_TOKENS with no emitted content), and a candidate's `parts` can be
+        # None. Guard both so a common response shape doesn't raise IndexError
+        # and silently kill the analysis.
+        candidates = response.candidates or []
+        if not candidates:
+            logger.warning(
+                "Gemini returned no candidates (safety/recitation block or empty "
+                "response); ending tool loop"
+            )
+            break
+        candidate_content = candidates[0].content
+        parts = (candidate_content.parts if candidate_content else None) or []
+
         # Collect text and function calls from response
         text_parts = []
         function_calls = []
-        for part in response.candidates[0].content.parts:
+        for part in parts:
             if part.text:
                 text_parts.append(part.text)
             if part.function_call:
@@ -230,7 +255,7 @@ def _run_gemini_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: 
             break
 
         # Add assistant response to contents
-        contents.append(response.candidates[0].content)
+        contents.append(candidate_content)
 
         # Execute tools and add results
         tool_response_parts = []
@@ -253,7 +278,17 @@ def _run_gemini_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: 
 
 def _run_vertex_claude_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: str) -> str:
     """Run tool-use loop with Claude via Vertex AI (GCP credentials)."""
-    from anthropic import AnthropicVertex
+    try:
+        from anthropic import AnthropicVertex
+    except ImportError as e:
+        # AnthropicVertex imports google-auth at module load, and google-auth
+        # ships only with the [gcp] extra — not the core install. Surface an
+        # actionable message instead of a cryptic "No module named 'google.auth'".
+        raise RuntimeError(
+            "Claude via Vertex AI needs the GCP dependencies. Install them with "
+            "`pip install 'seeql[gcp]'`, or set ANTHROPIC_API_KEY to use the "
+            "Anthropic API instead."
+        ) from e
     client = AnthropicVertex(
         project_id=backend["project_id"],
         region=backend["region"],
@@ -419,6 +454,32 @@ def _extract_section(text: str, start_name: str, end_name: str | None) -> str:
     return text[start_idx:].strip()
 
 
+def _split_findings_recommendations(cleaned: str) -> tuple[str, str]:
+    """Split an analysis blob into (findings, recommendations).
+
+    Handles both the standard agent format (`### Findings` / `### Recommendations`)
+    and the richer replay/investigator format (singular `### Recommendation`, with
+    no explicit Findings header) so neither DB column is left empty.
+    """
+    findings = _extract_section(cleaned, "findings", "recommendations")
+    recommendations = _extract_section(cleaned, "recommendations", None)
+    if not recommendations:
+        recommendations = _extract_section(cleaned, "recommendation", None)
+
+    if not findings and not recommendations:
+        findings = cleaned
+    elif not findings:
+        # A recommendations section parsed but there's no explicit "### Findings"
+        # header (replay/RCA format). Treat everything before the recommendation
+        # as findings.
+        for header in ("recommendations", "recommendation"):
+            m = _section_pattern(header).search(cleaned)
+            if m:
+                findings = cleaned[:m.start()].strip()
+                break
+    return findings, recommendations
+
+
 # ---------------------------------------------------------------------------
 # Public wrapper for arbitrary LLM analyses (Phase 1.7)
 # ---------------------------------------------------------------------------
@@ -497,10 +558,7 @@ def run_llm_analysis(
     if m:
         severity = m.group(1).lower()
 
-    findings = _extract_section(cleaned, "findings", "recommendations")
-    recommendations = _extract_section(cleaned, "recommendations", None)
-    if not findings and not recommendations:
-        findings = cleaned
+    findings, recommendations = _split_findings_recommendations(cleaned)
 
     try:
         analysis_id = writer.write_agent_analysis_one({
