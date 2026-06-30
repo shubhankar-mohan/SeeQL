@@ -58,10 +58,11 @@ COPY api/ ./api/
 COPY agent/ ./agent/
 COPY alerting/ ./alerting/
 COPY seeql/ ./seeql/
+COPY mcp_server/ ./mcp_server/
 
 # google-genai is built unconditionally so the default (api-only) runtime
 # image can import the Gemini/Vertex backend without the [gcp] extra.
-RUN pip wheel --wheel-dir /wheels ".[${INSTALL_EXTRAS}]" google-genai
+RUN pip wheel --wheel-dir /wheels ".[${INSTALL_EXTRAS}]" google-genai 'mcp>=1.2'
 
 # ---------- Stage 2: runtime ----------
 FROM ${PYTHON_IMAGE} AS runtime
@@ -93,7 +94,7 @@ WORKDIR /app
 
 # Install from the pre-built wheels — no network access needed
 COPY --from=builder /wheels /wheels
-RUN pip install --no-index --find-links=/wheels "seeql[${INSTALL_EXTRAS}]" google-genai \
+RUN pip install --no-index --find-links=/wheels "seeql[${INSTALL_EXTRAS}]" google-genai 'mcp>=1.2' \
     && rm -rf /wheels \
     && find /usr/local/lib/python3.12 -type d -name '__pycache__' -prune -exec rm -rf {} +
 
@@ -108,12 +109,18 @@ COPY api/ ./api/
 COPY agent/ ./agent/
 COPY alerting/ ./alerting/
 COPY seeql/ ./seeql/
+COPY mcp_server/ ./mcp_server/
 COPY templates/ ./templates/
 COPY static/ ./static/
 
 # Reference config (users mount their own at /etc/seeql/seeql.yml)
 COPY seeql.example.yml /etc/seeql/seeql.example.yml
-ENV SEEQL_CONFIG=/etc/seeql/seeql.yml
+# Run from the COPYed /app source tree — it carries the YAML/templates/static
+# data files. The wheel install only provides third-party deps; without this the
+# `seeql` console script imports the data-less installed package from
+# site-packages and can't find settings.yaml.
+ENV SEEQL_CONFIG=/etc/seeql/seeql.yml \
+    PYTHONPATH=/app
 
 # Non-root user, writable data + logs
 RUN useradd --create-home --shell /usr/sbin/nologin seeql \
