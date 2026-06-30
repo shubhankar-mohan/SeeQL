@@ -54,6 +54,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   when those aggregates came back `NULL` it raised `TypeError: unsupported
   format string passed to NoneType`. Every formatted aggregate is now
   None-coalesced.
+- **NULL `digest_text` crashed several views and the state report.**
+  `digest_text` is the only nullable column in `query_digest_snapshots`, and
+  multiple call sites used `row.get('digest_text', default)[:N]` — where `.get`
+  returns `None` for an explicit-NULL value (the default only applies to a
+  *missing* key) and the slice then raised `TypeError: 'NoneType' object is not
+  subscriptable`. Fixed across the state report (`/api/v1/state-report`), the
+  to-do regression list (`/dashboard/todo`), the query-detail partial, and the
+  EXPLAIN-failure log line by coalescing before slicing. Added regression tests
+  that seed a NULL-`digest_text` row for each surface.
+- **LLM agent provider layer hardened.** (1) Gemini responses with no
+  `candidates` (safety/recitation blocks, or `MAX_TOKENS` with no content) raised
+  `IndexError` and silently killed the analysis — now guarded. (2) Claude-via-
+  Vertex failed with a cryptic `No module named 'google.auth'` on a core-only
+  install (google-auth ships with the `[gcp]` extra) — now an actionable error
+  pointing at `pip install 'seeql[gcp]'`. (3) An unsupported model (e.g. `gpt-4o`)
+  was silently swapped for Claude/Gemini — now logs a warning. (4) Replay/RCA
+  analyses stored an empty `recommendations` column because the prompt uses a
+  singular `### Recommendation` header the parser didn't match — parsing now
+  handles both formats. Added the first direct tests for the provider loops.
+- **`seeql doctor` reported the wrong MySQL host.** The "Config loads" and
+  "Production MySQL reachable" lines read the legacy `production_db` section for
+  display while the actual reachability test used the `servers:` registry, so an
+  install configured the documented way showed the stock default `10.0.0.1`. Both
+  lines now read the registry's default server.
+- **`seeql serve` / `seeql mcp` without their extras printed a raw traceback**
+  instead of a friendly "install the `[api]` / `[mcp]` extra" message. Now a
+  clear, actionable error.
 - **Startup crash where `cryptography`'s native bindings can't load.**
   `collectors/__init__.py` probed GCP availability with a module-level
   `import google.oauth2.service_account`, which eagerly loads the cryptography
