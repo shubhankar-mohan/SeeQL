@@ -51,6 +51,25 @@ class TestHealthEndpoint:
         assert data["status"] == "degraded"
 
 
+class TestDashboardRoutes:
+    """Render dashboard HTML routes — guards the Starlette TemplateResponse
+    signature (request must be the first positional arg) and the root redirect."""
+
+    def test_overview_renders(self, api_client):
+        resp = api_client.get("/dashboard")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers["content-type"]
+
+    def test_queries_page_renders(self, api_client):
+        resp = api_client.get("/dashboard/queries")
+        assert resp.status_code == 200
+
+    def test_root_redirects_to_dashboard(self, api_client):
+        resp = api_client.get("/", follow_redirects=False)
+        assert resp.status_code in (302, 307)
+        assert resp.headers["location"] == "/dashboard"
+
+
 class TestCollectEndpoints:
     @patch("collectors.fast_loop.writer")
     @patch("storage.connection.get_prod_connection")

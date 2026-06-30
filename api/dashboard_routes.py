@@ -127,7 +127,7 @@ def dashboard_overview(request: Request, server: str = None):
     else:
         health = "green"
 
-    return request.app.state.templates.TemplateResponse("dashboard/overview.html", {
+    return request.app.state.templates.TemplateResponse(request, "dashboard/overview.html", {
         "request": request,
         "health": health,
         "zero_data": zero_data,
@@ -207,7 +207,7 @@ def dashboard_queries(request: Request, range: str = "24h", sort: str = "total_t
     """)
     regression_digests = {r["digest"] for r in regressions}
 
-    return request.app.state.templates.TemplateResponse("dashboard/queries.html", {
+    return request.app.state.templates.TemplateResponse(request, "dashboard/queries.html", {
         "request": request,
         "queries": queries,
         "regression_digests": regression_digests,
@@ -238,7 +238,7 @@ def dashboard_locks(request: Request, server: str = None):
         SELECT * FROM metadata_lock_snapshots
         WHERE snapshot_time = (SELECT MAX(snapshot_time) FROM metadata_lock_snapshots)
     """)
-    return request.app.state.templates.TemplateResponse("dashboard/locks.html", {
+    return request.app.state.templates.TemplateResponse(request, "dashboard/locks.html", {
         "request": request,
         "current_locks": current_locks,
         "active_txns": active_txns,
@@ -298,7 +298,7 @@ def dashboard_schema(request: Request, pg_unused: int = 1, pg_redundant: int = 1
         LIMIT ? OFFSET ?
     """, (PAGE_SIZE, (pg_redundant - 1) * PAGE_SIZE))
 
-    return request.app.state.templates.TemplateResponse("dashboard/schema.html", {
+    return request.app.state.templates.TemplateResponse(request, "dashboard/schema.html", {
         "request": request,
         "ddl_changes": ddl_changes,
         "table_sizes": table_sizes,
@@ -325,7 +325,7 @@ def dashboard_server(request: Request, server: str = None):
           AND total_wait_sec > 0
         ORDER BY total_wait_sec DESC LIMIT 10
     """)
-    return request.app.state.templates.TemplateResponse("dashboard/server.html", {
+    return request.app.state.templates.TemplateResponse(request, "dashboard/server.html", {
         "request": request,
         "wait_events": wait_events,
         "page": "server",
@@ -708,7 +708,7 @@ def dashboard_todo(request: Request, server: str = None):
             ],
         })
 
-    return request.app.state.templates.TemplateResponse("dashboard/todo.html", {
+    return request.app.state.templates.TemplateResponse(request, "dashboard/todo.html", {
         "request": request,
         "emergency_items": emergency_items,
         "diagnostic_items": diagnostic_items,
@@ -778,7 +778,7 @@ def partial_health_bar(request: Request):
     else:
         health = "green"
 
-    return request.app.state.templates.TemplateResponse("partials/health_bar.html", {
+    return request.app.state.templates.TemplateResponse(request, "partials/health_bar.html", {
         "request": request, "health": health, "thread_count": thread_count,
         "lock_count": lock_count, "bp": bp or {"hit_ratio": None},
         "anomaly_count": anomaly_count,
@@ -820,7 +820,7 @@ def partial_active_alerts(request: Request):
     ddl_rem = get_remediation("ddl_change")
     anom_rem = get_remediation("anomaly")
 
-    return request.app.state.templates.TemplateResponse("partials/active_alerts.html", {
+    return request.app.state.templates.TemplateResponse(request, "partials/active_alerts.html", {
         "request": request,
         "zero_data": zero_data,
         "ddl_changes": ddl_changes, "long_txns": long_txns, "long_locks": long_locks,
@@ -836,7 +836,7 @@ def partial_current_locks(request: Request):
         WHERE snapshot_time = (SELECT MAX(snapshot_time) FROM lock_wait_snapshots)
         ORDER BY wait_seconds DESC
     """)
-    return request.app.state.templates.TemplateResponse("partials/current_locks.html", {
+    return request.app.state.templates.TemplateResponse(request, "partials/current_locks.html", {
         "request": request, "current_locks": current_locks,
     })
 
@@ -848,7 +848,7 @@ def partial_active_transactions(request: Request):
         WHERE snapshot_time = (SELECT MAX(snapshot_time) FROM transaction_snapshots)
         ORDER BY age_sec DESC
     """)
-    return request.app.state.templates.TemplateResponse("partials/active_transactions.html", {
+    return request.app.state.templates.TemplateResponse(request, "partials/active_transactions.html", {
         "request": request, "active_txns": active_txns,
     })
 
@@ -887,7 +887,7 @@ def partial_query_detail(request: Request, digest: str):
 
     explain_signals = _analyze_explain(explain)
 
-    return request.app.state.templates.TemplateResponse("partials/query_detail.html", {
+    return request.app.state.templates.TemplateResponse(request, "partials/query_detail.html", {
         "request": request,
         "query_info": query_info,
         "explain": explain,

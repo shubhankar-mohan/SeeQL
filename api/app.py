@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -49,6 +50,11 @@ def create_app() -> FastAPI:
     # Inbound webhook receiver (CP6)
     from api.webhook_routes import router as webhook_router
     app.include_router(webhook_router)
+
+    # Bare domain -> dashboard, so the root URL works without an nginx redirect.
+    @app.get("/", include_in_schema=False)
+    def _root_to_dashboard():
+        return RedirectResponse(url="/dashboard")
 
     return app
 
