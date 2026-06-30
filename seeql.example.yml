@@ -46,10 +46,23 @@ servers:
   #   password: ${ANALYTICS_DB_PASSWORD}
 
 # --- LLM agent (optional) ------------------------------------------------------
+# The backend is chosen from the model name, or force it with `provider`.
 # agent:
 #   enabled: true
-#   model: claude-opus-4-6            # or gemini-2.0-flash
-#   # Claude via the Anthropic API needs ANTHROPIC_API_KEY in the environment.
+#   model: gemini-2.0-flash          # gemini-* | claude-* | gpt-*/o*
+#   # provider: openai               # force: openai | anthropic | vertex-claude | gemini
+#
+#   # Claude via the Anthropic API:
+#   # model: claude-opus-4-8
+#   # anthropic_api_key: ${ANTHROPIC_API_KEY}
+#
+#   # OpenAI — or ANY OpenAI-compatible server (Azure OpenAI, Ollama, vLLM, Groq,
+#   # OpenRouter, LM Studio, …) by setting openai_base_url:
+#   # model: gpt-4o
+#   # openai_api_key: ${OPENAI_API_KEY}
+#   # openai_base_url: ${OPENAI_BASE_URL}   # e.g. http://localhost:11434/v1 for Ollama
+#
+#   # Gemini / Claude via Vertex AI use GCP credentials (the gcp: block + ADC).
 
 # --- Alerting (optional) -------------------------------------------------------
 # alerting:

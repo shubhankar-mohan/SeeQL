@@ -7,6 +7,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed
+- **Default agent model is now `gemini-2.0-flash`** (was `claude-opus-4-6`). The
+  previous default required Vertex AI / a valid Opus id and would not resolve on
+  a plain Anthropic-API setup; Gemini is the lowest-friction default and other
+  models are a one-line config change.
 - **Configuration is now a single mounted YAML file (Prometheus-style).** Mount
   your config at `/etc/seeql/seeql.yml` (or pass `--config` / set `SEEQL_CONFIG`);
   copy `seeql.example.yml` to start. Connections and the multi-server list live
@@ -23,6 +27,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   works against an empty monitoring DB with no manual init step.
 
 ### Added
+- **OpenAI + any OpenAI-compatible LLM backend.** The agent now supports OpenAI
+  (`gpt-*`, `o*`) alongside Claude and Gemini, and — by setting
+  `agent.openai_base_url` — any OpenAI-compatible endpoint (Azure OpenAI, Ollama,
+  vLLM, Groq, OpenRouter, LM Studio, …), i.e. "bring your own / any other LLM".
+  Backend selection is model-name-driven or forced via `agent.provider`
+  (`openai` | `anthropic` | `vertex-claude` | `gemini`). Install with the new
+  `[openai]` extra (`pip install 'seeql[openai]'`; bundled in the Docker image).
 - **Incident replay** (`seeql replay --from X --to Y`, `--incident N`, `--latest`)
   — chronological timeline reconstruction + optional LLM root cause narration
   with graceful timeline-only fallback when no LLM backend is configured.

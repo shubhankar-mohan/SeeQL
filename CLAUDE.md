@@ -163,7 +163,7 @@ The agent has tools it can call (defined in `agent/tools.py`):
 Key packages and files beyond the original collector scaffolding:
 
 - **`collectors/`** — All metric collectors extending `BaseCollector`. Includes: `processlist.py`, `lock_waits.py`, `transactions.py`, `metadata_locks.py`, `query_digests.py`, `wait_events.py`, `table_io.py`, `innodb_metrics.py`, `buffer_pool.py`, `global_status.py`, `schema_snapshot.py`, `index_analysis.py`, `global_variables.py`, `execution_stages.py`, `innodb_status.py`, `explain_capture.py`, `gcp_metrics.py`, `gcp_slow_log.py`, `queries.py`, plus loop drivers `fast_loop.py`, `medium_loop.py`, `slow_loop.py`
-- **`agent/`** — LLM agent layer. `state_builder.py` (structured state reports), `llm_agent.py` (agent orchestration, supports Gemini and Claude), `tools.py` (tool definitions the LLM can call), `prompts.py` (system/user prompts), `queries.py` (agent-specific SQL), `replay.py` (incident replay + LLM root cause narration)
+- **`agent/`** — LLM agent layer. `state_builder.py` (structured state reports), `llm_agent.py` (agent orchestration, supports Gemini, Claude, and OpenAI / OpenAI-compatible), `tools.py` (tool definitions the LLM can call), `prompts.py` (system/user prompts), `queries.py` (agent-specific SQL), `replay.py` (incident replay + LLM root cause narration)
 - **`alerting/`** — Rule-based alerting engine. `engine.py` (evaluation loop), `rules.py` (6 built-in rules: lock_cascade, threads_running_spike, query_regression, ddl_change, high_cpu, deadlock_detected), `anomaly.py` (z-score anomaly detection — separate layer, not a rule), `anomaly_store.py` (anomaly event persistence), `incidents.py` (gap-based incident windowing), `channels.py` (3 channels: Slack, webhook, log), `models.py` (alert data models)
 - **`api/`** — HTTP endpoints. `prometheus.py` (Prometheus `/metrics` endpoint, ~20 gauges/counters), `agent_routes.py`, `dashboard_routes.py`, `dashboard_api.py`, `query_helpers.py`
 - **`parsers/`** — Output parsers. `innodb_status.py` (parses `SHOW ENGINE INNODB STATUS`)
@@ -182,7 +182,7 @@ Key packages and files beyond the original collector scaffolding:
 - **Config via YAML** with env var substitution for secrets
 - **Logging:** structured format with collector name, timing
 - **Error handling:** fail independently, log, continue
-- **LLM provider:** configurable between Gemini (Vertex AI) and Claude (Anthropic API or Vertex AI). Default (shipped in `settings.yaml`): claude-opus-4-6 via Vertex AI; falls back to gemini-2.0-flash if no Claude model/credentials are configured.
+- **LLM provider:** configurable across Gemini (Vertex AI), Claude (Anthropic API or Vertex AI), and OpenAI — plus any OpenAI-compatible endpoint (Azure OpenAI, Ollama, vLLM, Groq, OpenRouter, LM Studio, …) via `agent.openai_base_url`. Backend is chosen from the model name (`gemini-*`/`claude-*`/`gpt-*`/`o*`) or forced with `agent.provider`. Default (shipped in `settings.yaml`): `gemini-2.0-flash`. Selection + each provider loop live in `agent/llm_agent.py` (`_detect_backend`, `_run_gemini_loop`/`_run_claude_loop`/`_run_openai_loop`).
 
 ## Current State
 
@@ -204,7 +204,7 @@ Key packages and files beyond the original collector scaffolding:
 - [x] EXPLAIN plan auto-capture for top-N expensive queries
 - [x] Data retention cleanup (runs daily via scheduler, with per-table overrides)
 - [x] Structured State Builder (pre-processor for LLM input)
-- [x] LLM Agent layer with tool-use (supports Gemini via Vertex AI and Claude via Anthropic API; default model: claude-opus-4-6 via Vertex AI)
+- [x] LLM Agent layer with tool-use (Gemini via Vertex AI, Claude via Anthropic API / Vertex AI, OpenAI + any OpenAI-compatible endpoint; default model: gemini-2.0-flash)
 - [x] Alerting with 6 built-in rules and 3 channels (Slack, webhook, log)
 - [x] **Anomaly detection layer** (`alerting/anomaly.py`, 615 lines): z-score, same-hour-same-weekday baselines over 28 days with 24h + all-data fallbacks, 7 active metrics (query-latency per-digest planned), zero-stddev guard, cold-start handling, integrated with alerting engine and state builder
 - [x] Prometheus endpoint at `/metrics` (~20 gauges/counters)
