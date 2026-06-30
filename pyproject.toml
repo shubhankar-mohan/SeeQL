@@ -41,7 +41,7 @@ Documentation = "https://github.com/shubhankar-mohan/SeeQL#readme"
 Issues = "https://github.com/shubhankar-mohan/SeeQL/issues"
 
 [project.optional-dependencies]
-dev = ["pytest>=7.4", "pytest-cov>=4.1", "pytest-mock>=3.12", "ruff>=0.1.0", "httpx>=0.25"]
+dev = ["pytest>=7.4", "pytest-cov>=4.1", "pytest-mock>=3.12", "ruff>=0.1.0", "httpx>=0.25", "openai>=1.40"]
 api = ["fastapi>=0.104", "uvicorn[standard]>=0.24", "jinja2>=3.1", "aiofiles>=23.0"]
 # MCP: expose SeeQL's surface via Model Context Protocol so Claude Desktop /
 # Claude Code / remote MCP clients can use it for RCA. Ships tools for
