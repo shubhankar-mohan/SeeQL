@@ -16,6 +16,10 @@ def test_demo_config_resolves_grandline_primary(monkeypatch):
 
     # reset the cached registry so it re-reads the demo config
     from config import server_registry
-    server_registry._registry = None
-    reg = server_registry.get_server_registry()
-    assert reg.get_default_server_id() == "grandline-prod"
+    prev_registry = server_registry._registry
+    try:
+        server_registry._registry = None
+        reg = server_registry.get_server_registry()
+        assert reg.get_default_server_id() == "grandline-prod"
+    finally:
+        server_registry._registry = prev_registry
