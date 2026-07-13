@@ -54,16 +54,22 @@ def _get(base: str, url_path: str) -> bytes:
 
 
 def discover_digests(base: str) -> list[str]:
-    """Read the queries API to learn which per-digest URLs to freeze."""
+    """Read the top-queries API to learn which per-digest URLs to freeze.
+
+    The real endpoint (`/api/v1/queries/top`) returns a bare JSON array of row
+    dicts, each carrying a `digest`. We fall back to the known seeded digests if
+    the API shape ever changes so a crawl never dead-ends.
+    """
     try:
-        raw = _get(base, "/api/v1/queries?range=24h&limit=50")
+        raw = _get(base, "/api/v1/queries/top?range=24h&limit=50")
         data = json.loads(raw)
-        rows = data.get("queries", data if isinstance(data, list) else [])
+        rows = data if isinstance(data, list) else data.get("queries", [])
         digests = [r["digest"] for r in rows if isinstance(r, dict) and r.get("digest")]
         if digests:
             return digests
-    except Exception:
-        pass
+        print("WARN  discover_digests: API returned no digests; using fallback list")
+    except Exception as exc:
+        print(f"WARN  discover_digests failed ({exc}); using fallback list")
     # Fallback: the known seeded digests.
     return ["7107e33a", "abf87900", "0598ca31", "f0998abc", "c19a1fa7",
             "d4410aa2", "e7712bb0", "a8890c14", "b5956bf0"]
@@ -93,12 +99,15 @@ def export(base: str, out_dir: str) -> list[str]:
     digests = discover_digests(base)
     partials = list(PARTIALS) + [f"/dashboard/partials/query-detail/{d}" for d in digests]
 
+    overview_body: bytes | None = None
     for p in PAGES + partials + api_urls(digests):
         try:
             body = _get(base, p)
         except Exception as exc:  # keep going; report at the end
             print(f"WARN  {p}  ({exc})")
             continue
+        if p == "/dashboard":
+            overview_body = body
         written.append(_write(out_dir, local_path(p), body))
 
     # copy static assets verbatim
@@ -107,10 +116,18 @@ def export(base: str, out_dir: str) -> list[str]:
         shutil.copytree(static_src, os.path.join(out_dir, "static"))
         written.append("static/")
 
-    # root -> overview
-    with open(os.path.join(out_dir, "index.html"), "wb") as fh:
-        fh.write(_get(base, "/dashboard"))
-    written.append("index.html")
+    # root -> overview. Reuse the body already fetched in the loop; only re-fetch
+    # (guarded) if the overview fetch failed above, so a transient error here
+    # can't crash a crawl that otherwise succeeded.
+    if overview_body is None:
+        try:
+            overview_body = _get(base, "/dashboard")
+        except Exception as exc:
+            print(f"WARN  /dashboard (root index)  ({exc})")
+    if overview_body is not None:
+        with open(os.path.join(out_dir, "index.html"), "wb") as fh:
+            fh.write(overview_body)
+        written.append("index.html")
 
     return written
 

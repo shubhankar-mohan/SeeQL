@@ -214,8 +214,15 @@ def _seed_queries_and_schema(conn: sqlite3.Connection) -> None:
     reg = "b5956bf0"
     reg_sql = "SELECT `island_id`, SUM(`amount`) FROM `bounties` GROUP BY `island_id`"
     hist = []
-    # baseline: fast (0.02s) at several points 1h..7d ago
-    for d_min in (90, 300, 720, 1440, 2880, 5760, 10080 - 60):
+    # baseline: fast (0.02s) at several points ~1..7 days ago. All kept > 24h ago
+    # (prior calendar dates) on purpose: the regression banner compares
+    # snapshot_time (ISO-'T') against space-separated datetime('now','-1 hour')
+    # bounds, and SQLite's byte-wise TEXT compare mis-handles a baseline point
+    # that shares TODAY's date with the bound (0x54 'T' > 0x20 ' '), leaking it
+    # into "recent" and out of the baseline — which would understate the
+    # multiplier. Prior-date points differ in the date prefix, so the compare
+    # resolves correctly and the regression shows a clean, stable ~10x.
+    for d_min in (1200, 1560, 2100, 2880, 4320, 5760, 10080 - 60):
         hist.append({
             "snapshot_time": ts(d_min), "server_id": SERVER_ID, "digest": reg,
             "digest_text": reg_sql, "query_sample_text": None, "schema_name": "grandline",
