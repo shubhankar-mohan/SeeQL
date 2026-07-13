@@ -22,8 +22,17 @@ NOW = datetime.now(timezone.utc).replace(microsecond=0, tzinfo=None)
 
 
 def ts(delta_min: int = 0) -> str:
-    """UTC timestamp `delta_min` minutes in the past, 'YYYY-MM-DD HH:MM:SS'."""
-    return (NOW - timedelta(minutes=delta_min)).strftime("%Y-%m-%d %H:%M:%S")
+    """UTC timestamp `delta_min` minutes in the past, ISO-8601 with a 'T'.
+
+    This MUST match the format the real collectors write
+    (``datetime.now(timezone.utc).replace(tzinfo=None).isoformat()`` — see
+    ``collectors/base.py`` + ``storage/writer.py``), i.e. ``2026-07-13T18:12:24``.
+    The dashboard's time-series endpoints filter ``snapshot_time BETWEEN ? AND ?``
+    with ISO-'T' bounds from ``parse_time_range``; a space-separated timestamp
+    sorts lexically *below* a 'T' bound on the same date (0x20 < 0x54), which
+    silently empties every ``range=1h`` chart. Keep this as ``.isoformat()``.
+    """
+    return (NOW - timedelta(minutes=delta_min)).isoformat()
 
 
 NOW_STR = ts(0)
@@ -382,6 +391,27 @@ def _seed_timeseries_and_insights(conn: sqlite3.Connection) -> None:
         "snapshot_time": ts(10), "server_id": SERVER_ID, "variable_name": "Threads_running",
         "raw_value": 48, "delta_value": None, "per_second": None,
     }])
+
+    # Dense last-28-min tail: Threads_running ramps 12 -> ~47 into the spike, and
+    # Queries/Threads_connected get finer points, so the overview's range=1h charts
+    # render a rich line telling the lock-cascade story rather than 4 sparse dots.
+    # Kept strictly inside the anomaly baseline's ~30-min exclusion window so it
+    # does not inflate the baseline variance the spike is measured against.
+    tail = []
+    ramp = [(28, 12, 522), (24, 13, 528), (20, 15, 536), (16, 19, 548),
+            (14, 24, 561), (12, 31, 575), (8, 39, 590), (6, 44, 601), (2, 47, 612)]
+    for m, tr, qps in ramp:
+        stime = ts(m)
+        tail.extend([
+            {"snapshot_time": stime, "server_id": SERVER_ID, "variable_name": "Threads_running",
+             "raw_value": tr, "delta_value": None, "per_second": None},
+            {"snapshot_time": stime, "server_id": SERVER_ID, "variable_name": "Threads_connected",
+             "raw_value": 180 + tr * 3, "delta_value": None, "per_second": None},
+            {"snapshot_time": stime, "server_id": SERVER_ID, "variable_name": "Queries",
+             "raw_value": 89_000_000 + (30 - m) * 30000, "delta_value": qps * 120,
+             "per_second": float(qps)},
+        ])
+    insert(conn, "global_status_snapshots", tail)
 
     # --- agent analyses (LLM findings) ---
     findings = (
