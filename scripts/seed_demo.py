@@ -222,7 +222,7 @@ def _seed_queries_and_schema(conn: sqlite3.Connection) -> None:
     # into "recent" and out of the baseline — which would understate the
     # multiplier. Prior-date points differ in the date prefix, so the compare
     # resolves correctly and the regression shows a clean, stable ~10x.
-    for d_min in (1200, 1560, 2100, 2880, 4320, 5760, 10080 - 60):
+    for d_min in (1500, 1800, 2400, 2880, 4320, 5760, 10080 - 60):
         hist.append({
             "snapshot_time": ts(d_min), "server_id": SERVER_ID, "digest": reg,
             "digest_text": reg_sql, "query_sample_text": None, "schema_name": "grandline",
