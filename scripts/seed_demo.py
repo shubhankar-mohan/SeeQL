@@ -331,6 +331,110 @@ def _seed_queries_and_schema(conn: sqlite3.Connection) -> None:
     }])
 
 
+def _seed_timeseries_and_insights(conn: sqlite3.Connection) -> None:
+    # --- 24h global_status series (every 15 min) for charts + anomaly baseline ---
+    gstat_series = []
+    innodb_series = []
+    lock_hist = []
+    queries_cum = 88_000_000
+    rr, ri, ru, rd = 5_000_000_000, 900_000_000, 700_000_000, 40_000_000
+    points = list(range(1440, 0, -15))  # 24h ago -> ~now, 15-min steps
+    for idx, m in enumerate(points):
+        stime = ts(m)
+        # baseline Threads_running ~ 10 (+/- 1); Threads_connected ~ 120
+        tr = 10 + (idx % 3) - 1
+        tc = 120 + (idx % 5)
+        queries_cum += 500 * 15 * 60  # steady climb
+        qps = 500 + (idx % 7) * 3
+        gstat_series.extend([
+            {"snapshot_time": stime, "server_id": SERVER_ID, "variable_name": "Threads_running",
+             "raw_value": tr, "delta_value": None, "per_second": None},
+            {"snapshot_time": stime, "server_id": SERVER_ID, "variable_name": "Threads_connected",
+             "raw_value": tc, "delta_value": None, "per_second": None},
+            {"snapshot_time": stime, "server_id": SERVER_ID, "variable_name": "Queries",
+             "raw_value": queries_cum, "delta_value": qps * 15 * 60, "per_second": float(qps)},
+            {"snapshot_time": stime, "server_id": SERVER_ID, "variable_name": "Innodb_buffer_pool_reads",
+             "raw_value": 400000 + idx * 200, "delta_value": 200, "per_second": None},
+            {"snapshot_time": stime, "server_id": SERVER_ID, "variable_name": "Innodb_buffer_pool_read_requests",
+             "raw_value": 60_000_000 + idx * 5000, "delta_value": 5000, "per_second": None},
+        ])
+        innodb_series.extend([
+            {"snapshot_time": stime, "server_id": SERVER_ID, "metric_name": name,
+             "subsystem": "innodb", "count_value": base + idx * step, "metric_type": "counter"}
+            for (name, base, step) in [("rows_read", rr, 3_000_000), ("rows_inserted", ri, 400_000),
+                                        ("rows_updated", ru, 300_000), ("rows_deleted", rd, 10_000)]
+        ])
+        # lock rows across the last ~3h for the history chart
+        if m <= 180 and idx % 2 == 0:
+            lock_hist.append({
+                "snapshot_time": stime, "server_id": SERVER_ID, "waiting_trx_id": f"{48000+idx}",
+                "waiting_pid": 5007, "waiting_query": "UPDATE crews SET last_seen = ? WHERE crew_id = ?",
+                "wait_seconds": 5 + (idx % 20), "blocking_trx_id": "48120", "blocking_pid": 5099,
+                "blocking_query": "UPDATE bounties b JOIN pirates p ON p.id=b.pirate_id SET b.amount = ?",
+                "blocking_trx_age_sec": 60 + idx, "blocking_rows_locked": 41200, "blocking_rows_modified": 38110,
+            })
+    insert(conn, "global_status_snapshots", gstat_series)
+    insert(conn, "innodb_metric_snapshots", innodb_series)
+    insert(conn, "lock_wait_snapshots", lock_hist)
+
+    # Recent Threads_running outlier ~10 min ago (>=3 sigma over the flat baseline).
+    insert(conn, "global_status_snapshots", [{
+        "snapshot_time": ts(10), "server_id": SERVER_ID, "variable_name": "Threads_running",
+        "raw_value": 48, "delta_value": None, "per_second": None,
+    }])
+
+    # --- agent analyses (LLM findings) ---
+    findings = (
+        '["Nightly bounty-recalculation batch (digest b5956bf0) holds row locks on '
+        'hot table `pirates`, blocking live crew writes.",'
+        '"Query 7107e33a full-scans `pirates` (780M rows) on every call — no index on crew_id."]'
+    )
+    recs = (
+        '["ADD INDEX `idx_crew` (`crew_id`) on `pirates` to remove the 780M-row full scan.",'
+        '"Shard the bounty batch by island_id and lower its isolation to reduce lock span."]'
+    )
+    insert(conn, "agent_analyses", [{
+        "analyzed_at": ts(12), "server_id": SERVER_ID, "analysis_type": "routine",
+        "severity": "warning", "input_summary": "Threads_running spike + lock cascade from bounty batch.",
+        "findings": findings, "recommendations": recs, "applied": 0,
+        "applied_at": None, "outcome_notes": None,
+    }])
+
+    # --- incident window ---
+    cur = conn.execute(
+        "INSERT INTO incident_windows (server_id, start_time, end_time, severity, "
+        "involved_metrics, event_count, analysis_id, status) VALUES (?,?,?,?,?,?,?,?)",
+        (SERVER_ID, ts(45), ts(20), "critical",
+         '["threads_running","lock_waits"]', 14, None, "detected"),
+    )
+    conn.commit()
+
+    # --- inbound alert + two investigations ---
+    cur = conn.execute(
+        "INSERT INTO inbound_alerts (provider, received_at, server_id, external_id, "
+        "alert_type, severity, summary, payload, signature_verified, processed_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        ("grafana", ts(40), SERVER_ID, "GL-7781", "lock_cascade", "critical",
+         "Threads_running 48 (4x baseline) on Grand Line — Prod",
+         '{"policy":"lock-wait-policy","value":48}', 1, ts(39)),
+    )
+    alert_id = cur.lastrowid
+    conn.execute(
+        "INSERT INTO investigations (inbound_alert_id, server_id, started_at, ended_at, "
+        "status, root_cause_summary, confidence, query_count_total) VALUES (?,?,?,?,?,?,?,?)",
+        (alert_id, SERVER_ID, ts(38), ts(30), "completed",
+         "Nightly bounty-recalculation batch on `pirates` created a lock cascade that "
+         "backed up crew-update writes; Threads_running spiked to 48. Recommend indexing "
+         "`pirates(crew_id)` and sharding the batch by island_id.", 0.82, 11),
+    )
+    conn.execute(
+        "INSERT INTO investigations (inbound_alert_id, server_id, started_at, ended_at, "
+        "status, root_cause_summary, confidence, query_count_total) VALUES (?,?,?,?,?,?,?,?)",
+        (alert_id, SERVER_ID, ts(6), None, "phase2", None, None, 4),
+    )
+    conn.commit()
+
+
 def build(db_path: str) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
     for suffix in ("", "-wal", "-shm"):
@@ -344,6 +448,7 @@ def build(db_path: str) -> None:
         _seed_server(conn)
         _seed_current_state(conn)
         _seed_queries_and_schema(conn)
+        _seed_timeseries_and_insights(conn)
         conn.commit()
     finally:
         conn.close()

@@ -108,3 +108,49 @@ def test_queries_and_schema_populated(tmp_path):
     assert conn.execute(
         "SELECT variable_value FROM global_variable_snapshots WHERE variable_name='max_connections'"
     ).fetchone() is not None
+
+
+def test_timeseries_and_insights_populated(tmp_path):
+    conn = _build(tmp_path)
+    conn.row_factory = sqlite3.Row
+
+    # 24h series for Threads_running with many baseline points + a recent spike
+    series = conn.execute(
+        "SELECT raw_value FROM global_status_snapshots "
+        "WHERE variable_name='Threads_running' ORDER BY snapshot_time"
+    ).fetchall()
+    vals = [r[0] for r in series]
+    assert len(vals) >= 20                     # dense baseline for anomaly engine
+    assert max(vals) >= 3 * (sum(vals) / len(vals))  # a clear recent outlier
+
+    # Queries series with per_second (QPS chart + qps anomaly)
+    qps = conn.execute(
+        "SELECT COUNT(*) FROM global_status_snapshots "
+        "WHERE variable_name='Queries' AND per_second IS NOT NULL"
+    ).fetchone()[0]
+    assert qps >= 20
+
+    # innodb row-ops series
+    assert conn.execute(
+        "SELECT COUNT(*) FROM innodb_metric_snapshots WHERE metric_name='rows_read'"
+    ).fetchone()[0] >= 10
+
+    # lock history spread across buckets
+    assert conn.execute(
+        "SELECT COUNT(DISTINCT snapshot_time) FROM lock_wait_snapshots"
+    ).fetchone()[0] >= 6
+
+    # insights
+    assert conn.execute("SELECT COUNT(*) FROM agent_analyses").fetchone()[0] >= 1
+    assert conn.execute("SELECT COUNT(*) FROM incident_windows WHERE server_id='grandline-prod'").fetchone()[0] >= 1
+
+    # one running + one completed investigation, linked to an inbound alert
+    inv = conn.execute(
+        "SELECT i.status, i.root_cause_summary FROM investigations i "
+        "JOIN inbound_alerts a ON i.inbound_alert_id = a.id "
+        "WHERE i.server_id='grandline-prod'"
+    ).fetchall()
+    statuses = {r[0] for r in inv}
+    assert "completed" in statuses
+    assert any(s not in ("completed", "aborted") for s in statuses)  # a live one
+    assert any(r[1] for r in inv)  # a root_cause_summary present
