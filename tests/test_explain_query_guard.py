@@ -1,26 +1,47 @@
 import agent.tools as tools
 
 
-def _no_conn(*a, **k):
-    raise AssertionError("must NOT open a prod connection for a non-runnable query")
+def _opened_conn_mock():
+    """Return (sentinel, mock). The sentinel flips to True the instant
+    get_prod_connection is called — BEFORE the mock raises. Because the
+    flip happens outside of _tool_explain_query's try/except, it is
+    observable even though the mock's exception itself gets swallowed by
+    that except Exception block. This is what makes the rejection tests
+    non-hollow: removing the guard clause causes the mock to be invoked,
+    flipping the sentinel, and the assertion below catches it regardless
+    of what error dict the function ends up returning.
+    """
+    opened = {"v": False}
+
+    def _mock(*a, **k):
+        opened["v"] = True
+        raise AssertionError("must NOT open a prod connection for a non-runnable query")
+
+    return opened, _mock
 
 
 def test_rejects_parameterized_query(monkeypatch):
-    monkeypatch.setattr(tools, "get_prod_connection", _no_conn)
+    opened, mock = _opened_conn_mock()
+    monkeypatch.setattr(tools, "get_prod_connection", mock)
     r = tools._tool_explain_query({"query": "SELECT x FROM t WHERE id = ?"})
-    assert "error" in r and "?" in r["error"] or "placeholder" in r["error"].lower()
+    assert "error" in r and ("?" in r["error"] or "placeholder" in r["error"].lower())
+    assert opened["v"] is False, "get_prod_connection was called for a non-runnable query"
 
 
 def test_rejects_truncated_ellipsis(monkeypatch):
-    monkeypatch.setattr(tools, "get_prod_connection", _no_conn)
+    opened, mock = _opened_conn_mock()
+    monkeypatch.setattr(tools, "get_prod_connection", mock)
     r = tools._tool_explain_query({"query": "SELECT a, b, c FROM orders WHERE created_at > ..."})
     assert "error" in r
+    assert opened["v"] is False, "get_prod_connection was called for a non-runnable query"
 
 
 def test_rejects_unicode_ellipsis(monkeypatch):
-    monkeypatch.setattr(tools, "get_prod_connection", _no_conn)
+    opened, mock = _opened_conn_mock()
+    monkeypatch.setattr(tools, "get_prod_connection", mock)
     r = tools._tool_explain_query({"query": "SELECT a FROM t WHERE k IN (…)"})
     assert "error" in r
+    assert opened["v"] is False, "get_prod_connection was called for a non-runnable query"
 
 
 def test_allows_clean_select(monkeypatch):
