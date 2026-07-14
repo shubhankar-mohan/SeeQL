@@ -96,7 +96,7 @@ def suggest_indexes() -> list[dict]:
                SUM(no_index_used) as no_index_used,
                MAX(last_seen) as last_seen
         FROM query_digest_snapshots
-        WHERE snapshot_time >= datetime('now', '-24 hours')
+        WHERE datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-24 hours')
         GROUP BY digest
         HAVING (SUM(full_scans) > 0 OR SUM(no_index_used) > 0
                 OR (SUM(rows_sent) > 0 AND CAST(SUM(rows_examined) AS REAL) / SUM(rows_sent) > 100))
@@ -237,7 +237,7 @@ def get_queries_to_optimize() -> list[dict]:
                MAX(last_seen) as last_seen,
                MIN(snapshot_time) as first_seen
         FROM query_digest_snapshots
-        WHERE snapshot_time >= datetime('now', '-24 hours')
+        WHERE datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-24 hours')
         GROUP BY digest
         ORDER BY SUM(total_time_sec) DESC
         LIMIT 15
@@ -280,12 +280,12 @@ def get_queries_to_optimize() -> list[dict]:
             WITH recent AS (
                 SELECT AVG(avg_time_sec) as recent_avg
                 FROM query_digest_snapshots
-                WHERE digest = ? AND snapshot_time >= datetime('now', '-1 hour')
+                WHERE digest = ? AND datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-1 hour')
             ),
             baseline AS (
                 SELECT AVG(avg_time_sec) as baseline_avg
                 FROM query_digest_snapshots
-                WHERE digest = ? AND snapshot_time BETWEEN datetime('now', '-7 days') AND datetime('now', '-1 hour')
+                WHERE digest = ? AND datetime(REPLACE(snapshot_time,'T',' ')) BETWEEN datetime('now', '-7 days') AND datetime('now', '-1 hour')
             )
             SELECT recent_avg, baseline_avg,
                    recent_avg / NULLIF(baseline_avg, 0) as factor
@@ -302,8 +302,8 @@ def get_queries_to_optimize() -> list[dict]:
         # Get frequency stats
         freq = query_single("""
             SELECT
-                SUM(CASE WHEN snapshot_time >= datetime('now', '-1 hour') THEN exec_count ELSE 0 END) as last_1h,
-                SUM(CASE WHEN snapshot_time >= datetime('now', '-24 hours') THEN exec_count ELSE 0 END) as last_24h,
+                SUM(CASE WHEN datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-1 hour') THEN exec_count ELSE 0 END) as last_1h,
+                SUM(CASE WHEN datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-24 hours') THEN exec_count ELSE 0 END) as last_24h,
                 SUM(exec_count) as last_7d
             FROM query_digest_snapshots
             WHERE digest = ?

@@ -281,7 +281,7 @@ METRIC_CONFIGS = {
         "extra_where": "AND server_id = ?",
         "current_query": """
             SELECT COUNT(*) as val FROM lock_wait_snapshots
-            WHERE snapshot_time >= datetime('now', '-5 minutes')
+            WHERE datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-5 minutes')
               AND server_id = ?
         """,
         "baseline_query": """
@@ -293,8 +293,8 @@ METRIC_CONFIGS = {
             FROM (
                 SELECT COUNT(*) as val
                 FROM lock_wait_snapshots
-                WHERE snapshot_time >= datetime('now', '-7 days')
-                  AND snapshot_time < datetime('now', '-30 minutes')
+                WHERE datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-7 days')
+                  AND datetime(REPLACE(snapshot_time,'T',' ')) < datetime('now', '-30 minutes')
                   AND server_id = ?
                 GROUP BY strftime('%Y-%m-%d %H', snapshot_time)
             ) sub
@@ -302,8 +302,8 @@ METRIC_CONFIGS = {
                 SELECT AVG(val) as avg_val FROM (
                     SELECT COUNT(*) as val
                     FROM lock_wait_snapshots
-                    WHERE snapshot_time >= datetime('now', '-7 days')
-                      AND snapshot_time < datetime('now', '-30 minutes')
+                    WHERE datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-7 days')
+                      AND datetime(REPLACE(snapshot_time,'T',' ')) < datetime('now', '-30 minutes')
                       AND server_id = ?
                     GROUP BY strftime('%Y-%m-%d %H', snapshot_time)
                 )
@@ -354,8 +354,8 @@ METRIC_CONFIGS = {
                   AND requests.variable_name = 'Innodb_buffer_pool_read_requests'
                   AND reads.server_id = ?
                   AND requests.raw_value > 0
-                  AND datetime(reads.snapshot_time) >= datetime('now', '-24 hours')
-                  AND datetime(reads.snapshot_time) < datetime('now', '-30 minutes')
+                  AND datetime(REPLACE(reads.snapshot_time,'T',' ')) >= datetime('now', '-24 hours')
+                  AND datetime(REPLACE(reads.snapshot_time,'T',' ')) < datetime('now', '-30 minutes')
             )
             SELECT AVG(val) as mean,
                    CASE WHEN COUNT(*) > 1

@@ -96,7 +96,7 @@ def dashboard_overview(request: Request, server: str = None):
     ddl_changes = query_rows("""
         SELECT detected_at, table_schema, table_name, change_type
         FROM ddl_changes
-        WHERE detected_at >= datetime('now', '-24 hours')
+        WHERE datetime(REPLACE(detected_at,'T',' ')) >= datetime('now', '-24 hours')
         ORDER BY detected_at DESC LIMIT 10
     """)
 
@@ -192,13 +192,13 @@ def dashboard_queries(request: Request, range: str = "24h", sort: str = "total_t
         WITH recent AS (
             SELECT digest, AVG(avg_time_sec) as recent_avg
             FROM query_digest_snapshots
-            WHERE snapshot_time >= datetime('now', '-1 hour')
+            WHERE datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-1 hour')
             GROUP BY digest
         ),
         baseline AS (
             SELECT digest, AVG(avg_time_sec) as baseline_avg
             FROM query_digest_snapshots
-            WHERE snapshot_time BETWEEN datetime('now', '-7 days') AND datetime('now', '-1 hour')
+            WHERE datetime(REPLACE(snapshot_time,'T',' ')) BETWEEN datetime('now', '-7 days') AND datetime('now', '-1 hour')
             GROUP BY digest
         )
         SELECT r.digest, r.recent_avg / NULLIF(b.baseline_avg, 0) as factor
@@ -370,7 +370,7 @@ def dashboard_todo(request: Request, server: str = None):
     deadlocks = query_rows("""
         SELECT parsed_json, snapshot_time FROM innodb_status_snapshots
         WHERE section_name = 'LATEST DETECTED DEADLOCK'
-          AND snapshot_time >= datetime('now', '-10 minutes')
+          AND datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-10 minutes')
         ORDER BY snapshot_time DESC LIMIT 1
     """)
     if deadlocks and deadlocks[0].get("parsed_json"):
@@ -455,13 +455,13 @@ def dashboard_todo(request: Request, server: str = None):
                    AVG(avg_time_sec) as recent_avg,
                    SUM(exec_count) as recent_execs
             FROM query_digest_snapshots
-            WHERE snapshot_time >= datetime('now', '-1 hour')
+            WHERE datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-1 hour')
             GROUP BY digest
         ),
         baseline AS (
             SELECT digest, AVG(avg_time_sec) as baseline_avg
             FROM query_digest_snapshots
-            WHERE snapshot_time BETWEEN datetime('now', '-7 days') AND datetime('now', '-1 hour')
+            WHERE datetime(REPLACE(snapshot_time,'T',' ')) BETWEEN datetime('now', '-7 days') AND datetime('now', '-1 hour')
             GROUP BY digest
         )
         SELECT r.digest, SUBSTR(r.digest_text, 1, 150) as digest_text,
@@ -491,7 +491,7 @@ def dashboard_todo(request: Request, server: str = None):
                SUBSTR(d.old_ddl, 1, 300) as old_ddl,
                SUBSTR(d.new_ddl, 1, 300) as new_ddl
         FROM ddl_changes d
-        WHERE d.detected_at >= datetime('now', '-24 hours')
+        WHERE datetime(REPLACE(d.detected_at,'T',' ')) >= datetime('now', '-24 hours')
         ORDER BY d.detected_at DESC LIMIT 10
     """)
     # Check if any regressed queries reference DDL-changed tables
@@ -638,7 +638,7 @@ def dashboard_todo(request: Request, server: str = None):
                AVG(query_time_sec) as avg_time,
                MAX(query_time_sec) as max_time
         FROM slow_query_log
-        WHERE snapshot_time >= datetime('now', '-24 hours')
+        WHERE datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-24 hours')
         GROUP BY SUBSTR(sql_text, 1, 120)
         HAVING COUNT(*) >= 3
         ORDER BY COUNT(*) DESC LIMIT 5
@@ -683,7 +683,7 @@ def dashboard_todo(request: Request, server: str = None):
                AVG(per_second) as avg_qps
         FROM global_status_snapshots
         WHERE variable_name = 'Queries' AND per_second IS NOT NULL
-          AND snapshot_time >= datetime('now', '-7 days')
+          AND datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-7 days')
         GROUP BY strftime('%H', snapshot_time)
         ORDER BY AVG(per_second) DESC LIMIT 1
     """)
@@ -692,7 +692,7 @@ def dashboard_todo(request: Request, server: str = None):
                AVG(per_second) as avg_qps
         FROM global_status_snapshots
         WHERE variable_name = 'Queries' AND per_second IS NOT NULL
-          AND snapshot_time >= datetime('now', '-7 days')
+          AND datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-7 days')
         GROUP BY strftime('%H', snapshot_time)
         ORDER BY AVG(per_second) ASC LIMIT 1
     """)
@@ -797,7 +797,7 @@ def partial_active_alerts(request: Request):
                SUBSTR(old_ddl, 1, 300) as old_ddl,
                SUBSTR(new_ddl, 1, 300) as new_ddl
         FROM ddl_changes
-        WHERE detected_at >= datetime('now', '-24 hours')
+        WHERE datetime(REPLACE(detected_at,'T',' ')) >= datetime('now', '-24 hours')
         ORDER BY detected_at DESC LIMIT 10
     """)
     long_txns = query_rows("""

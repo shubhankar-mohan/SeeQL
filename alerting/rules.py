@@ -31,7 +31,7 @@ def evaluate_lock_cascade(rule_config: dict, server_id: str = "default") -> Aler
         row = conn.execute("""
             SELECT COUNT(*) as cnt, MAX(wait_seconds) as max_wait
             FROM lock_wait_snapshots
-            WHERE snapshot_time >= datetime('now', '-2 minutes')
+            WHERE datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-2 minutes')
               AND server_id = ?
         """, (server_id,)).fetchone()
 
@@ -66,7 +66,7 @@ def evaluate_threads_running_spike(rule_config: dict, server_id: str = "default"
             SELECT AVG(raw_value) as avg_val FROM global_status_snapshots
             WHERE variable_name = 'Threads_running'
               AND server_id = ?
-              AND snapshot_time >= datetime('now', '-24 hours')
+              AND datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-24 hours')
         """, (server_id,)).fetchone()
 
     if not current or not baseline or not baseline["avg_val"]:
@@ -102,14 +102,14 @@ def evaluate_query_regression(rule_config: dict, server_id: str = "default") -> 
             WITH recent AS (
                 SELECT digest, digest_text, AVG(avg_time_sec) as recent_avg
                 FROM query_digest_snapshots
-                WHERE snapshot_time >= datetime('now', '-1 hour')
+                WHERE datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-1 hour')
                   AND server_id = ?
                 GROUP BY digest
             ),
             baseline AS (
                 SELECT digest, AVG(avg_time_sec) as baseline_avg
                 FROM query_digest_snapshots
-                WHERE snapshot_time BETWEEN datetime('now', '-7 days') AND datetime('now', '-1 hour')
+                WHERE datetime(REPLACE(snapshot_time,'T',' ')) BETWEEN datetime('now', '-7 days') AND datetime('now', '-1 hour')
                   AND server_id = ?
                 GROUP BY digest
             )
@@ -148,7 +148,7 @@ def evaluate_ddl_change(rule_config: dict, server_id: str = "default") -> Alert 
         rows = conn.execute("""
             SELECT table_schema, table_name, change_type, detected_at
             FROM ddl_changes
-            WHERE detected_at >= datetime('now', '-35 minutes')
+            WHERE datetime(REPLACE(detected_at,'T',' ')) >= datetime('now', '-35 minutes')
               AND server_id = ?
         """, (server_id,)).fetchall()
 
@@ -201,7 +201,7 @@ def evaluate_deadlock(rule_config: dict, server_id: str = "default") -> Alert | 
             SELECT snapshot_time, parsed_json
             FROM innodb_status_snapshots
             WHERE section_name = 'LATEST DETECTED DEADLOCK'
-              AND snapshot_time >= datetime('now', '-10 minutes')
+              AND datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-10 minutes')
               AND server_id = ?
               AND parsed_json IS NOT NULL
             ORDER BY snapshot_time DESC LIMIT 1
