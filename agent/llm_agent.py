@@ -52,7 +52,7 @@ OPENAI_TOOL_DEFINITIONS = [
 
 
 def run_analysis(analysis_type: str = "routine", trigger_type: str | None = None,
-                  server_id: str | None = None) -> dict | None:
+                  server_id: str | None = None, incident_id: int | None = None) -> dict | None:
     """
     Run a full LLM analysis cycle.
 
@@ -61,6 +61,9 @@ def run_analysis(analysis_type: str = "routine", trigger_type: str | None = None
         trigger_type: For incidents, the alert rule name (e.g. "lock_cascade", "high_cpu").
                       Selects trigger-specific instructions in the incident prompt.
         server_id: Which server to analyze. None = default server.
+        incident_id: When set, the stored analysis is linked back to this
+                      `incident_windows` row (status -> "analyzed") once stored.
+                      Used by the scheduler to close the incident -> analysis loop.
 
     Returns:
         Analysis result dict, or None if skipped.
@@ -130,7 +133,7 @@ def run_analysis(analysis_type: str = "routine", trigger_type: str | None = None
         set_current_server(None)
 
     # Parse and store the result
-    analysis = _parse_and_store(result, analysis_type, state_md, server_id)
+    analysis = _parse_and_store(result, analysis_type, state_md, server_id, incident_id=incident_id)
     return analysis
 
 
@@ -522,8 +525,14 @@ def _is_quiet(report) -> bool:
 
 
 def _parse_and_store(text: str, analysis_type: str, input_summary: str,
-                     server_id: str = "default") -> dict:
-    """Parse agent response and store in agent_analyses table."""
+                     server_id: str = "default", incident_id: int | None = None) -> dict:
+    """Parse agent response and store in agent_analyses table.
+
+    If `incident_id` is given (or the response self-reports one via
+    `### Addresses incident #N`), the newly-stored analysis is linked back to
+    that `incident_windows` row via `alerting.incidents.set_incident_analysis`
+    — best-effort, never raises.
+    """
     # Strip code fences — Gemini sometimes wraps its output in ```markdown blocks
     cleaned = re.sub(r'^```(?:markdown)?\s*\n?', '', text, flags=re.MULTILINE)
     cleaned = re.sub(r'\n?```\s*$', '', cleaned, flags=re.MULTILINE)
@@ -547,6 +556,11 @@ def _parse_and_store(text: str, analysis_type: str, input_summary: str,
         findings = cleaned
         logger.warning("Could not parse sections from agent response, storing full text as findings")
 
+    confidence = _extract_confidence(cleaned)
+    # An explicit incident_id (scheduler-driven) wins over anything the model
+    # self-reports; otherwise fall back to what the model claims to address.
+    addressed_incident = incident_id if incident_id is not None else _extract_addresses_incident(cleaned)
+
     analysis = {
         "analyzed_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
         "server_id": server_id,
@@ -556,17 +570,50 @@ def _parse_and_store(text: str, analysis_type: str, input_summary: str,
         "findings": json.dumps(findings),
         "recommendations": json.dumps(recommendations),
         "applied": 0,
-        "outcome_notes": None,
+        # No dedicated `confidence` column on agent_analyses — stash it in
+        # outcome_notes as JSON rather than a schema migration.
+        "outcome_notes": json.dumps({"confidence": confidence}) if confidence is not None else None,
     }
 
+    analysis_id = None
     try:
-        writer.write_agent_analysis([analysis])
+        analysis_id = writer.write_agent_analysis_one(analysis)
         logger.info(f"Stored {analysis_type} analysis (severity={severity})")
     except Exception as e:
         logger.error(f"Failed to store analysis: {e}")
 
+    analysis["id"] = analysis_id
     analysis["raw_response"] = text
+
+    if addressed_incident is not None and analysis_id is not None:
+        try:
+            from alerting.incidents import set_incident_analysis
+            set_incident_analysis(addressed_incident, analysis_id, status="analyzed")
+        except Exception as e:
+            logger.warning(
+                f"Failed to link analysis {analysis_id} to incident {addressed_incident}: {e}"
+            )
+
     return analysis
+
+
+# Parser contract for the confidence + incident-linkage headers (P1.3 / E(a)):
+#   ### Confidence: 0.82 — strong evidence
+#   ### Addresses incident #7
+_CONFIDENCE_RE = re.compile(r'^#{2,3}\s*Confidence:\s*([01](?:\.\d+)?)', re.IGNORECASE | re.MULTILINE)
+_ADDRESSES_RE = re.compile(r'^#{2,3}\s*Addresses\s+incident\s*#?(\d+)', re.IGNORECASE | re.MULTILINE)
+
+
+def _extract_confidence(text: str) -> float | None:
+    """Parse the `### Confidence: 0.xx` header line, if present."""
+    m = _CONFIDENCE_RE.search(text or "")
+    return float(m.group(1)) if m else None
+
+
+def _extract_addresses_incident(text: str) -> int | None:
+    """Parse the `### Addresses incident #N` header line, if present."""
+    m = _ADDRESSES_RE.search(text or "")
+    return int(m.group(1)) if m else None
 
 
 # Regex to find markdown section headers like "### Findings", "## FINDINGS", "**Findings**"
@@ -634,6 +681,7 @@ def run_llm_analysis(
     server_id: str | None = None,
     tool_budget=None,
     max_tool_rounds_override: int | None = None,
+    incident_id: int | None = None,
 ) -> dict:
     """
     Public wrapper that dispatches any custom prompt to the configured LLM
@@ -647,6 +695,11 @@ def run_llm_analysis(
 
     The webhook investigator passes `tool_budget` (an `alerting.budget.Budget`)
     and a lower `max_tool_rounds_override` so Phase 2 stays bounded.
+
+    incident_id: When set (or when the response self-reports one via
+    `### Addresses incident #N`), the stored analysis is linked back to that
+    `incident_windows` row via `alerting.incidents.set_incident_analysis`
+    (best-effort — never raises).
     """
     config = get_config().get("agent", {})
     backend = _detect_backend(config)
@@ -705,6 +758,8 @@ def run_llm_analysis(
         severity = m.group(1).lower()
 
     findings, recommendations = _split_findings_recommendations(cleaned)
+    confidence = _extract_confidence(cleaned)
+    addressed_incident = incident_id if incident_id is not None else _extract_addresses_incident(cleaned)
 
     try:
         analysis_id = writer.write_agent_analysis_one({
@@ -716,10 +771,19 @@ def run_llm_analysis(
             "findings": json.dumps(findings),
             "recommendations": json.dumps(recommendations),
             "applied": 0,
-            "outcome_notes": None,
+            "outcome_notes": json.dumps({"confidence": confidence}) if confidence is not None else None,
         })
     except Exception as e:
         logger.warning(f"Failed to persist {analysis_type} analysis: {e}")
         analysis_id = None
 
-    return {"text": text, "analysis_id": analysis_id, "severity": severity}
+    if addressed_incident is not None and analysis_id is not None:
+        try:
+            from alerting.incidents import set_incident_analysis
+            set_incident_analysis(addressed_incident, analysis_id, status="analyzed")
+        except Exception as e:
+            logger.warning(
+                f"Failed to link analysis {analysis_id} to incident {addressed_incident}: {e}"
+            )
+
+    return {"text": text, "analysis_id": analysis_id, "severity": severity, "confidence": confidence}

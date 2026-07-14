@@ -53,6 +53,15 @@ def _max_duration_minutes() -> int:
     )
 
 
+def _resolve_quiet_minutes() -> int:
+    """How long an incident's metrics must be quiet before it's auto-resolved."""
+    return int(
+        get_config()
+        .get("alerting", {})
+        .get("incident_resolve_quiet_minutes", 30)
+    )
+
+
 def update_windows(server_id: str) -> list[int]:
     """
     Process ungrouped anomaly events for one server.
@@ -179,6 +188,75 @@ def _attach_or_create(
     )
 
     return incident_id, created
+
+
+# ---------------------------------------------------------------------------
+# Incident -> analysis lifecycle (P1.3 / E(a))
+# ---------------------------------------------------------------------------
+def set_incident_analysis(incident_id: int, analysis_id: int, status: str = "analyzed") -> None:
+    """
+    Link a stored `agent_analyses` row to an `incident_windows` row and move
+    the incident out of "detected".
+
+    Called by `agent.llm_agent._parse_and_store` / `run_llm_analysis` once an
+    LLM analysis that addresses this incident has been persisted, and by the
+    scheduler right after it triggers that analysis.
+    """
+    with get_mon_connection() as conn:
+        conn.execute(
+            "UPDATE incident_windows SET status = ?, analysis_id = ? WHERE id = ?",
+            (status, analysis_id, incident_id),
+        )
+
+
+def resolve_returned_to_baseline(server_id: str) -> list[int]:
+    """
+    Best-effort sweep: mark 'detected'/'analyzed' incident windows as
+    'resolved' once they've been quiet for a while.
+
+    An incident is considered "returned to baseline" when its `end_time` is
+    older than `incident_resolve_quiet_minutes` (default 30) AND no newer
+    `anomaly_events` row has landed for this server since then — a fresh
+    event means the underlying condition is still active, so we leave it
+    open (it will simply get extended by `update_windows` on the next cycle
+    instead).
+
+    Returns the list of incident IDs that were resolved.
+    """
+    quiet_min = _resolve_quiet_minutes()
+    resolved_ids: list[int] = []
+
+    with get_mon_connection() as conn:
+        stale = conn.execute(
+            """
+            SELECT id, end_time
+            FROM incident_windows
+            WHERE server_id = ?
+              AND status IN ('detected', 'analyzed')
+              AND datetime(end_time) < datetime('now', ?)
+            """,
+            (server_id, f"-{quiet_min} minutes"),
+        ).fetchall()
+
+        for row in stale:
+            newer_event = conn.execute(
+                """
+                SELECT 1 FROM anomaly_events
+                WHERE server_id = ? AND datetime(detected_at) > datetime(?)
+                LIMIT 1
+                """,
+                (server_id, row["end_time"]),
+            ).fetchone()
+            if newer_event:
+                continue
+
+            conn.execute(
+                "UPDATE incident_windows SET status = 'resolved' WHERE id = ?",
+                (row["id"],),
+            )
+            resolved_ids.append(row["id"])
+
+    return resolved_ids
 
 
 # ---------------------------------------------------------------------------
