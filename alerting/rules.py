@@ -194,6 +194,30 @@ def evaluate_high_cpu(rule_config: dict, server_id: str = "default") -> Alert | 
     )
 
 
+def evaluate_high_memory(rule_config: dict, server_id: str = "default") -> Alert | None:
+    """Fire if memory utilization exceeds an absolute threshold."""
+    threshold = rule_config.get("threshold", 0.85)
+
+    with get_mon_reader() as conn:
+        row = conn.execute("""
+            SELECT value FROM gcp_metric_snapshots
+            WHERE metric_name = 'memory_utilization'
+              AND server_id = ?
+            ORDER BY snapshot_time DESC LIMIT 1
+        """, (server_id,)).fetchone()
+
+    if not row or row["value"] is None or row["value"] < threshold:
+        return None
+
+    return Alert(
+        rule_name=_ns("high_memory", server_id),
+        severity=Severity(rule_config.get("severity", "warning")),
+        message=(f"[{server_id}] Memory utilization at {row['value']*100:.1f}% "
+                 f"(threshold: {threshold*100:.0f}%)"),
+        context={"server_id": server_id, "memory_utilization": row["value"], "threshold": threshold},
+    )
+
+
 def evaluate_deadlock(rule_config: dict, server_id: str = "default") -> Alert | None:
     """Fire if a deadlock was detected recently on this server."""
     with get_mon_reader() as conn:
@@ -238,6 +262,7 @@ RULE_EVALUATORS = {
     "query_regression": evaluate_query_regression,
     "ddl_change": evaluate_ddl_change,
     "high_cpu": evaluate_high_cpu,
+    "high_memory": evaluate_high_memory,
     "deadlock_detected": evaluate_deadlock,
 }
 
