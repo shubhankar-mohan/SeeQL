@@ -90,6 +90,10 @@ class ExplainCaptureCollector(BaseCollector):
                         "exec_count": q.get("exec_count"),
                     })
 
+        logger.info(
+            f"explain_capture: captured {len(rows)} EXPLAIN plan(s) this cycle "
+            f"(top_n={top_n}, candidates={len(top_queries)})"
+        )
         return {"explain_captures": rows}
 
     def store(self, data: dict) -> None:

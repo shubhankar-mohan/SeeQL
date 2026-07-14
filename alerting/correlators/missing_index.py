@@ -185,7 +185,7 @@ def correlate_missing_index(
                 )
 
                 explain = _fetch_latest_explain(conn, server_id, digest)
-                explain_summary, table_hint = _summarize_explain(explain)
+                explain_summary, table_hint = _explain_for_digest(conn, server_id, digest)
 
                 # If EXPLAIN didn't tell us the table, try to pluck it from the
                 # digest_text as a best-effort (FROM <schema>.<table> or FROM <table>).
@@ -358,6 +358,50 @@ def _summarize_explain(explain: dict | None) -> tuple[str | None, str | None]:
     )
     table_name = table.get("table_name")
     return (summary, table_name if isinstance(table_name, str) else None)
+
+
+def _explain_for_digest(
+    conn, server_id: str, digest: str
+) -> tuple[str | None, str | None]:
+    """Return (summary, table) for `digest`: cached EXPLAIN first, then a
+    guarded best-effort live `run_explain` fallback when nothing is cached.
+
+    P0.9: `explain_captures` only holds the top-N SELECTs from each medium
+    collection cycle, so most suspect digests — especially write-side
+    (UPDATE/DELETE) full scans, the classic lock-cascade trigger this
+    correlator targets — never get a cached row. Rather than silently
+    leaving `explain_summary` null, try one live EXPLAIN before giving up.
+
+    Never raises: on any failure (no prod access, non-SELECT, tool error)
+    this degrades to the pre-existing (None, None) behavior.
+    """
+    explain = _fetch_latest_explain(conn, server_id, digest)
+    summary, table = _summarize_explain(explain)
+    if summary is not None:
+        return summary, table
+    return _run_explain_fallback(server_id, digest)
+
+
+def _run_explain_fallback(server_id: str, digest: str) -> tuple[str | None, str | None]:
+    """Best-effort live EXPLAIN via the agent's run_explain tool.
+
+    Imported lazily so environments without prod MySQL access (CI, demo,
+    most unit tests) never pay the import cost and never crash — any
+    exception here (import error, no route to prod, non-SELECT digest,
+    tool-level {"error": ...} payload) yields (None, None), same as a
+    cache miss with no fallback.
+    """
+    try:
+        from agent.tools import _tool_run_explain, set_current_server
+
+        set_current_server(server_id)
+        result = _tool_run_explain({"digest": digest})
+        if not isinstance(result, dict) or result.get("error") or not result.get("explain"):
+            return (None, None)
+        return _summarize_explain({"explain_json": json.dumps(result["explain"])})
+    except Exception as e:
+        logger.debug(f"run_explain fallback failed for digest {digest[:16]}: {e}")
+        return (None, None)
 
 
 def _find_first(tree: Any, key: str) -> Any:
