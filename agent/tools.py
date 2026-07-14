@@ -769,6 +769,20 @@ def _tool_explain_query(input_data: dict) -> dict:
     if ";" in query.rstrip(";"):
         return {"error": "Multiple statements not allowed"}
 
+    # Safety: digest_text is a normalized fingerprint with `?` and `…` markers
+    # and may be truncated — it is NOT runnable SQL. Never send it to prod.
+    if "?" in query:
+        return {"error": "Query contains `?` placeholders — this looks like a "
+                         "digest_text, which is not runnable. Use run_explain(digest) "
+                         "or search_slow_log for a real statement."}
+    if "…" in query or query.rstrip().endswith("...") or "..." in query:
+        return {"error": "Query contains an ellipsis (truncated) — not runnable. "
+                         "Use run_explain(digest) or search_slow_log."}
+    if query.count("(") != query.count(")"):
+        return {"error": "Query has unbalanced parentheses — likely truncated. "
+                         "Use run_explain(digest) or search_slow_log."}
+    logger.debug("explain_query accepted: %s", query[:200])
+
     try:
         with get_prod_connection(_current_server_id.get()) as conn:
             cursor = conn.cursor(dictionary=True)
