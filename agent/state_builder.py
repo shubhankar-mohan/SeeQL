@@ -190,7 +190,8 @@ def _build_historical(conn, regressions: list, server_id: str) -> dict:
     hist = {}
     sid = server_id
 
-    # Baseline Threads_running (same hour, 7 days ago)
+    # Baseline Threads_running (28-day same-hour-same-DOW window, matching
+    # the anomaly engine, with incident windows excluded)
     row = conn.execute(Q.BASELINE_THREADS_RUNNING, (sid,)).fetchone()
     hist["baseline_threads_running"] = row["avg_value"] if row and row["avg_value"] else None
 
