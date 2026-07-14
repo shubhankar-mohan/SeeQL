@@ -5,9 +5,10 @@ Groups rows in `anomaly_events` into `incident_windows` using gap-based
 clustering with a max-duration cap:
 
 1. Query ungrouped events (incident_id IS NULL) for a server, ordered by time.
-2. For each event, find the most recent OPEN incident for this server whose
-   `end_time` is within `incident_gap_minutes` of the event AND whose total
-   duration is under `incident_max_duration_minutes`.
+2. For each event, find the most recent OPEN incident for this server (status
+   'detected' or 'analyzed' — i.e. not yet 'resolved') whose `end_time` is
+   within `incident_gap_minutes` of the event AND whose total duration is
+   under `incident_max_duration_minutes`.
 3. If found, extend that incident (push end_time, merge metric, bump count,
    upgrade severity). Otherwise create a new one.
 4. Set `incident_id` on the event.
@@ -113,6 +114,13 @@ def _attach_or_create(
     """
     # Find the most recent open incident that:
     #   - belongs to this server
+    #   - is still "open" — status 'detected' (not yet analyzed) OR 'analyzed'
+    #     (an LLM analysis already fired for it, e.g. via the scheduler's
+    #     same-cycle _trigger_incident_analyses, but the underlying condition
+    #     hasn't gone quiet long enough for resolve_returned_to_baseline to
+    #     mark it 'resolved'). Excluding 'analyzed' here would fragment a
+    #     single ongoing incident into a new row every cycle it gets
+    #     synchronously analyzed — see E1.
     #   - has end_time within gap_min of our event's detected_at (the event is
     #     not too far after the last event in the incident)
     #   - total span start→end is under the max duration cap
@@ -121,7 +129,7 @@ def _attach_or_create(
         SELECT id, start_time, end_time, severity, involved_metrics, event_count
         FROM incident_windows
         WHERE server_id = ?
-          AND status = 'detected'
+          AND status IN ('detected', 'analyzed')
           AND datetime(end_time) >= datetime(?, ?)
           AND (julianday(?) - julianday(start_time)) * 1440.0 < ?
         ORDER BY end_time DESC
