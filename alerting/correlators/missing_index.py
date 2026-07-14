@@ -50,7 +50,8 @@ class MissingIndexEvidence:
     dropped_index_hint: str | None = None  # name of an index that was dropped recently
     unused_indexes: list[dict] = field(default_factory=list)
     redundant_indexes: list[dict] = field(default_factory=list)
-    recommended_index: str | None = None   # best-guess CREATE INDEX DDL, if inferrable
+    recommended_index: str | None = None   # best-guess CREATE/ADD INDEX DDL, if inferrable — NEVER a DROP
+    cleanup_ddl: list[str] = field(default_factory=list)  # redundant-index DROPs — separate from the fix
     confidence: float = 0.0                # 0.0-1.0 heuristic
 
 
@@ -117,6 +118,10 @@ class MissingIndexCorrelation:
                 lines.append(f"    - Redundant indexes on table: {names}")
             if e.recommended_index:
                 lines.append(f"    - Suggested: `{e.recommended_index}`")
+            if e.cleanup_ddl:
+                lines.append("    - Index cleanup (separate from the fix):")
+                for ddl in e.cleanup_ddl:
+                    lines.append(f"        - `{ddl}`")
         return "\n".join(lines)
 
     def to_dict(self) -> dict:
@@ -231,6 +236,11 @@ def correlate_missing_index(
                         unused_indexes=unused_rows,
                         redundant_indexes=redundant_rows,
                         recommended_index=recommended,
+                        cleanup_ddl=[
+                            r["sql_drop_index"].strip().rstrip(";")
+                            for r in redundant_rows
+                            if r.get("sql_drop_index")
+                        ],
                         confidence=confidence,
                     )
                 )
@@ -483,6 +493,10 @@ def _fetch_redundant_indexes(
     return [dict(r) for r in rows]
 
 
+_PREDICATE_RE = re.compile(r"`?(\w+)`?\s*(?:=|>|<|>=|<=|IN|LIKE|BETWEEN)", re.IGNORECASE)
+_STOPWORDS = {"and", "or", "on", "where", "select", "from", "limit", "group", "order", "by"}
+
+
 def _recommend_index(
     schema_name: str | None,
     table_name: str | None,
@@ -490,19 +504,32 @@ def _recommend_index(
     unused_rows: list[dict],
     redundant_rows: list[dict],
 ) -> str | None:
+    """Best-effort ADD INDEX from the query's WHERE/JOIN predicate columns.
+
+    Never returns a DROP — a missing-index/scan finding is not fixed by dropping
+    an index. Redundant-index DROPs are surfaced separately as cleanup_ddl. When
+    we can't infer predicate columns, return None and let the LLM layer (which
+    calls get_table_schema + get_index_stats) produce the CREATE INDEX.
     """
-    Absurdly conservative recommendation — we don't have column access
-    patterns to infer the right index. So we only suggest when a previously
-    dropped index is a clear candidate (see correlate logic) or when there's
-    a redundant index to drop. The LLM layer does the real CREATE INDEX
-    recommendation after calling get_table_schema + get_index_stats.
-    """
-    # Drop candidate from redundant indexes (mechanical recommendation)
-    for r in redundant_rows:
-        drop = r.get("sql_drop_index")
-        if drop and str(drop).strip().upper().startswith("ALTER TABLE"):
-            return drop.strip().rstrip(";")
-    return None
+    if not table_name:
+        return None
+    text = (digest_row.get("digest_text") or "")
+    # Only look at the WHERE/ON portion to avoid SELECT-list columns.
+    lowered = text.lower()
+    where_pos = lowered.find(" where ")
+    scope = text[where_pos:] if where_pos != -1 else text
+    cols: list[str] = []
+    for m in _PREDICATE_RE.finditer(scope):
+        c = m.group(1)
+        if c.lower() not in _STOPWORDS and c not in cols:
+            cols.append(c)
+    if not cols:
+        return None
+    cols = cols[:3]  # composite index, keep it short
+    col_list = ", ".join(f"`{c}`" for c in cols)
+    idx_name = "idx_" + "_".join(cols)[:56]
+    schema_prefix = f"`{schema_name}`." if schema_name else ""
+    return f"ALTER TABLE {schema_prefix}`{table_name}` ADD INDEX `{idx_name}` ({col_list})"
 
 
 def _confidence_score(

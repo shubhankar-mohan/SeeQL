@@ -223,7 +223,15 @@ class TestCorrelator:
         # Dropped-index evidence bumps confidence high.
         assert e.confidence >= 0.9
 
-    def test_redundant_index_becomes_recommendation(self, mon_db_ctx):
+    def test_redundant_index_dropped_ddl_goes_to_cleanup_not_recommendation(self, mon_db_ctx):
+        # Regression test for a P0.5 bug: the correlator used to hand back a
+        # DROP INDEX DDL as `recommended_index` for a missing-index/scan
+        # finding — i.e. it recommended the OPPOSITE of the fix. A redundant
+        # index's DROP is legitimate cleanup, but it must never be presented
+        # as the remediation for a high-scan-ratio digest. `recommended_index`
+        # should instead be a best-effort ADD INDEX derived from the query's
+        # predicates (here, `foo`), and the DROP DDL must land in
+        # `cleanup_ddl` only.
         conn, _ = mon_db_ctx
         _seed_digest(conn, "0xZ", "srv1", "members", ratio_multiplier=500)
         _seed_explain(conn, "0xZ", "srv1", "members")
@@ -244,9 +252,14 @@ class TestCorrelator:
 
         c = correlate_missing_index("srv1", _hours_ago(1), _now_iso())
         e = c.top_evidence
+        # recommended_index must never be a DROP.
         assert e.recommended_index is not None
         assert e.recommended_index.startswith("ALTER TABLE")
-        assert "DROP INDEX" in e.recommended_index
+        assert "DROP INDEX" not in e.recommended_index
+        assert "ADD INDEX" in e.recommended_index
+        assert "foo" in e.recommended_index
+        # The DROP DDL is surfaced separately as cleanup, not as the fix.
+        assert e.cleanup_ddl == ["ALTER TABLE `testdb`.`members` DROP INDEX `idx_dup`"]
 
     def test_unused_index_surfaced_to_avoid_duplicate_recommendation(self, mon_db_ctx):
         conn, _ = mon_db_ctx
