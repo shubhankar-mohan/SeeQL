@@ -3,7 +3,10 @@ Missing-index correlator.
 
 Joins SQLite-stored signals to produce structured "this digest is probably
 missing an index, here's why" evidence. Zero cost on the production MySQL
-server — pure reads from the monitoring DB.
+server by default — pure reads from the monitoring DB. A guarded live-EXPLAIN
+fallback exists for callers that explicitly opt in via
+`allow_live_explain=True`; it is off by default so the zero-cost invariant
+holds unless a caller deliberately asks to spend a MySQL round-trip.
 
 Signals consumed:
 
@@ -146,6 +149,7 @@ def correlate_missing_index(
     suspect_digests: Iterable[str] | None = None,
     top_n: int = 5,
     ratio_threshold: float = DEFAULT_RATIO_THRESHOLD,
+    allow_live_explain: bool = False,
 ) -> MissingIndexCorrelation:
     """
     Main entry. Returns structured evidence for digests with suspiciously
@@ -154,6 +158,15 @@ def correlate_missing_index(
     If `suspect_digests` is provided, only those digests are considered.
     Otherwise the correlator picks the top-N digests by ratio during the
     window.
+
+    `allow_live_explain` (default False): when a digest has no cached
+    `explain_captures` row, opt into a best-effort *live* `run_explain`
+    fallback against production MySQL (up to one call per suspect digest,
+    so up to `top_n` live EXPLAINs). Leave this False for any caller that
+    must stay zero-cost / pre-budget (e.g. investigator Phase 1 triage,
+    MCP tools not backed by a live-call budget). Only pass True from a
+    caller that has already accounted for the MySQL cost (e.g. a
+    budgeted live-tool phase).
     """
     suspects = list(suspect_digests) if suspect_digests else []
     evidence: list[MissingIndexEvidence] = []
@@ -185,7 +198,9 @@ def correlate_missing_index(
                 )
 
                 explain = _fetch_latest_explain(conn, server_id, digest)
-                explain_summary, table_hint = _explain_for_digest(conn, server_id, digest)
+                explain_summary, table_hint = _explain_for_digest(
+                    conn, server_id, digest, allow_live_explain=allow_live_explain
+                )
 
                 # If EXPLAIN didn't tell us the table, try to pluck it from the
                 # digest_text as a best-effort (FROM <schema>.<table> or FROM <table>).
@@ -361,16 +376,23 @@ def _summarize_explain(explain: dict | None) -> tuple[str | None, str | None]:
 
 
 def _explain_for_digest(
-    conn, server_id: str, digest: str
+    conn, server_id: str, digest: str, allow_live_explain: bool = False
 ) -> tuple[str | None, str | None]:
-    """Return (summary, table) for `digest`: cached EXPLAIN first, then a
-    guarded best-effort live `run_explain` fallback when nothing is cached.
+    """Return (summary, table) for `digest`: cached EXPLAIN first, then —
+    only when `allow_live_explain` is True — a guarded best-effort live
+    `run_explain` fallback when nothing is cached.
 
     P0.9: `explain_captures` only holds the top-N SELECTs from each medium
     collection cycle, so most suspect digests — especially write-side
     (UPDATE/DELETE) full scans, the classic lock-cascade trigger this
-    correlator targets — never get a cached row. Rather than silently
-    leaving `explain_summary` null, try one live EXPLAIN before giving up.
+    correlator targets — never get a cached row. For callers that have
+    opted in (and thus accepted the MySQL cost), try one live EXPLAIN
+    before giving up instead of silently leaving `explain_summary` null.
+
+    Default (`allow_live_explain=False`): a cache miss yields (None, None)
+    with no live call and no `set_current_server` side effect, preserving
+    the zero-cost / pre-budget invariant relied on by Phase 1 triage and
+    the MCP correlator tool.
 
     Never raises: on any failure (no prod access, non-SELECT, tool error)
     this degrades to the pre-existing (None, None) behavior.
@@ -379,6 +401,8 @@ def _explain_for_digest(
     summary, table = _summarize_explain(explain)
     if summary is not None:
         return summary, table
+    if not allow_live_explain:
+        return (None, None)
     return _run_explain_fallback(server_id, digest)
 
 

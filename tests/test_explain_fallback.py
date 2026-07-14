@@ -1,12 +1,15 @@
 """
 Tests for the missing-index correlator's guarded run_explain fallback (P0.9).
 
-When a suspect digest has no cached `explain_captures` row, the correlator
-makes a best-effort attempt to obtain a live plan via
-`agent.tools._tool_run_explain`. On success it populates `explain_summary`
-(via the existing `_summarize_explain`); on ANY failure — including no prod
-access, which is the normal case in CI — it degrades to (None, None) and
-never raises.
+When a suspect digest has no cached `explain_captures` row AND the caller
+has opted in via `allow_live_explain=True`, the correlator makes a
+best-effort attempt to obtain a live plan via `agent.tools._tool_run_explain`.
+On success it populates `explain_summary` (via the existing
+`_summarize_explain`); on ANY failure — including no prod access, which is
+the normal case in CI — it degrades to (None, None) and never raises.
+
+`allow_live_explain` defaults to False, so a cache miss with the default
+arguments must NOT attempt the fallback at all (zero MySQL cost).
 """
 
 from alerting.correlators import missing_index as mi
@@ -28,7 +31,7 @@ def test_explain_for_digest_uses_cache_when_present(monkeypatch):
 
 
 def test_explain_for_digest_falls_back_to_run_explain(monkeypatch):
-    """No cached capture, but the guarded run_explain fallback returns a live plan."""
+    """No cached capture, opted in via allow_live_explain=True: fallback returns a live plan."""
     monkeypatch.setattr(mi, "_fetch_latest_explain", lambda *a, **k: None)
     monkeypatch.setattr(
         mi,
@@ -36,9 +39,30 @@ def test_explain_for_digest_falls_back_to_run_explain(monkeypatch):
         lambda server_id, digest: ("type=ALL, key=NULL, rows=999", "pirates"),
     )
 
-    summary, table = mi._explain_for_digest(conn=None, server_id="s", digest="7107e33a")
+    summary, table = mi._explain_for_digest(
+        conn=None, server_id="s", digest="7107e33a", allow_live_explain=True
+    )
     assert summary is not None and "ALL" in summary
     assert table == "pirates"
+
+
+def test_explain_for_digest_default_does_not_call_fallback(monkeypatch):
+    """Default (allow_live_explain omitted / False): cache miss must NOT call the
+    fallback at all — no live MySQL call, preserving the zero-cost invariant."""
+    monkeypatch.setattr(mi, "_fetch_latest_explain", lambda *a, **k: None)
+
+    called = {"flag": False}
+
+    def _sentinel(server_id, digest):
+        called["flag"] = True
+        return ("type=ALL, key=NULL, rows=999", "pirates")
+
+    monkeypatch.setattr(mi, "_run_explain_fallback", _sentinel)
+
+    summary, table = mi._explain_for_digest(conn=None, server_id="s", digest="7107e33a")
+
+    assert called["flag"] is False
+    assert (summary, table) == (None, None)
 
 
 def test_run_explain_fallback_calls_tool_and_summarizes(monkeypatch):
