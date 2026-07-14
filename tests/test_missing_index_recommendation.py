@@ -22,3 +22,31 @@ def test_predicate_derived_create_index():
     if rec is not None:
         assert "phone" in rec.lower()
         assert "drop" not in rec.lower()
+
+
+def test_join_without_where_does_not_yield_garbage_join_column():
+    # No WHERE clause at all -- the only predicate is the JOIN ... ON
+    # condition. The old `_PREDICATE_RE` matched "IN" inside the keyword
+    # "JOIN" itself (backtracking \w+ down to "JO"), and the old scope
+    # narrowing only recognized " where ", so it fell back to scanning the
+    # entire digest text -- including the SELECT-list projection column
+    # `a`.`user_id`.
+    rec = mi._recommend_index(
+        "db", "a",
+        {
+            "digest_text": (
+                "SELECT `a`.`user_id` FROM `a` JOIN `b` "
+                "ON `a`.`phone` = `b`.`phone`"
+            )
+        },
+        [], [],
+    )
+    assert rec is not None
+    lowered = rec.lower()
+    assert "phone" in lowered
+    # No bogus column pulled out of the keyword "JOIN" itself.
+    assert "`jo`" not in lowered
+    assert "`join`" not in lowered
+    # No SELECT-list projection column leaked in as a predicate.
+    assert "user_id" not in lowered
+    assert "drop" not in lowered

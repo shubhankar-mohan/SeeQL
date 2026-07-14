@@ -493,7 +493,9 @@ def _fetch_redundant_indexes(
     return [dict(r) for r in rows]
 
 
-_PREDICATE_RE = re.compile(r"`?(\w+)`?\s*(?:=|>|<|>=|<=|IN|LIKE|BETWEEN)", re.IGNORECASE)
+_PREDICATE_RE = re.compile(
+    r"`?(\w+)`?\s*(?:=|>=|<=|<|>|\bIN\b|\bLIKE\b|\bBETWEEN\b)", re.IGNORECASE
+)
 _STOPWORDS = {"and", "or", "on", "where", "select", "from", "limit", "group", "order", "by"}
 
 
@@ -514,10 +516,23 @@ def _recommend_index(
     if not table_name:
         return None
     text = (digest_row.get("digest_text") or "")
-    # Only look at the WHERE/ON portion to avoid SELECT-list columns.
+    # Scope to the WHERE clause and/or JOIN ... ON conditions — starting at
+    # whichever of " where "/" join "/" on " appears first in the digest text
+    # — so SELECT-list projection columns are never mistaken for predicates.
+    # JOIN-without-WHERE (an equi-join with no filter) is a common full-scan
+    # pattern this correlator targets, so JOIN/ON must be scoped in, not just
+    # WHERE. Falls back to the full text when none of those keywords appear.
     lowered = text.lower()
-    where_pos = lowered.find(" where ")
-    scope = text[where_pos:] if where_pos != -1 else text
+    marker_positions = [
+        pos
+        for pos in (
+            lowered.find(" where "),
+            lowered.find(" join "),
+            lowered.find(" on "),
+        )
+        if pos != -1
+    ]
+    scope = text[min(marker_positions):] if marker_positions else text
     cols: list[str] = []
     for m in _PREDICATE_RE.finditer(scope):
         c = m.group(1)
