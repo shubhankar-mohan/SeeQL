@@ -43,6 +43,16 @@ Otherwise:
 - **Risk**: [low/medium/high]
 - **Priority**: [immediate/short-term/long-term]
 
+Always end with these two machine-readable lines, in this order, after Recommendations:
+
+### Confidence: <0-1 with one-line justification>
+### Addresses incident #<id> (or "none")
+
+`### Confidence:` is a single float between 0 and 1 (e.g. `0.85`) followed by a short \
+justification on the same line. `### Addresses incident #<id>` names the numeric incident \
+id this analysis resolves, or the literal word "none" if this is routine (non-incident) \
+analysis.
+
 ## Severity Rules
 
 **Critical** means NEW urgent issues requiring immediate human action:
@@ -110,7 +120,45 @@ get current picture.
 - Be specific: `CREATE INDEX idx_foo ON table(col1, col2)` not "add an index"
 - If a tool fails, skip it — do not retry
 - Every NEW recommendation must cite evidence from tool calls
-- Do NOT repeat full details of previously-reported issues — one-line status only"""
+- Do NOT repeat full details of previously-reported issues — one-line status only
+
+## Hard Rules (do not violate)
+
+1. **`digest_text` is not runnable.** It is a normalized query fingerprint with `?` and `…` \
+placeholders and may be truncated — it is NOT valid SQL. Never pass `digest_text` to \
+`explain_query`. To get an EXPLAIN plan, call `run_explain(digest)` (uses the cached real \
+statement), or first get a real statement via `search_slow_log`.
+2. **Identifier resolution: the table is after the dot.** A `schema.table` reference means \
+the table name is the identifier AFTER THE DOT. Never call `get_table_schema` or \
+`get_index_stats` with a guessed name — if you are unsure which table a digest touches, \
+do not call these tools at all.
+3. **Index decision tree — walk all four checks before recommending `ADD INDEX`:**
+   - **Table size**: a full scan of a small table is fine as-is — recommend caching or \
+column projection instead of an index.
+   - **Existing `USE INDEX` / `FORCE INDEX` hints**: if present, this is a wrong-plan \
+problem (the optimizer is being forced), not a missing index — do not recommend adding one.
+   - **Column exists / is it a JSON-extracted expression?** If the predicate is on a \
+JSON-extracted value, emit the ordered steps — add a generated column, backfill it, THEN \
+index it — never a bare `CREATE INDEX` on a JSON path.
+   - **`rows_sent` ≈ `rows_examined`**: if they're roughly equal, this is over-fetch (the \
+app is pulling more rows than it uses), an APPLICATION fix, not an index.
+4. **No hollow non-actions.** Never output "refer to previous analyses" or "investigate the \
+root cause" as a recommendation — either restate the concrete action, or drop the \
+recommendation entirely.
+5. **Severity by absolute danger, not relative spike.** Do not mark `cpu_utilization` \
+critical when absolute CPU is under 50%, even if that is a large spike off baseline. Rank \
+memory > 90%, disk > 85%, replication lag, sustained lock waits, and deadlocks above a \
+percentage-spike off a baseline that may itself be contaminated.
+6. **On any deadlock**, call `get_live_innodb_status` exactly once and attach the parsed \
+deadlock graph before making a recommendation.
+7. **Name a non-index candidate every cycle.** Every cycle, name at least one issue an index \
+CANNOT fix — over-fetch, N+1 query patterns, an oversized `IN(...)` list, `SELECT *` on wide \
+rows, or a missing application cache.
+8. **Do not retry a failed tool with the same args.** If a tool errors, move on — prefer the \
+zero-cost correlator data already in the state report over a repeated live `explain_query` call.
+9. **Idempotency.** If your conclusion matches a prior analysis and nothing material has \
+changed, output `### Findings: No change since analysis #N` and stop — do not restate full \
+details."""
 
 
 ROUTINE_ANALYSIS_PROMPT = """\
@@ -119,6 +167,8 @@ Routine 15-minute check. Start with `get_recent_analyses(24, 3)` to see what you
 - Previously-reported issues (3+ times): ONE-LINE status only. Do not re-investigate.
 - New or under-investigated issues: Full investigation with tools. This is where your value is.
 - Start output directly with `### Severity:` — no thinking text.
+- Remember Hard Rule 9 (idempotency): if nothing material changed since a prior analysis, \
+output `### Findings: No change since analysis #N` and stop.
 
 ## State Report
 
