@@ -157,8 +157,42 @@ def _run_anomaly_pipeline(server_id: str):
                 f"Detected {len(new_incident_ids)} new incident(s) on {server_id}: "
                 f"{new_incident_ids}"
             )
+            _trigger_incident_analyses(server_id, new_incident_ids)
     except Exception as e:
         logger.warning(f"Incident windowing failed for {server_id}: {e}")
+
+    try:
+        from alerting.incidents import resolve_returned_to_baseline
+        resolved = resolve_returned_to_baseline(server_id)
+        if resolved:
+            logger.info(f"Resolved {len(resolved)} incident(s) on {server_id}: {resolved}")
+    except Exception as e:
+        logger.debug(f"Incident baseline-resolution sweep failed for {server_id}: {e}")
+
+
+def _trigger_incident_analyses(server_id: str, incident_ids: list[int]):
+    """Fire an LLM "incident" analysis for each newly-created incident window.
+
+    The resulting analysis is linked back to its incident_windows row
+    (status -> "analyzed") inside `agent.llm_agent._parse_and_store`, since
+    `incident_id` is threaded all the way through.
+
+    Guarded on `agent.enabled` so a disabled agent / missing LLM key is a
+    silent no-op, and each call is individually wrapped in try/except so one
+    incident's analysis failure (e.g. no LLM backend configured) never breaks
+    the anomaly pipeline running inside the medium loop.
+    """
+    if not get_config().get("agent", {}).get("enabled", False):
+        return
+
+    for incident_id in incident_ids:
+        try:
+            from agent.llm_agent import run_analysis
+            run_analysis("incident", server_id=server_id, incident_id=incident_id)
+        except Exception as e:
+            logger.warning(
+                f"Incident analysis failed for incident {incident_id} on {server_id}: {e}"
+            )
 
 
 def _run_slow():

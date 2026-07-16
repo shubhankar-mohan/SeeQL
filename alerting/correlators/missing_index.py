@@ -3,7 +3,10 @@ Missing-index correlator.
 
 Joins SQLite-stored signals to produce structured "this digest is probably
 missing an index, here's why" evidence. Zero cost on the production MySQL
-server — pure reads from the monitoring DB.
+server by default — pure reads from the monitoring DB. A guarded live-EXPLAIN
+fallback exists for callers that explicitly opt in via
+`allow_live_explain=True`; it is off by default so the zero-cost invariant
+holds unless a caller deliberately asks to spend a MySQL round-trip.
 
 Signals consumed:
 
@@ -50,7 +53,8 @@ class MissingIndexEvidence:
     dropped_index_hint: str | None = None  # name of an index that was dropped recently
     unused_indexes: list[dict] = field(default_factory=list)
     redundant_indexes: list[dict] = field(default_factory=list)
-    recommended_index: str | None = None   # best-guess CREATE INDEX DDL, if inferrable
+    recommended_index: str | None = None   # best-guess CREATE/ADD INDEX DDL, if inferrable — NEVER a DROP
+    cleanup_ddl: list[str] = field(default_factory=list)  # redundant-index DROPs — separate from the fix
     confidence: float = 0.0                # 0.0-1.0 heuristic
 
 
@@ -117,6 +121,10 @@ class MissingIndexCorrelation:
                 lines.append(f"    - Redundant indexes on table: {names}")
             if e.recommended_index:
                 lines.append(f"    - Suggested: `{e.recommended_index}`")
+            if e.cleanup_ddl:
+                lines.append("    - Index cleanup (separate from the fix):")
+                for ddl in e.cleanup_ddl:
+                    lines.append(f"        - `{ddl}`")
         return "\n".join(lines)
 
     def to_dict(self) -> dict:
@@ -141,6 +149,7 @@ def correlate_missing_index(
     suspect_digests: Iterable[str] | None = None,
     top_n: int = 5,
     ratio_threshold: float = DEFAULT_RATIO_THRESHOLD,
+    allow_live_explain: bool = False,
 ) -> MissingIndexCorrelation:
     """
     Main entry. Returns structured evidence for digests with suspiciously
@@ -149,6 +158,15 @@ def correlate_missing_index(
     If `suspect_digests` is provided, only those digests are considered.
     Otherwise the correlator picks the top-N digests by ratio during the
     window.
+
+    `allow_live_explain` (default False): when a digest has no cached
+    `explain_captures` row, opt into a best-effort *live* `run_explain`
+    fallback against production MySQL (up to one call per suspect digest,
+    so up to `top_n` live EXPLAINs). Leave this False for any caller that
+    must stay zero-cost / pre-budget (e.g. investigator Phase 1 triage,
+    MCP tools not backed by a live-call budget). Only pass True from a
+    caller that has already accounted for the MySQL cost (e.g. a
+    budgeted live-tool phase).
     """
     suspects = list(suspect_digests) if suspect_digests else []
     evidence: list[MissingIndexEvidence] = []
@@ -180,7 +198,9 @@ def correlate_missing_index(
                 )
 
                 explain = _fetch_latest_explain(conn, server_id, digest)
-                explain_summary, table_hint = _summarize_explain(explain)
+                explain_summary, table_hint = _explain_for_digest(
+                    conn, server_id, digest, allow_live_explain=allow_live_explain
+                )
 
                 # If EXPLAIN didn't tell us the table, try to pluck it from the
                 # digest_text as a best-effort (FROM <schema>.<table> or FROM <table>).
@@ -231,6 +251,11 @@ def correlate_missing_index(
                         unused_indexes=unused_rows,
                         redundant_indexes=redundant_rows,
                         recommended_index=recommended,
+                        cleanup_ddl=[
+                            r["sql_drop_index"].strip().rstrip(";")
+                            for r in redundant_rows
+                            if r.get("sql_drop_index")
+                        ],
                         confidence=confidence,
                     )
                 )
@@ -348,6 +373,59 @@ def _summarize_explain(explain: dict | None) -> tuple[str | None, str | None]:
     )
     table_name = table.get("table_name")
     return (summary, table_name if isinstance(table_name, str) else None)
+
+
+def _explain_for_digest(
+    conn, server_id: str, digest: str, allow_live_explain: bool = False
+) -> tuple[str | None, str | None]:
+    """Return (summary, table) for `digest`: cached EXPLAIN first, then —
+    only when `allow_live_explain` is True — a guarded best-effort live
+    `run_explain` fallback when nothing is cached.
+
+    P0.9: `explain_captures` only holds the top-N SELECTs from each medium
+    collection cycle, so most suspect digests — especially write-side
+    (UPDATE/DELETE) full scans, the classic lock-cascade trigger this
+    correlator targets — never get a cached row. For callers that have
+    opted in (and thus accepted the MySQL cost), try one live EXPLAIN
+    before giving up instead of silently leaving `explain_summary` null.
+
+    Default (`allow_live_explain=False`): a cache miss yields (None, None)
+    with no live call and no `set_current_server` side effect, preserving
+    the zero-cost / pre-budget invariant relied on by Phase 1 triage and
+    the MCP correlator tool.
+
+    Never raises: on any failure (no prod access, non-SELECT, tool error)
+    this degrades to the pre-existing (None, None) behavior.
+    """
+    explain = _fetch_latest_explain(conn, server_id, digest)
+    summary, table = _summarize_explain(explain)
+    if summary is not None:
+        return summary, table
+    if not allow_live_explain:
+        return (None, None)
+    return _run_explain_fallback(server_id, digest)
+
+
+def _run_explain_fallback(server_id: str, digest: str) -> tuple[str | None, str | None]:
+    """Best-effort live EXPLAIN via the agent's run_explain tool.
+
+    Imported lazily so environments without prod MySQL access (CI, demo,
+    most unit tests) never pay the import cost and never crash — any
+    exception here (import error, no route to prod, non-SELECT digest,
+    tool-level {"error": ...} payload) yields (None, None), same as a
+    cache miss with no fallback.
+    """
+    try:
+        from agent.tools import _tool_run_explain, set_current_server
+
+        set_current_server(server_id)
+        result = _tool_run_explain({"digest": digest})
+        if not isinstance(result, dict) or result.get("error") or not result.get("explain"):
+            return (None, None)
+        return _summarize_explain({"explain_json": json.dumps(result["explain"])})
+    except Exception as e:
+        logger.debug(f"run_explain fallback failed for digest {digest[:16]}: {e}")
+        return (None, None)
 
 
 def _find_first(tree: Any, key: str) -> Any:
@@ -483,6 +561,12 @@ def _fetch_redundant_indexes(
     return [dict(r) for r in rows]
 
 
+_PREDICATE_RE = re.compile(
+    r"`?(\w+)`?\s*(?:=|>=|<=|<|>|\bIN\b|\bLIKE\b|\bBETWEEN\b)", re.IGNORECASE
+)
+_STOPWORDS = {"and", "or", "on", "where", "select", "from", "limit", "group", "order", "by"}
+
+
 def _recommend_index(
     schema_name: str | None,
     table_name: str | None,
@@ -490,19 +574,45 @@ def _recommend_index(
     unused_rows: list[dict],
     redundant_rows: list[dict],
 ) -> str | None:
+    """Best-effort ADD INDEX from the query's WHERE/JOIN predicate columns.
+
+    Never returns a DROP — a missing-index/scan finding is not fixed by dropping
+    an index. Redundant-index DROPs are surfaced separately as cleanup_ddl. When
+    we can't infer predicate columns, return None and let the LLM layer (which
+    calls get_table_schema + get_index_stats) produce the CREATE INDEX.
     """
-    Absurdly conservative recommendation — we don't have column access
-    patterns to infer the right index. So we only suggest when a previously
-    dropped index is a clear candidate (see correlate logic) or when there's
-    a redundant index to drop. The LLM layer does the real CREATE INDEX
-    recommendation after calling get_table_schema + get_index_stats.
-    """
-    # Drop candidate from redundant indexes (mechanical recommendation)
-    for r in redundant_rows:
-        drop = r.get("sql_drop_index")
-        if drop and str(drop).strip().upper().startswith("ALTER TABLE"):
-            return drop.strip().rstrip(";")
-    return None
+    if not table_name:
+        return None
+    text = (digest_row.get("digest_text") or "")
+    # Scope to the WHERE clause and/or JOIN ... ON conditions — starting at
+    # whichever of " where "/" join "/" on " appears first in the digest text
+    # — so SELECT-list projection columns are never mistaken for predicates.
+    # JOIN-without-WHERE (an equi-join with no filter) is a common full-scan
+    # pattern this correlator targets, so JOIN/ON must be scoped in, not just
+    # WHERE. Falls back to the full text when none of those keywords appear.
+    lowered = text.lower()
+    marker_positions = [
+        pos
+        for pos in (
+            lowered.find(" where "),
+            lowered.find(" join "),
+            lowered.find(" on "),
+        )
+        if pos != -1
+    ]
+    scope = text[min(marker_positions):] if marker_positions else text
+    cols: list[str] = []
+    for m in _PREDICATE_RE.finditer(scope):
+        c = m.group(1)
+        if c.lower() not in _STOPWORDS and c not in cols:
+            cols.append(c)
+    if not cols:
+        return None
+    cols = cols[:3]  # composite index, keep it short
+    col_list = ", ".join(f"`{c}`" for c in cols)
+    idx_name = "idx_" + "_".join(cols)[:56]
+    schema_prefix = f"`{schema_name}`." if schema_name else ""
+    return f"ALTER TABLE {schema_prefix}`{table_name}` ADD INDEX `{idx_name}` ({col_list})"
 
 
 def _confidence_score(

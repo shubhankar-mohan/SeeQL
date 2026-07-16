@@ -11,7 +11,7 @@ import pytest
 import config as config_module
 from alerting.anomaly import AnomalyResult
 from alerting.anomaly_store import persist
-from alerting.incidents import update_windows
+from alerting.incidents import set_incident_analysis, update_windows
 from storage.connection import reset_connections
 
 
@@ -233,6 +233,39 @@ class TestIncidentWindowing:
         incidents = _incidents(incident_db)
         assert json.loads(incidents[0]["involved_metrics"]) == ["threads_running"]
         assert incidents[0]["event_count"] == 2
+
+    def test_extends_analyzed_incident_instead_of_fragmenting(self, incident_db):
+        """E1 regression: an incident that was already flipped to 'analyzed'
+        by the same-cycle synchronous LLM trigger (see scheduler.runner.
+        _trigger_incident_analyses) must still be extended by a later event
+        within the gap window, not fragmented into a second incident_windows
+        row. Before the fix, `_attach_or_create`'s extension-candidate SELECT
+        only matched status = 'detected', so this second event created a
+        brand-new incident instead of extending the still-open one.
+        """
+        # Cycle 1: first anomaly event creates and (synchronously) analyzes
+        # an incident, exactly like the medium-loop scheduler path does.
+        persist([_make_result(20, "threads_running")])
+        new_first = update_windows("default")
+        assert len(new_first) == 1
+        incident_id = new_first[0]
+
+        set_incident_analysis(incident_id, analysis_id=999, status="analyzed")
+        row = _incidents(incident_db)[0]
+        assert row["status"] == "analyzed"
+
+        # Cycle 2 (5 min later, within the 15-min gap): the same underlying
+        # condition is still active and produces a fresh anomaly event.
+        persist([_make_result(10, "threads_running")])
+        new_second = update_windows("default")
+
+        # Must extend the existing (analyzed) incident, not create a new one.
+        assert new_second == []
+        incidents = _incidents(incident_db)
+        assert len(incidents) == 1
+        assert incidents[0]["id"] == incident_id
+        assert incidents[0]["event_count"] == 2
+        assert incidents[0]["status"] == "analyzed"  # extension must not revert status
 
     def test_idempotent(self, incident_db):
         """Running update_windows twice in a row shouldn't double-group."""

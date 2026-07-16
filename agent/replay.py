@@ -255,24 +255,13 @@ def run_replay(
             prompt=prompt,
             analysis_type="replay",
             server_id=server_id,
+            incident_id=incident_id,
         )
         result.analysis_md = llm.get("text")
         result.analysis_id = llm.get("analysis_id")
         result.severity = llm.get("severity")
-
-        # Link the incident window to the analysis
-        if incident_id is not None and result.analysis_id is not None:
-            try:
-                from storage.connection import get_mon_connection
-                with get_mon_connection() as conn:
-                    conn.execute(
-                        """UPDATE incident_windows
-                           SET analysis_id = ?, status = 'analyzed'
-                           WHERE id = ?""",
-                        (result.analysis_id, incident_id),
-                    )
-            except Exception as e:
-                logger.warning(f"Failed to link incident {incident_id} to analysis: {e}")
+        # Incident -> analysis linking (when incident_id is set) is handled
+        # inside run_llm_analysis via alerting.incidents.set_incident_analysis.
     except RuntimeError as e:
         # _detect_backend returned None — no LLM configured
         logger.info(f"Replay LLM unavailable: {e} — timeline-only replay")

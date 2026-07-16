@@ -136,6 +136,12 @@ alerting:
       threshold: 0.85
       cooldown_minutes: 15
       channels: [slack, log]
+    high_memory:
+      enabled: true
+      severity: warning
+      threshold: 0.85
+      cooldown_minutes: 15
+      channels: [slack, log]
     deadlock_detected:
       enabled: true
       severity: critical

@@ -139,14 +139,14 @@ def query_regressions(
             SELECT digest, digest_text, AVG(avg_time_sec) as recent_avg,
                    SUM(exec_count) as recent_execs
             FROM query_digest_snapshots
-            WHERE snapshot_time >= datetime('now', '-1 hour')
+            WHERE datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-1 hour')
               {sf}
             GROUP BY digest
         ),
         baseline AS (
             SELECT digest, AVG(avg_time_sec) as baseline_avg
             FROM query_digest_snapshots
-            WHERE snapshot_time BETWEEN datetime('now', '-7 days') AND datetime('now', '-1 hour')
+            WHERE datetime(REPLACE(snapshot_time,'T',' ')) BETWEEN datetime('now', '-7 days') AND datetime('now', '-1 hour')
               {sf}
             GROUP BY digest
         )

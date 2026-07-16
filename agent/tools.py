@@ -12,12 +12,24 @@ functions. The Gemini conversion happens in llm_agent.py.
 import contextvars
 import json
 import logging
+import re as _re_ident
 import time
 
 from agent import queries as Q
 from storage.connection import get_mon_reader, get_prod_connection
 
 logger = logging.getLogger(__name__)
+
+# Bare MySQL identifier: letters/digits/underscore/dollar, must not start
+# with a digit. No backticks, spaces, or `;` -- closes the f-string
+# injection vector in SHOW CREATE TABLE and stops hallucinated/mangled
+# names from ever reaching prod.
+_IDENT_RE = _re_ident.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
+
+
+def _valid_identifier(name: str) -> bool:
+    """True if `name` is a safe bare MySQL identifier (no backticks/spaces/;)."""
+    return bool(name) and bool(_IDENT_RE.match(name))
 
 # Timeout for live production queries (seconds)
 _LIVE_QUERY_TIMEOUT = 10
@@ -471,6 +483,9 @@ def _tool_get_table_schema(input_data: dict) -> dict:
     schema_name = input_data["schema_name"]
     table_name = input_data["table_name"]
 
+    if not _valid_identifier(schema_name) or not _valid_identifier(table_name):
+        return {"error": f"Invalid identifier: {schema_name}.{table_name}"}
+
     # Try monitoring DB first
     with get_mon_reader() as conn:
         row = conn.execute(Q.SCHEMA_FOR_TABLE, (schema_name, table_name)).fetchone()
@@ -489,6 +504,13 @@ def _tool_get_table_schema(input_data: dict) -> dict:
     try:
         with get_prod_connection(_current_server_id.get()) as conn:
             cursor = conn.cursor()
+            cursor.execute(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = %s AND table_name = %s LIMIT 1",
+                (schema_name, table_name),
+            )
+            if cursor.fetchone() is None:
+                return {"error": f"Table {schema_name}.{table_name} not found", "source": "live"}
             cursor.execute(f"SHOW CREATE TABLE `{schema_name}`.`{table_name}`")
             result = cursor.fetchone()
             if result:
@@ -660,6 +682,9 @@ def _tool_get_index_stats(input_data: dict) -> dict:
     schema_name = input_data["schema_name"]
     table_name = input_data["table_name"]
 
+    if not _valid_identifier(schema_name) or not _valid_identifier(table_name):
+        return {"error": f"Invalid identifier: {schema_name}.{table_name}"}
+
     # Index usage from performance_schema
     usage_query = """
         SELECT
@@ -768,6 +793,20 @@ def _tool_explain_query(input_data: dict) -> dict:
     # Safety: reject if it contains multiple statements
     if ";" in query.rstrip(";"):
         return {"error": "Multiple statements not allowed"}
+
+    # Safety: digest_text is a normalized fingerprint with `?` and `…` markers
+    # and may be truncated — it is NOT runnable SQL. Never send it to prod.
+    if "?" in query:
+        return {"error": "Query contains `?` placeholders — this looks like a "
+                         "digest_text, which is not runnable. Use run_explain(digest) "
+                         "or search_slow_log for a real statement."}
+    if "…" in query or query.rstrip().endswith("...") or "..." in query:
+        return {"error": "Query contains an ellipsis (truncated) — not runnable. "
+                         "Use run_explain(digest) or search_slow_log."}
+    if query.count("(") != query.count(")"):
+        return {"error": "Query has unbalanced parentheses — likely truncated. "
+                         "Use run_explain(digest) or search_slow_log."}
+    logger.debug("explain_query accepted: %s", query[:200])
 
     try:
         with get_prod_connection(_current_server_id.get()) as conn:

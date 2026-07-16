@@ -256,6 +256,11 @@ METRIC_CONFIGS = {
         "low_z": None,
         "min_samples": 3,
         "description": "CPU utilization",
+        # Absolute danger floor (Phase P1.2): a z-score spike measured off a
+        # low, low-variance baseline (e.g. 6.6% CPU) must not read as
+        # 'critical'. GCP CPU utilization is a 0..1 fraction. See
+        # _apply_cpu_floor().
+        "abs_floor": 0.50,
     },
     "memory_utilization": {
         "table": "gcp_metric_snapshots",
@@ -281,7 +286,7 @@ METRIC_CONFIGS = {
         "extra_where": "AND server_id = ?",
         "current_query": """
             SELECT COUNT(*) as val FROM lock_wait_snapshots
-            WHERE snapshot_time >= datetime('now', '-5 minutes')
+            WHERE datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-5 minutes')
               AND server_id = ?
         """,
         "baseline_query": """
@@ -293,8 +298,8 @@ METRIC_CONFIGS = {
             FROM (
                 SELECT COUNT(*) as val
                 FROM lock_wait_snapshots
-                WHERE snapshot_time >= datetime('now', '-7 days')
-                  AND snapshot_time < datetime('now', '-30 minutes')
+                WHERE datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-7 days')
+                  AND datetime(REPLACE(snapshot_time,'T',' ')) < datetime('now', '-30 minutes')
                   AND server_id = ?
                 GROUP BY strftime('%Y-%m-%d %H', snapshot_time)
             ) sub
@@ -302,8 +307,8 @@ METRIC_CONFIGS = {
                 SELECT AVG(val) as avg_val FROM (
                     SELECT COUNT(*) as val
                     FROM lock_wait_snapshots
-                    WHERE snapshot_time >= datetime('now', '-7 days')
-                      AND snapshot_time < datetime('now', '-30 minutes')
+                    WHERE datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-7 days')
+                      AND datetime(REPLACE(snapshot_time,'T',' ')) < datetime('now', '-30 minutes')
                       AND server_id = ?
                     GROUP BY strftime('%Y-%m-%d %H', snapshot_time)
                 )
@@ -354,8 +359,8 @@ METRIC_CONFIGS = {
                   AND requests.variable_name = 'Innodb_buffer_pool_read_requests'
                   AND reads.server_id = ?
                   AND requests.raw_value > 0
-                  AND datetime(reads.snapshot_time) >= datetime('now', '-24 hours')
-                  AND datetime(reads.snapshot_time) < datetime('now', '-30 minutes')
+                  AND datetime(REPLACE(reads.snapshot_time,'T',' ')) >= datetime('now', '-24 hours')
+                  AND datetime(REPLACE(reads.snapshot_time,'T',' ')) < datetime('now', '-30 minutes')
             )
             SELECT AVG(val) as mean,
                    CASE WHEN COUNT(*) > 1
@@ -469,6 +474,17 @@ def _query_baseline(conn, config: dict, server_id: str):
         return conn.execute(query, (server_id, server_id)).fetchone()
 
 
+def _apply_cpu_floor(severity: str, current_value: float | None, floor: float = 0.50) -> str:
+    """Downgrade a CPU anomaly that is below an absolute danger floor.
+
+    A z-score spike measured off a low, low-variance baseline (e.g. 6.6% CPU)
+    must not read as 'critical'. GCP CPU is a 0..1 fraction.
+    """
+    if current_value is not None and current_value < floor and severity == "critical":
+        return "warning"
+    return severity
+
+
 def _detect_anomalies_uncached(
     server_id: str,
     z_threshold_override: float | None,
@@ -500,6 +516,10 @@ def _detect_anomalies_uncached(
         # Check for high anomaly
         if high_z is not None and z >= high_z:
             severity = "critical" if z >= high_z * 1.5 else "warning"
+            if metric_name == "cpu_utilization":
+                severity = _apply_cpu_floor(
+                    severity, baseline.current, config.get("abs_floor", 0.50)
+                )
             anomalies.append(AnomalyResult(
                 metric=metric_name,
                 current=baseline.current,

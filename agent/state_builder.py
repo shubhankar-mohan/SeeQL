@@ -190,7 +190,8 @@ def _build_historical(conn, regressions: list, server_id: str) -> dict:
     hist = {}
     sid = server_id
 
-    # Baseline Threads_running (same hour, 7 days ago)
+    # Baseline Threads_running (28-day same-hour-same-DOW window, matching
+    # the anomaly engine, with incident windows excluded)
     row = conn.execute(Q.BASELINE_THREADS_RUNNING, (sid,)).fetchone()
     hist["baseline_threads_running"] = row["avg_value"] if row and row["avg_value"] else None
 
@@ -553,9 +554,14 @@ def _pct(val) -> str:
 
 
 import re as _re
-_TABLE_RE = _re.compile(r'(?:FROM|JOIN|UPDATE|INTO)\s+`?(\w+)`?', _re.IGNORECASE)
+_TABLE_RE = _re.compile(
+    r'(?:FROM|JOIN|UPDATE|INTO)\s+`?(?:\w+`?\.`?)?(\w+)`?', _re.IGNORECASE)
 
 def _extract_table_name(sql: str) -> str:
-    """Best-effort extraction of the main table name from SQL text."""
+    """Best-effort extraction of the main table name from SQL text.
+
+    Handles `schema.table` (returns the table, not the schema), backticked,
+    bare, and aliased forms.
+    """
     m = _TABLE_RE.search(sql or "")
     return m.group(1) if m else "?"

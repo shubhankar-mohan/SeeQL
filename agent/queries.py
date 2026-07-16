@@ -163,20 +163,34 @@ LIMIT 5
 
 BASELINE_THREADS_RUNNING = """
 SELECT AVG(raw_value) as avg_value
-FROM global_status_snapshots
-WHERE variable_name = 'Threads_running'
-  AND server_id = ?
-  AND strftime('%w', snapshot_time) = strftime('%w', 'now', '-7 days')
-  AND strftime('%H', snapshot_time) = strftime('%H', 'now')
+FROM global_status_snapshots g
+WHERE g.variable_name = 'Threads_running'
+  AND g.server_id = ?
+  AND datetime(REPLACE(g.snapshot_time,'T',' ')) >= datetime('now','-28 days')
+  AND strftime('%w', REPLACE(g.snapshot_time,'T',' ')) = strftime('%w','now')
+  AND strftime('%H', REPLACE(g.snapshot_time,'T',' ')) = strftime('%H','now')
+  AND NOT EXISTS (
+    SELECT 1 FROM incident_windows w
+    WHERE w.server_id = g.server_id
+      AND datetime(REPLACE(g.snapshot_time,'T',' '))
+          BETWEEN datetime(REPLACE(w.start_time,'T',' ')) AND datetime(REPLACE(w.end_time,'T',' '))
+  )
 """
 
 BASELINE_QPS = """
 SELECT AVG(per_second) as avg_qps
-FROM global_status_snapshots
-WHERE variable_name = 'Queries'
-  AND server_id = ?
-  AND strftime('%w', snapshot_time) = strftime('%w', 'now', '-7 days')
-  AND strftime('%H', snapshot_time) = strftime('%H', 'now')
+FROM global_status_snapshots g
+WHERE g.variable_name = 'Queries'
+  AND g.server_id = ?
+  AND datetime(REPLACE(g.snapshot_time,'T',' ')) >= datetime('now','-28 days')
+  AND strftime('%w', REPLACE(g.snapshot_time,'T',' ')) = strftime('%w','now')
+  AND strftime('%H', REPLACE(g.snapshot_time,'T',' ')) = strftime('%H','now')
+  AND NOT EXISTS (
+    SELECT 1 FROM incident_windows w
+    WHERE w.server_id = g.server_id
+      AND datetime(REPLACE(g.snapshot_time,'T',' '))
+          BETWEEN datetime(REPLACE(w.start_time,'T',' ')) AND datetime(REPLACE(w.end_time,'T',' '))
+  )
 """
 
 QUERY_30D_TREND = """
