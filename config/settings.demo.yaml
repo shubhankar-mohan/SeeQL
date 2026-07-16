@@ -1,0 +1,92 @@
+# =============================================================================
+# SeeQL — DEMO config (Grand Line). Read-only SQLite dashboard, no MySQL.
+# Run:  SEEQL_API_PORT=8899 seeql serve --config config/settings.demo.yaml --no-scheduler
+# =============================================================================
+
+# Single monitored server. role: primary => this is the default server_id.
+servers:
+  grandline-prod:
+    display_name: "Grand Line — Prod"
+    environment: production
+    role: primary
+    host: 127.0.0.1        # inert placeholder; never connected in --no-scheduler
+    port: 3306
+    user: demo
+    password: demo
+    database: grandline
+    pool_size: 1
+
+# Inert legacy block (kept so load_config is happy if it reads it).
+production_db:
+  host: "127.0.0.1"
+  port: 3306
+  user: "demo"
+  password: "demo"
+  database: "grandline"
+  pool_size: 1
+  connect_timeout: 5
+
+monitoring_db:
+  path: "data/grandline_demo.db"
+  wal_mode: false
+  busy_timeout_ms: 5000
+  max_size_mb: 500
+
+intervals:
+  fast_loop: 30
+  medium_loop: 300
+  slow_loop: 1800
+  retention_loop: 86400
+
+limits:
+  top_queries: 50
+  explain_top_n: 10
+  processlist_query_max_len: 500
+  digest_text_max_len: 1024
+  max_batch_size: 500
+
+retention:
+  days: 90
+
+excluded_schemas:
+  - "mysql"
+  - "performance_schema"
+  - "sys"
+  - "information_schema"
+
+gcp:
+  project_id: "demo"
+  cloud_sql_instance_id: "demo"
+  region: "asia-south1"
+  vertex_region: "us-central1"
+
+# Everything that would call out (LLM, alert channels, webhooks, mcp) is off.
+agent:
+  enabled: false
+  model: "gemini-2.0-flash"
+
+alerting:
+  enabled: false
+  channels:
+    log:
+      enabled: true
+
+webhooks:
+  enabled: false
+
+investigator:
+  enabled: false
+
+mcp:
+  enabled: false
+
+prometheus:
+  enabled: true
+  cache_ttl_seconds: 10
+
+logging:
+  level: "INFO"
+  file: "logs/demo.log"
+  max_bytes: 10485760
+  backup_count: 2
+  max_total_mb: 50

@@ -40,3 +40,8 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# SeeQL demo artifacts
+data/grandline_demo.db
+data/grandline_demo.db-*
+dist/

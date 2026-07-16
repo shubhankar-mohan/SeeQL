@@ -1,0 +1,20 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "outputDirectory": "dist",
+  "cleanUrls": true,
+  "trailingSlash": false,
+  "rewrites": [
+    { "source": "/", "destination": "/dashboard/index.html" },
+    { "source": "/api/v1/metrics/:name", "destination": "/api/v1/metrics/:name.json" },
+    { "source": "/api/v1/locks/history", "destination": "/api/v1/locks/history.json" },
+    { "source": "/api/v1/incidents/recent", "destination": "/api/v1/incidents/recent.json" },
+    { "source": "/api/v1/investigations/recent", "destination": "/api/v1/investigations/recent.json" },
+    { "source": "/api/v1/queries/:digest/trend", "destination": "/api/v1/queries/:digest/trend.json" }
+  ],
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [{ "key": "Content-Type", "value": "application/json; charset=utf-8" }]
+    }
+  ]
+}
