@@ -6,7 +6,10 @@ Runs as a single container with a Prometheus `/metrics` endpoint and a
 sketch-aesthetic dashboard. Works out of the box against local MySQL, GCP
 Cloud SQL, AWS RDS/Aurora, or self-hosted.
 
-<!-- Screenshot placeholder — capture and drop in docs/screenshots/dashboard.png -->
+<!-- Screenshots use absolute URLs so they also render on Docker Hub.
+     All data shown is the One Piece-themed "Grand Line" demo dataset
+     (scripts/seed_demo.py) — no real workloads. -->
+![SeeQL dashboard — overview page during the demo lock-cascade incident on the Grand Line dataset](https://raw.githubusercontent.com/shubhankar-mohan/SeeQL/main/docs/screenshots/overview.png)
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Docker Hub](https://img.shields.io/badge/docker%20hub-shubhankarmohan%2Fseeql-blue?logo=docker)](https://hub.docker.com/r/shubhankarmohan/seeql)
@@ -236,6 +239,32 @@ Full reference in [docs/cli.md](docs/cli.md).
 Served at `http://<host>:8080/` — overview, queries, locks, schema, server,
 and incidents pages. HTMX auto-refresh, no SPA build step, ARIA live regions
 on auto-updating widgets.
+
+*(All screenshots show the One Piece-themed **Grand Line** demo dataset —
+`pirates`, `crews`, `bounties`, `devil_fruits` — staged mid lock-cascade
+incident so every page has something to say. Rebuild it yourself with
+`python scripts/seed_demo.py`; capture with `scripts/screenshot_demo.py`.
+Not a real production workload.)*
+
+**Query Performance** — per-digest execs, latency, rows examined, and full-table-scan flags:
+
+![Query Performance page — slowest query digests with average time, total time, and scan flags](https://raw.githubusercontent.com/shubhankar-mohan/SeeQL/main/docs/screenshots/queries.png)
+
+**Action Center** — ranked optimization candidates, diagnostics, and emergencies:
+
+![Action Center page — queries to optimize with exec counts, scan ratios, and index suggestions](https://raw.githubusercontent.com/shubhankar-mohan/SeeQL/main/docs/screenshots/action-center.png)
+
+**Locks & Transactions** — live lock waits, 24h lock history, and active transactions:
+
+![Locks and Transactions page — current lock waits and active transactions](https://raw.githubusercontent.com/shubhankar-mohan/SeeQL/main/docs/screenshots/locks.png)
+
+**Server Metrics** — QPS, threads, buffer pool hit ratio, and top wait events:
+
+![Server Metrics page — QPS, threads, buffer pool hit ratio charts](https://raw.githubusercontent.com/shubhankar-mohan/SeeQL/main/docs/screenshots/server.png)
+
+**Schema & Indexes** — table sizes, DDL change history, unused/redundant index analysis:
+
+![Schema and Indexes page — table sizes with row counts and data/index MB](https://raw.githubusercontent.com/shubhankar-mohan/SeeQL/main/docs/screenshots/schema.png)
 
 See [docs/dashboard.md](docs/dashboard.md) for a per-page tour.
 
