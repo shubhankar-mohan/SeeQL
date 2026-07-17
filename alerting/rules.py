@@ -219,7 +219,18 @@ def evaluate_high_memory(rule_config: dict, server_id: str = "default") -> Alert
 
 
 def evaluate_deadlock(rule_config: dict, server_id: str = "default") -> Alert | None:
-    """Fire if a deadlock was detected recently on this server."""
+    """Fire if a NEW deadlock was detected on this server.
+
+    InnoDB reprints the same LATEST DETECTED DEADLOCK section verbatim on
+    every SHOW ENGINE INNODB STATUS call until the server restarts, so a
+    fresh snapshot_time does not mean a fresh deadlock (P1b-3: without this,
+    a single old deadlock re-fires a critical alert every evaluation cycle
+    forever). We key off the deadlock's own header timestamp (deadlock_at,
+    parsed by parsers.innodb_status._parse_deadlock) and only fire when it
+    is newer than the last deadlock_at we already alerted on. That "last
+    alerted" value is read back from alert_history rather than kept in
+    memory so a process restart doesn't re-alert an old deadlock.
+    """
     with get_mon_reader() as conn:
         row = conn.execute("""
             SELECT snapshot_time, parsed_json
@@ -243,9 +254,32 @@ def evaluate_deadlock(rule_config: dict, server_id: str = "default") -> Alert | 
     if not details.get("has_deadlock"):
         return None
 
+    current_deadlock_at = details.get("deadlock_at")
+    if not current_deadlock_at:
+        return None
+
+    rule_name = _ns("deadlock_detected", server_id)
+    with get_mon_reader() as conn:
+        last_row = conn.execute("""
+            SELECT context_json
+            FROM alert_history
+            WHERE rule_name = ?
+            ORDER BY fired_at DESC, id DESC LIMIT 1
+        """, (rule_name,)).fetchone()
+
+    last_deadlock_at = None
+    if last_row and last_row["context_json"]:
+        try:
+            last_deadlock_at = json.loads(last_row["context_json"]).get("deadlock_at")
+        except (json.JSONDecodeError, TypeError):
+            last_deadlock_at = None
+
+    if last_deadlock_at is not None and current_deadlock_at <= last_deadlock_at:
+        return None
+
     tables = details.get("tables_involved", [])
     return Alert(
-        rule_name=_ns("deadlock_detected", server_id),
+        rule_name=rule_name,
         severity=Severity(rule_config.get("severity", "critical")),
         message=(
             f"[{server_id}] Deadlock detected involving tables: "

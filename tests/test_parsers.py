@@ -2,9 +2,8 @@
 
 from datetime import datetime, timedelta
 
-import pytest
-
 from parsers.global_status import GlobalStatusDeltaCalculator, TRACKED_VARIABLES
+from parsers.innodb_status import _parse_deadlock
 from tests.fixtures.mysql_mock_data import MOCK_GLOBAL_STATUS, MOCK_GLOBAL_STATUS_SECOND
 
 
@@ -82,3 +81,20 @@ class TestGlobalStatusDeltaCalculator:
 
         for row in result:
             assert row["per_second"] is None
+
+
+def test_deadlock_timestamp_parsed():
+    """P1b-3: InnoDB reprints the same LATEST DETECTED DEADLOCK section on
+    every SHOW ENGINE INNODB STATUS call until the server restarts, so the
+    section's own header timestamp — not snapshot freshness — is the only
+    reliable signal for "is this a NEW deadlock"."""
+    text = "2026-07-17 01:42:33 0x16f887000\n*** (1) TRANSACTION:\nTRANSACTION 48119 ..."
+    parsed = _parse_deadlock(text)
+    assert parsed["deadlock_at"] == "2026-07-17 01:42:33"
+
+
+def test_deadlock_timestamp_missing_is_none():
+    """No leading timestamp line (e.g. malformed/empty section) => None, not
+    a crash — evaluate_deadlock treats a missing deadlock_at as un-fireable."""
+    parsed = _parse_deadlock("*** (1) TRANSACTION:\nTRANSACTION 48119 ...")
+    assert parsed["deadlock_at"] is None
