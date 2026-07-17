@@ -102,6 +102,122 @@ Most query endpoints accept:
 ]
 ```
 
+## Investigations
+
+Webhook-triggered root-cause investigations (see `webhooks:` and
+`investigator:` in `settings.yaml`). An inbound alert creates an
+`investigations` row and runs a 3-phase pipeline: zero-query triage,
+budgeted LLM tool calls, then continuous sampling with a load guard.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/webhooks/{provider}` | Inbound alert webhook — verifies signature, dedups, and schedules an investigation |
+| `GET` | `/api/v1/investigations/recent` | Recent investigations (dashboard widget feed) |
+| `GET` | `/api/v1/investigations/{investigation_id}` | Investigation detail: findings + sample counts |
+
+### `POST /webhooks/{provider}`
+
+`{provider}` is one of the configured `webhooks.providers` keys (e.g.
+`generic`, `gcp`, `pagerduty`, `grafana`). Requires
+`webhooks.enabled: true` and `webhooks.providers.<provider>.enabled:
+true`, or the endpoint 404s. The raw request body is signature-verified
+(HMAC secret, or OIDC for the `gcp` provider) **before** JSON parsing.
+
+Response (`202 Accepted`):
+
+```json
+{
+  "investigation_id": 17,
+  "inbound_alert_id": 42,
+  "status": "accepted",
+  "alert_type": "lock_cascade",
+  "server_id": "default"
+}
+```
+
+If the same `(provider, external_id)` arrives again within
+`webhooks.dedup_window_minutes`, it attaches to the existing
+investigation instead of creating a new one:
+
+```json
+{
+  "investigation_id": 17,
+  "status": "dedup",
+  "message": "attached to existing investigation within 5-minute window"
+}
+```
+
+Errors: `401` bad signature, `404` webhooks/provider disabled or unknown
+provider, `429` rate-limited or too many concurrent investigations for
+the server.
+
+### `GET /api/v1/investigations/recent`
+
+Query params: `limit` (default 10, max 50), `status`, `server`.
+
+```json
+[
+  {
+    "id": 17,
+    "server_id": "default",
+    "status": "phase3",
+    "started_at": "2026-04-10T03:12:05+00:00",
+    "ended_at": null,
+    "confidence": null,
+    "root_cause_summary": null,
+    "provider": "gcp",
+    "alert_type": "high_cpu",
+    "severity": "warning",
+    "summary": "CPU utilization above threshold",
+    "duration_seconds": 340
+  }
+]
+```
+
+### `GET /api/v1/investigations/{investigation_id}`
+
+Full detail: the `investigations` row (joined with its triggering
+`inbound_alerts` row), every `investigation_findings` entry, and sample
+counts grouped by `sample_type`. `404` if the id doesn't exist.
+
+```json
+{
+  "investigation": {
+    "id": 17,
+    "status": "completed",
+    "confidence": 0.82,
+    "root_cause_summary": "...",
+    "provider": "gcp",
+    "alert_type": "high_cpu",
+    "alert_severity": "warning",
+    "...": "..."
+  },
+  "findings": [
+    {
+      "id": 1,
+      "phase": "phase2",
+      "kind": "root_cause",
+      "severity": "warning",
+      "content": "{...}",
+      "content_parsed": { "...": "..." },
+      "created_at": "2026-04-10T03:14:00+00:00"
+    }
+  ],
+  "samples": [
+    {
+      "sample_type": "processlist",
+      "n": 12,
+      "first_at": "2026-04-10T03:12:20+00:00",
+      "last_at": "2026-04-10T03:19:40+00:00",
+      "query_count": 240
+    }
+  ]
+}
+```
+
+**See:** [CLI: `seeql investigations`](cli.md) for the equivalent
+terminal workflow.
+
 ## Agent
 
 | Method | Path | Description |
@@ -137,18 +253,22 @@ Returns the parsed result:
 
 ## Dashboard
 
-`GET /` renders the overview page. Dashboard pages live under `/` as
-server-rendered HTMX templates:
+`GET /` redirects to `/dashboard`, which renders the overview page.
+Dashboard pages are server-rendered HTMX templates:
 
-- `/` — overview
-- `/queries` — top queries + regressions
-- `/locks` — current + historical locks
-- `/schema` — DDL changes + table sizes + indexes
-- `/server` — system metrics
-- `/incidents` — incident window list
+- `/dashboard` — overview: health bar, active alerts, incidents timeline, top queries, live locks
+- `/dashboard/queries` — top queries + regressions
+- `/dashboard/locks` — current + historical locks
+- `/dashboard/schema` — DDL changes + table sizes + indexes
+- `/dashboard/server` — system metrics
+- `/dashboard/todo` — Action Center: emergency triage, diagnostics, query/index remediation
 
-HTMX partials live under `/partials/*` and are not intended for direct
-API consumption.
+There's no standalone incidents page — the incident window timeline
+renders as a widget on `/dashboard`. See [dashboard.md](dashboard.md)
+for a per-page tour.
+
+HTMX partials live under `/dashboard/partials/*` and are not intended
+for direct API consumption.
 
 ## Prometheus metrics
 

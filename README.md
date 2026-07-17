@@ -162,7 +162,8 @@ SeeQL depends on `performance_schema` and the slow query log.
 | Flag | Value | Why |
 |------|-------|-----|
 | `performance_schema` | `on` | Query digests, wait events, lock waits |
-| `slow_query_log` | `on` | Slow query log collector |
+| `performance_schema` consumers/instruments | enabled | digests/waits/stages data — granular state isn't individually verified by `seeql doctor` (it only checks the top-level flag above) |
+| `slow_query_log` | `on` | Slow query log collector — ingested via Cloud Logging on the `-gcp` image; on other platforms the `Slow_queries` counter is tracked but log *entries* are not collected yet |
 | `long_query_time` | `1` | Log queries > 1s |
 | `innodb_monitor_enable` | `all` | 300+ InnoDB internal metrics |
 
@@ -178,6 +179,20 @@ innodb_monitor_enable=all
 ```
 
 Restart the server after changing these.
+
+**Execution-stage timing** (parsing / optimizing / sending data / sorting
+— where a query spends its time) needs its `performance_schema`
+instruments turned on separately; stock MySQL 8.0 ships them disabled.
+Run once, as a privileged user:
+
+```sql
+UPDATE performance_schema.setup_instruments
+SET ENABLED = 'YES', TIMED = 'YES'
+WHERE NAME LIKE 'stage/%';
+```
+
+Without this, the `execution_stages` collector still runs but returns no
+rows — it degrades silently, no error.
 
 ---
 
@@ -222,6 +237,8 @@ seeql replay --latest             # reconstruct + narrate the most recent incide
 seeql replay --incident 42        # narrate a specific incident id
 seeql replay --from <ts> --to <ts>
 seeql incidents list              # browse detected incident windows
+seeql investigations list|show|trigger|abort  # webhook-triggered investigations
+seeql mcp [--http]                 # run the MCP server (stdio by default)
 ```
 
 Full reference in [docs/cli.md](docs/cli.md).
@@ -231,8 +248,9 @@ Full reference in [docs/cli.md](docs/cli.md).
 ## Dashboard
 
 Served at `http://<host>:8080/` — overview, queries, locks, schema, server,
-and incidents pages. HTMX auto-refresh, no SPA build step, ARIA live regions
-on auto-updating widgets.
+and an Action Center page; incidents render as a timeline widget on
+Overview. HTMX auto-refresh, no SPA build step, ARIA live regions on
+auto-updating widgets.
 
 See [docs/dashboard.md](docs/dashboard.md) for a per-page tour.
 
@@ -262,7 +280,7 @@ monitoring SQLite DB. Match it to your scrape interval.
 
 ## Alerting
 
-Six deterministic rules plus one statistical anomaly rule, all configurable:
+Seven deterministic rules plus one statistical anomaly rule, all configurable:
 
 | Rule | Default trigger | Severity |
 |------|----------------|----------|
@@ -271,8 +289,12 @@ Six deterministic rules plus one statistical anomaly rule, all configurable:
 | `query_regression` | Any query 5× slower than 7d baseline | warning |
 | `ddl_change` | Any schema change detected | info |
 | `high_cpu` | CPU > 85% | warning |
+| `high_memory` | Memory > 85% | warning |
 | `deadlock_detected` | Deadlock in `SHOW ENGINE INNODB STATUS` | critical |
 | `anomaly_detection` | z-score > 3 on same-hour-same-weekday baseline | warning |
+
+`anomaly_detection` escalates to critical at z ≥ 1.5× threshold (default
+z ≥ 4.5, since the default `z_threshold` is 3.0).
 
 Channels: Slack, generic webhook, log. Cooldowns are per-rule and
 per-server. See [docs/alerting.md](docs/alerting.md) for tuning.
@@ -307,6 +329,13 @@ The `[gcp]` optional extra (and the `-gcp` image variant) add:
   `cloudsql.googleapis.com/mysql-slow.log`
 - Google GenAI SDK — Gemini via Vertex AI, and Claude via Vertex AI
   (`AnthropicVertex`)
+
+> **RDS / Aurora / self-hosted:** Infra metrics (CPU/mem/disk) are
+> GCP-only today — on RDS/Aurora/self-hosted, MySQL-level monitoring
+> works fully but `high_cpu`/`high_memory` and 2 of 7 anomaly-detection
+> metrics (`cpu_utilization`, `memory_utilization`) are inactive since
+> nothing populates the `gcp_metric_snapshots` table they read from. A
+> CloudWatch collector is planned.
 
 **Service account roles required:**
 
