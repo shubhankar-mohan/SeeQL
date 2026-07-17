@@ -72,9 +72,11 @@ open http://localhost:8080                 # dashboard
 > instance (all databases inside an instance are monitored automatically).
 > See [docs/config.md](docs/config.md).
 >
-> **LLM agent is opt-in.** Metrics + anomaly detection run without any LLM. Add
-> `agent: {enabled: true, model: claude-opus-4-6}` to `seeql.yml` and pass
-> `-e ANTHROPIC_API_KEY=sk-ant-...` for Claude-written root-cause narrations.
+> **LLM agent is opt-in.** Metrics + anomaly detection run without any LLM.
+> Shipped default: `agent: {enabled: true, model: gemini-2.5-flash}` (needs a
+> GCP project + Vertex AI credentials) — or use any `claude-*` model +
+> `-e ANTHROPIC_API_KEY=sk-ant-...` for a GCP-free setup with Claude-written
+> root-cause narrations.
 
 ---
 
@@ -181,33 +183,28 @@ Restart the server after changing these.
 
 ## Configuration
 
-Every knob can be set via environment variable OR `settings.local.yaml`.
-Env vars win over file config. See
-[docs/config.md](docs/config.md) for the full matrix.
+SeeQL is configured by **one YAML file** (mounted at `/etc/seeql/seeql.yml` in
+Docker, or pointed to by `SEEQL_CONFIG`). Secrets are injected into that file
+via `${VAR}` placeholders resolved from the environment / `.env`. Connection
+and server settings are **file-only by design** — there are no `PROD_DB_*`
+env overrides.
 
-Most common env vars:
+| Variable | What |
+|----------|------|
+| `SEEQL_CONFIG` | Path to your config file (default `/etc/seeql/seeql.yml`) |
+| `PROD_DB_PASSWORD` (via `${…}`) | MySQL password referenced from the config file |
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENAI_BASE_URL` | LLM credentials |
+| `SLACK_WEBHOOK_URL` (via `${…}`) | Slack alerts channel |
+| `SEEQL_AGENT_ENABLED` | Override `agent.enabled` (kill-switch) |
+| `SEEQL_API_PORT` | HTTP port (default 8080) |
+| `SEEQL_MON_DB_PATH` | Monitoring SQLite path |
+| `SEEQL_DB_MAX_SIZE_MB` | SQLite size cap (default 5000) |
+| `SEEQL_RETENTION_DAYS` | Data retention (default 90) |
+| `SEEQL_LOG_LEVEL` / `SEEQL_LOG_MAX_SIZE_MB` | Logging knobs |
+| `SEEQL_PROM_CACHE_TTL` | /metrics re-read cadence seconds (default 10) |
 
-| Variable | Required | Default | What |
-|----------|----------|---------|------|
-| `PROD_DB_HOST` | yes | — | MySQL host |
-| `PROD_DB_PORT` | | 3306 | MySQL port |
-| `PROD_DB_USER` | | `dba_agent` | Monitoring user |
-| `PROD_DB_PASSWORD` | yes | — | Monitoring password |
-| `PROD_DB_DATABASE` | yes | — | Default schema (for EXPLAIN) |
-| `SEEQL_AGENT_ENABLED` | | `false` | Enable LLM root-cause analysis |
-| `SEEQL_AGENT_MODEL` | | `claude-sonnet-4-6` | LLM model name |
-| `ANTHROPIC_API_KEY` | | — | Claude API key (if using Claude) |
-| `SEEQL_ALERTING_ENABLED` | | `false` | Evaluate alert rules |
-| `SLACK_WEBHOOK_URL` | | — | Slack incoming webhook |
-| `SEEQL_FAST_INTERVAL` | | `30` | Fast loop interval (seconds) |
-| `SEEQL_MEDIUM_INTERVAL` | | `300` | Medium loop interval (seconds) |
-| `SEEQL_SLOW_INTERVAL` | | `1800` | Slow loop interval (seconds) |
-| `SEEQL_DB_MAX_SIZE_MB` | | `5000` | Max SQLite DB size (MB) |
-| `SEEQL_RETENTION_DAYS` | | `90` | Data retention (days) |
-| `SEEQL_LOG_LEVEL` | | `INFO` | Log level |
-
-GCP-specific vars only apply when you're using the `-gcp` image
-or `[gcp]` extra — see [GCP extras](#gcp--cloud-sql-extras).
+Everything else (`servers:`, intervals, `agent:`, `alerting:`, `webhooks:`,
+`mcp:`) lives in the YAML — see [docs/config.md](docs/config.md).
 
 ---
 
@@ -320,8 +317,10 @@ The `[gcp]` optional extra (and the `-gcp` image variant) add:
 **Compose:**
 
 ```bash
-export PROD_DB_HOST=... PROD_DB_PASSWORD=... PROD_DB_DATABASE=...
-export GCP_PROJECT_ID=... GCP_CLOUD_SQL_INSTANCE=...
+# seeql.yml: add host/database + a per-server `gcp:` block
+#   (project_id, cloud_sql_instance_id) — see docs/config.md
+cp seeql.example.yml seeql.yml && $EDITOR seeql.yml
+export PROD_DB_PASSWORD=your_password
 docker compose -f docker-compose.gcp.yml up -d
 ```
 

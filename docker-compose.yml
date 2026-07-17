@@ -4,8 +4,7 @@
 # For GCP Cloud SQL users, use docker-compose.gcp.yml (adds Cloud Monitoring,
 # Cloud Logging, and Vertex AI wiring).
 #
-# Required env (set in .env or the shell):
-#   PROD_DB_HOST, PROD_DB_PASSWORD, PROD_DB_DATABASE
+# Required: seeql.yml mounted at /etc/seeql/seeql.yml; PROD_DB_PASSWORD in .env
 #
 # Optional:
 #   ANTHROPIC_API_KEY     — enables Claude for LLM root-cause analysis

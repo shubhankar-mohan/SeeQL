@@ -110,7 +110,8 @@ gcloud iam service-accounts keys create vertex-sa.json \
 
 ```bash
 cp .env.example .env
-# fill in PROD_DB_*, GCP_PROJECT_ID, GCP_CLOUD_SQL_INSTANCE
+# .env: fill in PROD_DB_PASSWORD (+ GOOGLE_APPLICATION_CREDENTIALS path)
+# seeql.yml: add a per-server `gcp:` block (project_id, cloud_sql_instance_id)
 docker compose -f docker-compose.gcp.yml up -d
 ```
 
