@@ -162,6 +162,9 @@ def _apply_operational_env_overrides(config: dict):
         config.setdefault("logging", {})["level"] = _env("SEEQL_LOG_LEVEL")
     if _env("SEEQL_PROM_CACHE_TTL"):
         config.setdefault("prometheus", {})["cache_ttl_seconds"] = int(_env("SEEQL_PROM_CACHE_TTL"))
+    agent_enabled = os.environ.get("SEEQL_AGENT_ENABLED")
+    if agent_enabled is not None:
+        config.setdefault("agent", {})["enabled"] = agent_enabled.strip().lower() in ("1", "true", "yes", "on")
 
 
 # ---------------------------------------------------------------------------

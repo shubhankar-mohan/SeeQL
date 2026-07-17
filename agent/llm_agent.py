@@ -153,6 +153,16 @@ def _cfg_value(config: dict, key: str) -> str | None:
     return v or None
 
 
+def _adc_available() -> bool:
+    """True when google-auth can resolve any default credentials (env var, ADC file, metadata)."""
+    try:
+        import google.auth
+        google.auth.default()
+        return True
+    except Exception:
+        return False
+
+
 def _detect_backend(config: dict) -> dict | None:
     """Detect which LLM backend to use.
 
@@ -171,7 +181,7 @@ def _detect_backend(config: dict) -> dict | None:
     gcp_config = get_config().get("gcp", {})
     project_id = gcp_config.get("project_id")
     model = config.get("model", "gemini-2.5-flash")
-    has_gcp_creds = bool(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") and project_id)
+    has_gcp_creds = bool(project_id) and (bool(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")) or _adc_available())
 
     anthropic_key = _cfg_value(config, "anthropic_api_key")
     openai_key = _cfg_value(config, "openai_api_key") or os.environ.get("OPENAI_API_KEY")

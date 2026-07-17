@@ -51,6 +51,16 @@ class TestDetectBackend:
         assert b["type"] == "gemini"
         assert b["model"] == "gemini-2.5-flash"
 
+    def test_gcp_creds_via_adc(self, monkeypatch):
+        """Plain `gcloud auth application-default login` machines (no
+        GOOGLE_APPLICATION_CREDENTIALS env var) must still select a Vertex
+        backend when google-auth can resolve ADC."""
+        monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+        monkeypatch.setattr(llm_agent, "get_config", lambda: {"gcp": {"project_id": "x"}})
+        monkeypatch.setattr(llm_agent, "_adc_available", lambda: True)
+        b = llm_agent._detect_backend({"model": "gemini-2.5-flash"})
+        assert b is not None and b["type"] == "gemini"
+
     def test_unsupported_model_is_coerced_and_warns(self, monkeypatch, caplog):
         """An unsupported model (e.g. gpt-4o) is silently runnable today; make
         sure the user is at least WARNED that their choice was swapped."""
