@@ -18,8 +18,9 @@ Connections and the server list live **only** in the config file — there are n
 `${VAR}` (e.g. `password: ${PROD_DB_PASSWORD}`).
 
 A few **operational** knobs stay as env vars (like Prometheus's `--storage.*` /
-`--log.level` flags): `SEEQL_CONFIG`, `SEEQL_MON_DB_PATH`, `SEEQL_DB_MAX_SIZE_MB`,
-`SEEQL_LOG_MAX_SIZE_MB`, `SEEQL_RETENTION_DAYS`, `SEEQL_LOG_LEVEL`, `SEEQL_ENV`.
+`--log.level` flags): `SEEQL_CONFIG`, `SEEQL_AGENT_ENABLED`, `SEEQL_API_PORT`,
+`SEEQL_MON_DB_PATH`, `SEEQL_DB_MAX_SIZE_MB`, `SEEQL_LOG_MAX_SIZE_MB`,
+`SEEQL_RETENTION_DAYS`, `SEEQL_LOG_LEVEL`, `SEEQL_PROM_CACHE_TTL`, `SEEQL_ENV`.
 
 ## Production database (required)
 

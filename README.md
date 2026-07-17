@@ -73,8 +73,9 @@ open http://localhost:8080                 # dashboard
 > See [docs/config.md](docs/config.md).
 >
 > **LLM agent is opt-in.** Metrics + anomaly detection run without any LLM.
-> Shipped default: `agent: {enabled: true, model: gemini-2.5-flash}` (needs a
-> GCP project + Vertex AI credentials) — or use any `claude-*` model +
+> Enable it with `agent: {enabled: true, model: gemini-2.5-flash}`
+> (gemini-2.5-flash is the shipped model default; needs a GCP project +
+> Vertex AI credentials) — or use any `claude-*` model +
 > `-e ANTHROPIC_API_KEY=sk-ant-...` for a GCP-free setup with Claude-written
 > root-cause narrations.
 
