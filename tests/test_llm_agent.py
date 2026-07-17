@@ -94,6 +94,25 @@ class TestDetectBackend:
         )
         assert b is None
 
+    def test_placeholder_project_id_does_not_hijack_anthropic_via_adc(self, monkeypatch):
+        """The shipped `gcp.project_id: your-gcp-project-id` placeholder must not
+        count as a real project id. A user who opts into a claude-* model with
+        ANTHROPIC_API_KEY, leaves gcp.project_id untouched, and happens to run
+        on a machine with ambient gcloud ADC must still get the Anthropic API
+        backend — not vertex-claude with a bogus project id that fails at
+        runtime."""
+        monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+        monkeypatch.setattr(
+            llm_agent, "get_config",
+            lambda: {"gcp": {"project_id": "your-gcp-project-id"}},
+        )
+        monkeypatch.setattr(llm_agent, "_adc_available", lambda: True)
+        b = llm_agent._detect_backend(
+            {"model": "claude-opus-4-6", "anthropic_api_key": "sk-test"}
+        )
+        assert b is not None
+        assert b["type"] == "anthropic"
+
 
 class TestOpenAIBackend:
     """OpenAI + any OpenAI-compatible endpoint (custom base_url)."""

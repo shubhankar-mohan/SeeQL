@@ -180,6 +180,8 @@ def _detect_backend(config: dict) -> dict | None:
     """
     gcp_config = get_config().get("gcp", {})
     project_id = gcp_config.get("project_id")
+    if project_id in (None, "", "your-gcp-project-id"):
+        project_id = None
     model = config.get("model", "gemini-2.5-flash")
     has_gcp_creds = bool(project_id) and (bool(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")) or _adc_available())
 
