@@ -355,7 +355,7 @@ def dashboard_todo(request: Request, server: str = None):
     lock_rem = get_remediation("lock_wait")
     for lock in long_locks:
         emergency_items.append({
-            "icon": "&#128680;",
+            "icon": "🚨",
             "title": f"Lock wait {lock['wait_seconds']}s — KILL {lock['blocking_pid']}",
             "detail": f"PID {lock['waiting_pid']} blocked by PID {lock['blocking_pid']}",
             "query_preview": (lock.get("waiting_query") or "")[:100],
@@ -375,7 +375,7 @@ def dashboard_todo(request: Request, server: str = None):
     """)
     if deadlocks and deadlocks[0].get("parsed_json"):
         emergency_items.append({
-            "icon": "&#128128;",
+            "icon": "💀",
             "title": "Deadlock detected — check lock ordering",
             "detail": "InnoDB rolled back one transaction. Recurring = lock ordering bug.",
             "query_preview": "",
@@ -399,7 +399,7 @@ def dashboard_todo(request: Request, server: str = None):
     txn_rem = get_remediation("long_transaction")
     for txn in critical_txns:
         emergency_items.append({
-            "icon": "&#9203;",
+            "icon": "⏳",
             "title": f"Transaction {txn['age_sec']}s — PID {txn['pid']}",
             "detail": f"Rows locked: {txn.get('rows_locked', 0)}, modified: {txn.get('rows_modified', 0)}",
             "query_preview": (txn.get("trx_query") or "idle")[:100],
@@ -427,7 +427,7 @@ def dashboard_todo(request: Request, server: str = None):
             if mc > 0 and tc / mc > 0.8:
                 pct = tc / mc * 100
                 emergency_items.append({
-                    "icon": "&#128268;",
+                    "icon": "🔌",
                     "title": f"Connections {tc}/{mc} ({pct:.0f}%) — near max",
                     "detail": "New connections will be refused at max_connections.",
                     "query_preview": "",
@@ -474,7 +474,7 @@ def dashboard_todo(request: Request, server: str = None):
     reg_rem = get_remediation("query_regression")
     for reg in regressions:
         diagnostic_items.append({
-            "icon": "&#9650;",
+            "icon": "▲",
             "title": f"{(reg.get('factor') or 0):.1f}x regression: {(reg['baseline_avg'] or 0):.4f}s -> {(reg['recent_avg'] or 0):.4f}s",
             "detail": f"{(reg.get('digest_text') or '')[:100]}",
             "query_preview": "",
@@ -511,7 +511,7 @@ def dashboard_todo(request: Request, server: str = None):
             # (new tables, column adds that don't affect existing queries)
             continue
         diagnostic_items.append({
-            "icon": "&#128221;",
+            "icon": "📝",
             "title": f"DDL: {tbl} ({change['change_type']})" + (" — queries regressed!" if is_impactful else ""),
             "detail": "Queries referencing this table got slower" if is_impactful else "Index or schema change — verify query plans",
             "query_preview": "",
@@ -530,7 +530,7 @@ def dashboard_todo(request: Request, server: str = None):
     for a in anomalies:
         dir_word = "above" if a.direction == "high" else "below"
         diagnostic_items.append({
-            "icon": "&#128200;",
+            "icon": "📈",
             "title": f"Anomaly: {a.metric} ({a.severity})",
             "detail": f"Current: {a.current:.2f} vs baseline: {a.baseline_mean:.2f} ({a.pct_change:+.0f}% {dir_word}, z={a.z_score:.1f})",
             "query_preview": "",
@@ -553,7 +553,7 @@ def dashboard_todo(request: Request, server: str = None):
     """)
     for txn in moderate_txns:
         diagnostic_items.append({
-            "icon": "&#9203;",
+            "icon": "⏳",
             "title": f"Long transaction: {txn['age_sec']}s (PID {txn['pid']})",
             "detail": f"Rows locked: {txn.get('rows_locked', 0)}, modified: {txn.get('rows_modified', 0)}",
             "query_preview": (txn.get("trx_query") or "idle")[:100],
@@ -626,7 +626,7 @@ def dashboard_todo(request: Request, server: str = None):
                 f"{(t['io_sec'] or 0):.2f}s IO)"
             )
         insights.append({
-            "icon": "&#128293;",
+            "icon": "🔥",
             "title": "Table Hotspots (by IO)",
             "lines": hotspot_lines,
         })
@@ -647,7 +647,7 @@ def dashboard_todo(request: Request, server: str = None):
         lines = [f"{r['cnt']}x | avg {(r['avg_time'] or 0):.2f}s | max {(r['max_time'] or 0):.2f}s | {r['sql_text'][:80]}"
                  for r in slow_repeaters]
         insights.append({
-            "icon": "&#128034;",
+            "icon": "🐢",
             "title": "Slow Query Log Repeaters (24h)",
             "lines": lines,
         })
@@ -672,7 +672,7 @@ def dashboard_todo(request: Request, server: str = None):
                 + (f" — high index overhead ({s['idx_ratio']:.1f}x)" if s["idx_ratio"] and s["idx_ratio"] > 1.5 else "")
             )
         insights.append({
-            "icon": "&#128190;",
+            "icon": "💾",
             "title": "Largest Tables",
             "lines": lines,
         })
@@ -698,7 +698,7 @@ def dashboard_todo(request: Request, server: str = None):
     """)
     if peak and trough and peak.get("avg_qps") and trough.get("avg_qps"):
         insights.append({
-            "icon": "&#128200;",
+            "icon": "📈",
             "title": "Traffic Pattern (7d)",
             "lines": [
                 f"Peak hour: {peak['hour']}:00 UTC ({peak['avg_qps']:.0f} QPS avg)",
@@ -961,31 +961,31 @@ def _analyze_explain(explain: dict | None) -> list[dict]:
 
         if access_type == "ALL":
             signals.append({
-                "type": "error", "icon": "&#9888;",
+                "type": "error", "icon": "⚠",
                 "title": f"Full table scan on `{table_name}`",
                 "detail": f"Examining ~{rows_examined:,} rows without index. Add index on WHERE/JOIN columns.",
             })
         elif access_type == "index":
             signals.append({
-                "type": "warning", "icon": "&#128269;",
+                "type": "warning", "icon": "🔍",
                 "title": f"Full index scan on `{table_name}`",
                 "detail": "Scanning entire index. Need more selective WHERE or covering index.",
             })
         elif access_type in ("range", "ref", "eq_ref", "const", "system"):
             signals.append({
-                "type": "good", "icon": "&#9989;",
+                "type": "good", "icon": "✅",
                 "title": f"Good: `{access_type}` on `{table_name}`",
                 "detail": f"Using key: {key}" if key else "Efficient access.",
             })
         if using_filesort:
             signals.append({
-                "type": "warning", "icon": "&#128203;",
+                "type": "warning", "icon": "📋",
                 "title": f"Filesort on `{table_name}`",
                 "detail": "Extra sort pass. Consider index on ORDER BY columns.",
             })
         if using_temporary:
             signals.append({
-                "type": "warning", "icon": "&#128203;",
+                "type": "warning", "icon": "📋",
                 "title": f"Temp table for `{table_name}`",
                 "detail": "Temp table for GROUP BY/DISTINCT. Consider covering index.",
             })
