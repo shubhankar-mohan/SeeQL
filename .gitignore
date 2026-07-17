@@ -45,3 +45,7 @@ htmlcov/
 data/grandline_demo.db
 data/grandline_demo.db-*
 dist/
+
+# Internal working docs (local-only)
+RELEASE_AUDIT.md
+EXECUTION_PLAN.md
