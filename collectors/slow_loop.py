@@ -63,6 +63,12 @@ class SchemaSnapshotCollector(BaseCollector):
         with ctx.get_connection() as conn:
             cursor = conn.cursor(dictionary=True)
 
+            # MySQL's default group_concat_max_len (1024) silently truncates the
+            # column/index fingerprint on wide tables — a column added past the
+            # boundary would never change the hash (missed DDL). 1 MiB is enough
+            # for any real table definition. Session-scoped; no privilege needed.
+            cursor.execute("SET SESSION group_concat_max_len = 1048576")
+
             # 1. Schema fingerprints
             cursor.execute(queries.SCHEMA_FINGERPRINT.format(excluded_schemas=excluded))
             schema_fps = {

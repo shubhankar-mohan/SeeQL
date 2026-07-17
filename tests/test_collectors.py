@@ -175,6 +175,80 @@ class TestGlobalStatusCollector:
             assert row["server_id"] == "test-server"
 
 
+class TestSchemaSnapshotCollectorGroupConcat:
+    """P1b-2: wide-table DDL fingerprints must not silently truncate.
+
+    MySQL's default group_concat_max_len (1024 bytes) truncates the
+    GROUP_CONCAT() output SCHEMA_FINGERPRINT/INDEX_FINGERPRINT build their
+    MD5 hash from. Past ~60-70 columns, the concatenated string is cut at a
+    fixed byte boundary, so a column added beyond that boundary never
+    changes the hash and the DDL change goes undetected. The collector must
+    raise the session limit before running the fingerprint queries.
+    """
+
+    def test_group_concat_max_len_set_before_schema_fingerprint(self):
+        # Minimal, self-contained recording cursor/connection (does not
+        # reuse `_mock_cursor_with_data`, which only stubs `fetchall()` and
+        # can't assert call *order*). Mirrors the record-execute-calls
+        # pattern in tests/test_identifier_validation.py.
+        class _RecordingCursor:
+            def __init__(self):
+                self.executed: list[str] = []
+
+            def execute(self, sql, *args, **kwargs):
+                self.executed.append(sql)
+
+            def fetchall(self):
+                # Empty result set for every query keeps this test focused
+                # purely on statement ordering: no rows means the collector
+                # never reaches its DDL-diff branch or calls conn.cursor()
+                # a second time for SHOW CREATE TABLE.
+                return []
+
+            def fetchone(self):
+                return None
+
+        class _RecordingConnection:
+            def __init__(self, cursor):
+                self._cursor = cursor
+
+            def cursor(self, *args, **kwargs):
+                return self._cursor
+
+        recording_cursor = _RecordingCursor()
+        mock_conn = _RecordingConnection(recording_cursor)
+
+        ctx = MagicMock()
+        ctx.server_id = "test-server"
+        ctx.get_connection.return_value.__enter__.return_value = mock_conn
+        ctx.get_connection.return_value.__exit__.return_value = False
+
+        collector = SchemaSnapshotCollector()
+        # Pre-seed so collect() skips _load_previous_hashes(), which reads
+        # the real monitoring SQLite DB via get_mon_reader() — unrelated to
+        # what this test verifies (production-cursor statement ordering).
+        collector._initialized.add(ctx.server_id)
+
+        collector.collect(_utcnow(), ctx)
+
+        executed = recording_cursor.executed
+        assert "SET SESSION group_concat_max_len = 1048576" in executed, (
+            f"group_concat_max_len was never raised; statements executed: {executed}"
+        )
+        set_idx = executed.index("SET SESSION group_concat_max_len = 1048576")
+
+        fingerprint_idx = next(
+            (i for i, sql in enumerate(executed) if "information_schema.COLUMNS" in sql),
+            None,
+        )
+        assert fingerprint_idx is not None, "SCHEMA_FINGERPRINT was never executed"
+
+        assert set_idx < fingerprint_idx, (
+            "group_concat_max_len must be raised BEFORE SCHEMA_FINGERPRINT runs, "
+            "otherwise wide-table fingerprints silently truncate"
+        )
+
+
 class TestMonitoringCredentialsSelfHeal:
     """Finding 5: a failed/transient credential resolution must NOT be cached.
 
