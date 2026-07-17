@@ -110,7 +110,7 @@ def _update_lock_metrics(conn):
     row = conn.execute("""
         SELECT COUNT(*) as cnt, COALESCE(MAX(wait_seconds), 0) as max_wait
         FROM lock_wait_snapshots
-        WHERE snapshot_time >= datetime('now', '-2 minutes')
+        WHERE datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-2 minutes')
     """).fetchone()
 
     if row:
