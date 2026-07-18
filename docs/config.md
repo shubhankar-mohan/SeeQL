@@ -143,8 +143,11 @@ This bounds the per-cycle cost of the fingerprint queries on schemas with
 many thousands of tables. Deferred tables are **logged** (a `WARNING` with
 the deferred count) rather than silently dropped, and are picked up on a
 later cycle as more-recently-changed tables clear the front of the queue.
-Schemas at or under the cap are completely unaffected — same queries as
-always.
+Only above the cap: the hash cache only retains tables actually processed
+that cycle, so a DDL change on a table while it sits deferred may be
+recorded as a fresh snapshot rather than an old→new `ddl_changes` diff the
+next time that table is processed. Schemas at or under the cap are
+completely unaffected — same queries as always.
 
 ## Retention
 

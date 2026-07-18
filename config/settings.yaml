@@ -56,6 +56,9 @@ slow_loop:
   # UPDATE_TIME DESC (NULLS LAST) and fingerprints/sizes at most this many
   # per cycle. Deferred tables are logged (never silently dropped) and get
   # picked up on a later cycle once more-recently-changed tables clear.
+  # Only above this cap: a DDL change on a table while it sits deferred may
+  # be recorded as a fresh snapshot rather than an old->new ddl_changes
+  # diff once that table is finally processed again.
   max_tables_per_cycle: 2000
 
 # --- Data Retention ---
