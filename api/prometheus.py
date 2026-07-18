@@ -117,6 +117,28 @@ def _is_fresh(conn, table: str, server_id: str) -> bool:
     return row is not None
 
 
+def _heartbeat_fresh(conn, server_id: str) -> bool:
+    """
+    True if the collector heartbeat (global_status_snapshots, written every
+    medium-loop cycle regardless of whether anything interesting happened)
+    has a recent row for server_id.
+
+    Sparse/event tables — lock_wait_snapshots, unused_index_snapshots,
+    redundant_index_snapshots — only gain a row when their collector
+    actually finds something to report (a lock wait, an unused/redundant
+    index). "No row in the freshness window" is therefore consistent with
+    *both* "the collector died" *and* "the collector is healthy and
+    correctly found nothing to report" — gating those gauges on their own
+    table's freshness can't tell the two apart, so a perfectly healthy,
+    quiet server wrongly goes absent instead of reporting a true 0 (M1).
+
+    Gate those gauges on this heartbeat instead: heartbeat fresh + no
+    sparse rows => report a true 0 (healthy, quiet). Heartbeat stale => the
+    collector itself is dead => absent, same as every other gauge.
+    """
+    return _is_fresh(conn, "global_status_snapshots", server_id)
+
+
 def _clear(*gauges, server_id: str) -> None:
     """
     Drop `server_id`'s child from each gauge so a stale reading disappears
@@ -222,12 +244,14 @@ def _update_server_metrics(conn, server_id):
 
 
 def _update_lock_metrics(conn, server_id):
-    # Freshness here is gated on ANY lock_wait_snapshots row for this server
-    # (not just one inside the 2-minute "current" window below) — the
-    # LockWaitCollector only inserts rows when contention actually exists,
-    # so a long quiet period and a dead collector look identical from this
-    # table alone. See task-2.7-report.md for the tradeoff this implies.
-    if not _is_fresh(conn, "lock_wait_snapshots", server_id):
+    # lock_wait_snapshots is sparse (LockWaitCollector only inserts rows
+    # when contention actually exists), so gate on the collector heartbeat
+    # (global_status_snapshots) instead of this table's own freshness —
+    # see _heartbeat_fresh's docstring and task-2.7-report.md /
+    # task-2.9-fixwave-report.md for the "quiet vs dead" ambiguity this
+    # resolves (M1). Heartbeat alive + no rows in the window below just
+    # means "0 lock waits right now", not "collector dead".
+    if not _heartbeat_fresh(conn, server_id):
         _clear(mysql_lock_waits_current, mysql_lock_wait_max_seconds, server_id=server_id)
         return
 
@@ -316,37 +340,34 @@ def _update_gcp_metrics(conn, server_id):
 
 
 def _update_index_metrics(conn, server_id):
-    # Unused/redundant indexes are gated independently: the slow-loop
-    # collectors only write a row when they actually find one, so each
-    # table's own freshness is checked separately rather than sharing one
-    # gate (see task-2.7-report.md for the same "sparse table" caveat as
-    # _update_lock_metrics above — a quiet, healthy result and a dead
-    # collector both look like "no recent row" here).
-    if not _is_fresh(conn, "unused_index_snapshots", server_id):
-        _clear(mysql_unused_indexes, server_id=server_id)
-    else:
-        row = conn.execute("""
-            SELECT COUNT(*) as cnt FROM unused_index_snapshots
-            WHERE server_id = ?
-              AND snapshot_time = (
-                  SELECT MAX(snapshot_time) FROM unused_index_snapshots WHERE server_id = ?
-              )
-        """, (server_id, server_id)).fetchone()
-        if row:
-            mysql_unused_indexes.labels(server=server_id).set(row["cnt"])
+    # unused_index_snapshots / redundant_index_snapshots are sparse — the
+    # slow-loop collectors only write a row when they actually flag one —
+    # so gate both on the collector heartbeat (global_status_snapshots)
+    # instead of each table's own freshness. Same "quiet vs dead"
+    # ambiguity _update_lock_metrics resolves above (M1): heartbeat alive +
+    # zero matching rows means "0 unused/redundant indexes right now", not
+    # "collector dead".
+    if not _heartbeat_fresh(conn, server_id):
+        _clear(mysql_unused_indexes, mysql_redundant_indexes, server_id=server_id)
+        return
 
-    if not _is_fresh(conn, "redundant_index_snapshots", server_id):
-        _clear(mysql_redundant_indexes, server_id=server_id)
-    else:
-        row = conn.execute("""
-            SELECT COUNT(*) as cnt FROM redundant_index_snapshots
-            WHERE server_id = ?
-              AND snapshot_time = (
-                  SELECT MAX(snapshot_time) FROM redundant_index_snapshots WHERE server_id = ?
-              )
-        """, (server_id, server_id)).fetchone()
-        if row:
-            mysql_redundant_indexes.labels(server=server_id).set(row["cnt"])
+    row = conn.execute("""
+        SELECT COUNT(*) as cnt FROM unused_index_snapshots
+        WHERE server_id = ?
+          AND snapshot_time = (
+              SELECT MAX(snapshot_time) FROM unused_index_snapshots WHERE server_id = ?
+          )
+    """, (server_id, server_id)).fetchone()
+    mysql_unused_indexes.labels(server=server_id).set(row["cnt"] if row else 0)
+
+    row = conn.execute("""
+        SELECT COUNT(*) as cnt FROM redundant_index_snapshots
+        WHERE server_id = ?
+          AND snapshot_time = (
+              SELECT MAX(snapshot_time) FROM redundant_index_snapshots WHERE server_id = ?
+          )
+    """, (server_id, server_id)).fetchone()
+    mysql_redundant_indexes.labels(server=server_id).set(row["cnt"] if row else 0)
 
 
 def _update_innodb_metrics(conn, server_id):

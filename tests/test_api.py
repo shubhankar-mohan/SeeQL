@@ -359,6 +359,21 @@ class TestPrometheusMetrics:
                     return True
         return False
 
+    @staticmethod
+    def _sample_value(metric_name: str, **labels):
+        """Same lookup as _has_sample, but returns the sample's numeric
+        value (or None if absent) so a test can assert "present AND equal
+        to 0" rather than just "present" — a gauge that's absent and a
+        gauge that's present-but-wrong both need to fail this check."""
+        from prometheus_client import REGISTRY
+        for family in REGISTRY.collect():
+            for sample in family.samples:
+                if sample.name == metric_name and all(
+                    sample.labels.get(k) == v for k, v in labels.items()
+                ):
+                    return sample.value
+        return None
+
     def test_stale_data_dropped_and_freshness_exported(self, api_client):
         """P1c-4: a row older than the freshness window must not be served
         as a live gauge value forever, but the collection-freshness signal
@@ -476,3 +491,60 @@ class TestPrometheusMetrics:
         resp = api_client.get("/metrics")
         assert resp.status_code == 200
         assert not self._has_sample("mysql_threads_running", server="server_transient")
+
+    def test_lock_gauge_reports_zero_when_quiet_but_heartbeat_alive(self, api_client):
+        """M1: lock_wait_snapshots is a sparse/event table — LockWaitCollector
+        only inserts a row when contention actually exists, so "no row in
+        the last 10 minutes" is consistent with both "the collector died"
+        and "the collector is healthy and correctly found nothing to
+        report" (see task-2.7-report.md's sparse-table caveat). Gating on
+        lock_wait_snapshots' own freshness can't tell these apart, so a
+        perfectly healthy, quiet server wrongly goes ABSENT instead of
+        reporting a true 0.
+
+        Fix: gate on the collector heartbeat (global_status_snapshots,
+        written every medium-loop cycle regardless of outcome) instead.
+        Heartbeat fresh + zero lock rows => present, value 0. Heartbeat
+        stale => the collector itself is dead => absent, same as every
+        other gauge in this module.
+        """
+        import sqlite3
+        import config as config_module
+        import api.prometheus as prom
+
+        config_module._config["servers"] = {"server_lockheartbeat": {"display_name": "LockHeartbeat"}}
+
+        db_path = config_module._config["monitoring_db"]["path"]
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """INSERT INTO global_status_snapshots
+               (snapshot_time, server_id, variable_name, raw_value)
+               VALUES (datetime('now'), 'server_lockheartbeat', 'Threads_running', 5)"""
+        )
+        # Deliberately no lock_wait_snapshots row: this server has been
+        # quiet (healthy), not dead.
+        conn.commit()
+        conn.close()
+
+        prom._last_update = 0
+        resp = api_client.get("/metrics")
+        assert resp.status_code == 200
+        assert self._has_sample("mysql_lock_waits_current", server="server_lockheartbeat")
+        assert self._sample_value("mysql_lock_waits_current", server="server_lockheartbeat") == 0
+
+        # Now the heartbeat itself goes stale — the collector for this
+        # server has actually stopped. Age global_status_snapshots, not
+        # lock_wait_snapshots (which never had a row to begin with).
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """UPDATE global_status_snapshots
+               SET snapshot_time = datetime('now','-30 minutes')
+               WHERE server_id = 'server_lockheartbeat'"""
+        )
+        conn.commit()
+        conn.close()
+
+        prom._last_update = 0
+        resp = api_client.get("/metrics")
+        assert resp.status_code == 200
+        assert not self._has_sample("mysql_lock_waits_current", server="server_lockheartbeat")
