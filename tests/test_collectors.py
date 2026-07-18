@@ -249,6 +249,118 @@ class TestSchemaSnapshotCollectorGroupConcat:
         )
 
 
+class TestSchemaSnapshotCollectorCrashSafety:
+    """P1b-6: the in-memory hash cache must only advance after store()
+    durably writes the new snapshot + DDL change rows.
+
+    Bug: the old collect() assigned self._previous_hashes[sid] to the NEW
+    hashes as its very last step, before store() ever ran. If store() then
+    raised (SQLite disk full, a lock timeout, a crash mid-write), the cache
+    was already advanced — the next cycle compares against a hash that was
+    never durably recorded, so the DDL change is lost forever. Fix:
+    collect() returns the candidate new hashes without touching
+    self._previous_hashes; store() only assigns them after a successful
+    write.
+    """
+
+    @staticmethod
+    def _multi_fetchall_conn(data_sequence):
+        """Mock connection: cursor.fetchall() returns a different list per
+        call (fingerprints, indexes, table sizes); cursor.fetchone() backs
+        the SHOW CREATE TABLE lookup issued when a change is detected."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchall.side_effect = [[row.copy() for row in d] for d in data_sequence]
+        cursor.fetchone.return_value = (
+            "loyalty_members", "CREATE TABLE `loyalty_members` (id BIGINT)",
+        )
+        conn.cursor.return_value = cursor
+        return conn
+
+    def _ctx(self, server_id):
+        conn = self._multi_fetchall_conn(
+            [MOCK_SCHEMA_FINGERPRINT, MOCK_INDEX_FINGERPRINT, MOCK_TABLE_SIZES]
+        )
+        ctx = MagicMock()
+        ctx.server_id = server_id
+        ctx.get_connection.return_value.__enter__.return_value = conn
+        ctx.get_connection.return_value.__exit__.return_value = False
+        return ctx
+
+    def test_failed_store_does_not_advance_cache_change_is_redetected(self, monkeypatch):
+        sid = "test-server"
+        collector = SchemaSnapshotCollector()
+        collector._initialized.add(sid)  # skip _load_previous_hashes (real SQLite read)
+
+        # Seed a "previous" snapshot where loyalty_members' schema_hash
+        # differs from MOCK_SCHEMA_FINGERPRINT's "abc123hash" — collect()
+        # will detect this as a DDL change. `users` matches exactly (no
+        # change), isolating a single detected change for the test.
+        pre_store_cache = {
+            ("mydb", "loyalty_members"): {
+                "schema_hash": "OLD_HASH_BEFORE_DDL_CHANGE",
+                "index_hash": "idx_abc123",
+                "create_stmt": "CREATE TABLE loyalty_members (old)",
+            },
+            ("mydb", "users"): {
+                "schema_hash": "def456hash",
+                "index_hash": "idx_def456",
+                "create_stmt": "CREATE TABLE users (...)",
+            },
+        }
+        collector._previous_hashes[sid] = pre_store_cache
+
+        data = collector.collect(_utcnow(), self._ctx(sid))
+
+        # Sanity: the change was actually detected.
+        assert len(data["changes"]) == 1
+        assert data["changes"][0]["table_name"] == "loyalty_members"
+
+        # THE BUG, pinned: collect() alone must not mutate the cache — it
+        # must still be the exact pre-collect() object. Pre-fix, collect()
+        # had already rebound self._previous_hashes[sid] to the new hashes
+        # by this point, so this assertion is what fails RED.
+        assert collector._previous_hashes[sid] is pre_store_cache
+
+        assert data["sid"] == sid
+        assert data["new_hashes"][("mydb", "loyalty_members")]["schema_hash"] == "abc123hash"
+
+        # store() raises — simulate a crash / disk-full mid-write.
+        monkeypatch.setattr(
+            "storage.writer.write_schema_and_changes",
+            MagicMock(side_effect=RuntimeError("simulated store failure")),
+        )
+        with pytest.raises(RuntimeError, match="simulated store failure"):
+            collector.store(data)
+
+        # Cache must remain untouched after the failed store — not
+        # partially advanced.
+        assert collector._previous_hashes[sid] is pre_store_cache
+        assert (
+            collector._previous_hashes[sid][("mydb", "loyalty_members")]["schema_hash"]
+            == "OLD_HASH_BEFORE_DDL_CHANGE"
+        )
+
+        # Next cycle: since the cache never advanced, the SAME change is
+        # re-detected — nothing was silently lost.
+        data2 = collector.collect(_utcnow(), self._ctx(sid))
+        assert len(data2["changes"]) == 1
+        assert data2["changes"][0]["table_name"] == "loyalty_members"
+
+        # This time store() succeeds — the cache should advance now, and
+        # only now.
+        monkeypatch.setattr(
+            "storage.writer.write_schema_and_changes",
+            MagicMock(return_value=len(data2["snapshots"]) + len(data2["changes"])),
+        )
+        collector.store(data2)
+
+        assert (
+            collector._previous_hashes[sid][("mydb", "loyalty_members")]["schema_hash"]
+            == "abc123hash"
+        )
+
+
 class TestMonitoringCredentialsSelfHeal:
     """Finding 5: a failed/transient credential resolution must NOT be cached.
 

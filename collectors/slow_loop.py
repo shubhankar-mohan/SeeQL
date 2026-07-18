@@ -157,8 +157,15 @@ class SchemaSnapshotCollector(BaseCollector):
 
                 snapshot_rows.append(snapshot_row)
 
-        # 5. Update cache for next run
-        self._previous_hashes[sid] = {
+        # 5. Build the next-cycle hash cache, but do NOT install it yet.
+        # (P1b-6) self._previous_hashes must only advance once store() has
+        # durably written these rows — installing it here, before store()
+        # even runs, means a store() failure (crash, disk full, SQLite
+        # error) still leaves the cache pointing at the new hashes, so the
+        # next cycle diffs against a change it never actually recorded and
+        # the DDL change is lost forever. store() assigns this after a
+        # successful write.
+        new_hashes = {
             (r["table_schema"], r["table_name"]): {
                 "schema_hash": r["schema_hash"],
                 "index_hash": r["index_hash"],
@@ -167,12 +174,23 @@ class SchemaSnapshotCollector(BaseCollector):
             for r in snapshot_rows
         }
 
-        return {"snapshots": snapshot_rows, "changes": changes}
+        return {
+            "snapshots": snapshot_rows,
+            "changes": changes,
+            "new_hashes": new_hashes,
+            "sid": sid,
+        }
 
     def store(self, data: dict) -> None:
-        writer.write_schema_snapshots(data["snapshots"])
+        # Single transaction for both tables (P1b-6) — see
+        # storage.writer.write_schema_and_changes for why.
+        writer.write_schema_and_changes(data["snapshots"], data["changes"])
+        # Only advance the cache after the write above returns successfully
+        # — if it raised, this line never runs and self._previous_hashes
+        # stays at its pre-store value, so the next collect() re-detects
+        # the same change instead of silently losing it.
+        self._previous_hashes[data["sid"]] = data["new_hashes"]
         if data["changes"]:
-            writer.write_ddl_changes(data["changes"])
             logger.info(f"Logged {len(data['changes'])} DDL change(s)")
 
     def _get_create_table(self, conn, schema: str, table: str) -> str | None:

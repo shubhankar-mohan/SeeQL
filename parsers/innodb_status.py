@@ -20,9 +20,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Section headers in INNODB STATUS output
-SECTION_PATTERN = re.compile(r"^-+\n(.+?)\n-+$", re.MULTILINE)
-
 # Known section names
 KNOWN_SECTIONS = [
     "BACKGROUND THREAD",
