@@ -29,12 +29,41 @@ def test_t_separator_window_comparison():
 
 
 def test_no_unwrapped_now_comparisons():
-    """Repo guard: no query may compare a T-format column to datetime('now') unwrapped."""
+    """Repo guard: no query may compare a T-format column to datetime('now') unwrapped.
+
+    Scans every production *.py file (excluding tests/ and venv/) under the
+    packages listed in PROD_DIRS below, not just a fixed 5-file spot check,
+    so a new collector/route/tool can't reintroduce the bug unnoticed.
+
+    tests/test_seed_demo.py and tests/test_timestamp_comparison.py contain
+    intentional unwrapped demonstrations of the bug and are out of scope
+    (they live under tests/, which this guard does not walk).
+    """
     import re
     import pathlib
+
+    repo_root = pathlib.Path(__file__).resolve().parent.parent
+    prod_dirs = [
+        "agent", "alerting", "api", "collectors", "parsers",
+        "storage", "scheduler", "config", "mcp_server", "seeql",
+    ]
+    cols = r"(snapshot_time|analyzed_at|detected_at|captured_at)"
+    comparison_re = re.compile(cols + r"\s*(>=|<=|<|>)\s*datetime\('now'")
+    between_re = re.compile(cols + r"\s+BETWEEN\s+datetime\('now'")
+
     bad = []
-    for f in ["agent/queries.py", "api/prometheus.py", "api/dashboard_api.py", "alerting/rules.py", "alerting/anomaly.py"]:
-        src = pathlib.Path(f).read_text()
-        for m in re.finditer(r"(snapshot_time|analyzed_at|detected_at|captured_at)\s*(>=|<=|<|>)\s*datetime\('now'", src):
-            bad.append((f, m.group(0)))
+    for d in prod_dirs:
+        base = repo_root / d
+        if not base.exists():
+            continue
+        for path in sorted(base.rglob("*.py")):
+            parts = path.relative_to(repo_root).parts
+            if "tests" in parts or "venv" in parts:
+                continue
+            src = path.read_text()
+            rel = str(path.relative_to(repo_root))
+            for m in comparison_re.finditer(src):
+                bad.append((rel, m.group(0)))
+            for m in between_re.finditer(src):
+                bad.append((rel, m.group(0)))
     assert not bad, f"unwrapped T-format comparisons: {bad}"
