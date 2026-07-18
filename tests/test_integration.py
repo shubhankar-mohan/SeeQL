@@ -23,6 +23,7 @@ from tests.fixtures.mysql_mock_data import (
     MOCK_SCHEMA_FINGERPRINT,
     MOCK_INDEX_FINGERPRINT,
     MOCK_TABLE_SIZES,
+    MOCK_TABLE_DISCOVERY,
 )
 
 
@@ -226,10 +227,11 @@ class TestFullCycleIntegration:
         reader_cm.__exit__.return_value = False
         mock_get_mon_reader.return_value = reader_cm
 
-        # schema_snapshot makes 3 fetchall calls on one cursor (fingerprints,
-        # indexes, table sizes). With no previous hashes, no SHOW CREATE TABLE.
+        # schema_snapshot makes 4 fetchall calls on one cursor (P1b-7 table
+        # discovery, then fingerprints, indexes, table sizes). With no
+        # previous hashes, no SHOW CREATE TABLE.
         schema_conn = self._multi_fetchall_conn([
-            MOCK_SCHEMA_FINGERPRINT, MOCK_INDEX_FINGERPRINT, MOCK_TABLE_SIZES,
+            MOCK_TABLE_DISCOVERY, MOCK_SCHEMA_FINGERPRINT, MOCK_INDEX_FINGERPRINT, MOCK_TABLE_SIZES,
         ])
 
         # Collector order: schema_snapshot, unused_indexes, redundant_indexes,

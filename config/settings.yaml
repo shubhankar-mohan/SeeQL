@@ -34,6 +34,14 @@ intervals:
   slow_loop: 1800         # Table sizes, index usage, schema snapshots, variables
   retention_loop: 86400   # Daily retention cleanup
 
+# --- Scheduler / Fleet Resilience (P1b-4) ---
+scheduler:
+  # A server that fails EVERY collector for 3 consecutive cycles trips a
+  # per-server circuit breaker and is skipped entirely for this many further
+  # cycles (instead of being retried, and re-timing-out, every cycle). See
+  # scheduler/runner.py's _run_loop_over_servers.
+  circuit_reset_cycles: 10
+
 # --- Collection Limits ---
 limits:
   top_queries: 50         # How many top queries to capture per digest snapshot
@@ -41,6 +49,14 @@ limits:
   processlist_query_max_len: 500   # Truncate long queries in processlist
   digest_text_max_len: 1024        # Truncate digest text for storage (was 200, too short for EXPLAIN)
   max_batch_size: 500              # Max rows per batch insert
+
+# --- Slow Loop Guardrails (P1b-7) ---
+slow_loop:
+  # Large-schema guardrail: the schema-snapshot collector orders tables by
+  # UPDATE_TIME DESC (NULLS LAST) and fingerprints/sizes at most this many
+  # per cycle. Deferred tables are logged (never silently dropped) and get
+  # picked up on a later cycle once more-recently-changed tables clear.
+  max_tables_per_cycle: 2000
 
 # --- Data Retention ---
 retention:

@@ -8,8 +8,13 @@ Uses APScheduler to run collection loops at configured intervals:
     - Agent analysis (15m): LLM-powered analysis of collected data
     - Retention (24h): delete old data
 
-Multi-server: each loop iterates over all active servers.
-One server failing does not stop collection for others.
+Multi-server fleet resilience (P1b-4): each loop runs its servers
+concurrently (a ThreadPoolExecutor, up to 4 at once) so one slow or
+unreachable server cannot starve the others within a single cycle — see
+_run_loop_over_servers. A server that fails EVERY collector for 3
+consecutive cycles trips a per-server circuit breaker and is skipped
+entirely for `scheduler.circuit_reset_cycles` (default 10) further cycles,
+instead of being retried (and re-timing-out) every time.
 
 Shutdown: SIGTERM (Docker) and SIGINT (Ctrl+C) trigger a graceful shutdown
 via a threading.Event. In-flight jobs finish, then the SQLite WAL is
@@ -19,6 +24,7 @@ checkpointed (TRUNCATE) to guarantee no pending writes are lost on restart.
 import logging
 import signal
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -33,6 +39,34 @@ logger = logging.getLogger(__name__)
 
 _scheduler_instance: BackgroundScheduler | None = None
 _shutdown_event = threading.Event()
+
+# ---------------------------------------------------------------------------
+# Fleet resilience: per-server circuit breaker (P1b-4)
+# ---------------------------------------------------------------------------
+# A fully unreachable server can burn (MAX_RETRIES + 1) x connect_timeout
+# PER COLLECTOR in BaseCollector.run()'s retry loop — long enough to eat
+# most of a single fast-loop interval if collectors are tried in turn. Two
+# independent mitigations, both scoped by server_id only (not per loop type
+# — connectivity is a property of the server, not of which loop noticed it
+# first):
+#
+#   1. Per-server work within one loop invocation runs concurrently (see
+#      _run_loop_over_servers), so one stuck server can't delay the others.
+#   2. A server that fails EVERY collector for CIRCUIT_FAILURE_THRESHOLD
+#      consecutive cycles is skipped entirely ("circuit open") for
+#      `scheduler.circuit_reset_cycles` more cycles rather than retried (and
+#      re-timing-out) every single cycle.
+#
+# "Cycle" is one shared counter incremented once per call to _run_fast /
+# _run_medium / _run_slow, whichever fires next — it is not partitioned by
+# loop type, matching the per-server (not per-loop) dicts below.
+CIRCUIT_FAILURE_THRESHOLD = 3
+DEFAULT_CIRCUIT_RESET_CYCLES = 10
+
+_server_failures: dict[str, int] = {}
+_server_skip_until: dict[str, int] = {}
+_cycle_count = 0
+_circuit_lock = threading.Lock()
 
 
 def _install_signal_handlers():
@@ -76,6 +110,145 @@ def _get_server_contexts():
     return [s.to_context() for s in registry.get_active_servers()]
 
 
+def _get_circuit_reset_cycles() -> int:
+    return int(
+        get_config().get("scheduler", {}).get(
+            "circuit_reset_cycles", DEFAULT_CIRCUIT_RESET_CYCLES
+        )
+    )
+
+
+def _next_cycle() -> int:
+    """Advance and return the shared fleet-resilience cycle counter."""
+    global _cycle_count
+    with _circuit_lock:
+        _cycle_count += 1
+        return _cycle_count
+
+
+def _is_circuit_open(sid: str, cycle: int) -> bool:
+    """Whether `sid` is currently circuit-skipped.
+
+    Also closes the circuit (pops the stale entry) once its cycle window has
+    elapsed. Without this, a server that fails again right after the retry
+    would stay permanently exempt from re-tripping: `_record_server_failure`
+    only opens the circuit when `sid not in _server_skip_until`, and a
+    lingering expired entry would satisfy "sid in _server_skip_until"
+    forever even though `_is_circuit_open` itself no longer reports it open.
+    """
+    with _circuit_lock:
+        skip_until = _server_skip_until.get(sid)
+        if skip_until is None:
+            return False
+        if cycle >= skip_until:
+            del _server_skip_until[sid]
+            return False
+        return True
+
+
+def _record_server_success(sid: str) -> None:
+    """At least one collector succeeded this cycle: reset the failure streak
+    and close the circuit if one was open."""
+    with _circuit_lock:
+        _server_failures.pop(sid, None)
+        was_open = _server_skip_until.pop(sid, None) is not None
+    if was_open:
+        logger.info(f"circuit closed for {sid}: collection succeeded again")
+
+
+def _record_server_failure(sid: str, cycle: int) -> None:
+    """EVERY collector failed this cycle: extend the failure streak, opening
+    the circuit once it reaches CIRCUIT_FAILURE_THRESHOLD consecutive
+    all-fail cycles."""
+    reset_cycles = _get_circuit_reset_cycles()
+    should_open = False
+    with _circuit_lock:
+        count = _server_failures.get(sid, 0) + 1
+        _server_failures[sid] = count
+        if count >= CIRCUIT_FAILURE_THRESHOLD and sid not in _server_skip_until:
+            _server_skip_until[sid] = cycle + reset_cycles
+            should_open = True
+    if should_open:
+        logger.warning(f"circuit open for {sid}: skipping {reset_cycles} cycles")
+
+
+def _run_loop_over_servers(run_loop_fn, loop_name: str, per_server_hook=None) -> None:
+    """Run `run_loop_fn(ctx)` for every active, non-circuit-open server.
+
+    Each server's collectors run in their own worker thread
+    (max_workers=min(4, N)) so one unreachable server — which can burn most
+    of a fast-loop interval retrying — cannot delay the others (P1b-4).
+
+    Thread-safety: `run_loop_fn` (run_fast_loop / run_medium_loop /
+    run_slow_loop) receives server identity ONLY through the explicit `ctx`
+    argument passed to it here — never through a ContextVar or module
+    global — and each collector opens its own MySQL connection off that
+    `ctx` (see ServerContext.get_connection / collectors/base.py). So each
+    worker thread reads/writes only data reachable from its own `ctx`; there
+    is no shared mutable per-server state for two workers to race on. The
+    module-level circuit-breaker dicts ARE shared, but every access goes
+    through _circuit_lock above. storage.writer's write_* functions (called
+    from `store()`) serialize through the monitoring DB's own connection
+    handling, same as before this change — collectors were never guaranteed
+    single-threaded there, only single-server-at-a-time.
+
+    `per_server_hook`, if given, runs synchronously in the same worker right
+    after that server's loop call returns (the medium loop's anomaly
+    pipeline). It sets/resets the agent.tools server ContextVar itself,
+    scoped to its own call and reset in a `finally` (see
+    agent/llm_agent.py's run_analysis) — safe to invoke from whichever
+    worker thread happens to run it, since a ContextVar written in one
+    thread is invisible to another thread's Context by default, and the
+    thread that sets it is also the one that resets it. A hook exception is
+    caught here and logged; it does not affect this server's circuit-breaker
+    outcome (only run_loop_fn's own result decides success/failure).
+    """
+    cycle = _next_cycle()
+    label = loop_name.title()
+
+    eligible = []
+    for ctx in _get_server_contexts():
+        if _is_circuit_open(ctx.server_id, cycle):
+            logger.debug(f"{label} loop: circuit open for {ctx.server_id}, skipping this cycle")
+            continue
+        eligible.append(ctx)
+
+    if not eligible:
+        return
+
+    def _process(ctx) -> None:
+        sid = ctx.server_id
+        total_failure = True
+        try:
+            results = run_loop_fn(ctx)
+            total_failure = bool(results) and all(not ok for ok in results.values())
+            failures = [name for name, ok in results.items() if not ok]
+            if failures:
+                logger.warning(f"{label} loop failures [{sid}]: {failures}")
+        except Exception as e:
+            logger.error(f"{label} loop failed for {sid}: {e}")
+
+        if total_failure:
+            _record_server_failure(sid, cycle)
+        else:
+            _record_server_success(sid)
+
+        if per_server_hook is not None:
+            try:
+                per_server_hook(sid)
+            except Exception as e:
+                logger.error(f"{label} loop post-hook failed for {sid}: {e}")
+
+    with ThreadPoolExecutor(max_workers=min(4, len(eligible))) as pool:
+        futures = {pool.submit(_process, ctx): ctx.server_id for ctx in eligible}
+        for future in as_completed(futures):
+            sid = futures[future]
+            try:
+                future.result()
+            except Exception as e:
+                logger.error(f"{label} loop: unexpected error processing {sid}: {e}")
+
+
 def _run_alerts(loop_name: str = "fast"):
     """Evaluate alert rules after a collection loop."""
     try:
@@ -95,30 +268,17 @@ def _update_prom_metrics():
 
 
 def _run_fast():
-    for ctx in _get_server_contexts():
-        try:
-            results = run_fast_loop(ctx)
-            failures = [name for name, ok in results.items() if not ok]
-            if failures:
-                logger.warning(f"Fast loop failures [{ctx.server_id}]: {failures}")
-        except Exception as e:
-            logger.error(f"Fast loop failed for {ctx.server_id}: {e}")
+    _run_loop_over_servers(run_fast_loop, "fast")
     _run_alerts("fast")
     _update_prom_metrics()
 
 
 def _run_medium():
-    for ctx in _get_server_contexts():
-        try:
-            results = run_medium_loop(ctx)
-            failures = [name for name, ok in results.items() if not ok]
-            if failures:
-                logger.warning(f"Medium loop failures [{ctx.server_id}]: {failures}")
-            # Anomaly pipeline: detect → persist → group into incidents.
-            # Runs per-server so one slow detector doesn't block another.
-            _run_anomaly_pipeline(ctx.server_id)
-        except Exception as e:
-            logger.error(f"Medium loop failed for {ctx.server_id}: {e}")
+    # Anomaly pipeline (detect → persist → group into incidents) runs as
+    # this loop's per_server_hook: same worker thread as that server's
+    # collectors, right after they complete, so one slow detector still
+    # can't block another SERVER — it can only add to its own server's time.
+    _run_loop_over_servers(run_medium_loop, "medium", per_server_hook=_run_anomaly_pipeline)
     _run_alerts("medium")
     _update_prom_metrics()
 
@@ -196,14 +356,7 @@ def _trigger_incident_analyses(server_id: str, incident_ids: list[int]):
 
 
 def _run_slow():
-    for ctx in _get_server_contexts():
-        try:
-            results = run_slow_loop(ctx)
-            failures = [name for name, ok in results.items() if not ok]
-            if failures:
-                logger.warning(f"Slow loop failures [{ctx.server_id}]: {failures}")
-        except Exception as e:
-            logger.error(f"Slow loop failed for {ctx.server_id}: {e}")
+    _run_loop_over_servers(run_slow_loop, "slow")
 
 
 def _run_retention():

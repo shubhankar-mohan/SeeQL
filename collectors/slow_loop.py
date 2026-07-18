@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 from collectors.base import BaseCollector
 from collectors import queries
-from config import get_excluded_schemas_sql
+from config import get_config, get_excluded_schemas_sql
 from storage.connection import get_mon_reader
 from storage import writer
 
@@ -24,6 +24,69 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_MAX_TABLES_PER_CYCLE = 2000
+
+
+def _cap_tables_by_recency(
+    rows: list[dict], max_tables: int
+) -> tuple[list[tuple[str, str]], int]:
+    """Order discovered tables by UPDATE_TIME DESC with NULLS LAST, and cap
+    to at most `max_tables` (P1b-7 large-schema guardrail).
+
+    NULLS LAST: a table with no UPDATE_TIME (MEMORY tables, or any storage
+    engine/case that doesn't track it) sorts after every timestamped table
+    instead of winning "most recently changed" purely by missing data.
+
+    Splitting into two lists + concatenating avoids trying to encode both a
+    descending sort (recent first) AND an ascending "is-it-null" sort in a
+    single tuple key/reverse flag, which conflict; it's also agnostic to
+    whether update_time is a real datetime (production) or an
+    ISO-formatted string (test fixtures) — both support plain `<`/`>`.
+
+    Returns (selected_keys, deferred_count): `selected_keys` is the ordered,
+    capped list of (table_schema, table_name); `deferred_count` is how many
+    discovered tables did NOT make the cut this cycle.
+    """
+    with_ts = [r for r in rows if r.get("update_time") is not None]
+    without_ts = [r for r in rows if r.get("update_time") is None]
+    with_ts.sort(key=lambda r: r["update_time"], reverse=True)
+    ordered = with_ts + without_ts
+
+    selected = ordered[:max_tables]
+    deferred_count = max(0, len(ordered) - max_tables)
+    selected_keys = [(r["table_schema"], r["table_name"]) for r in selected]
+    return selected_keys, deferred_count
+
+
+def _table_filter_clause(selected_keys: list[tuple[str, str]]) -> tuple[str, list]:
+    """Build a parameterized `(TABLE_SCHEMA, TABLE_NAME) IN (...)` clause
+    restricting a query to an explicit table subset, plus its flat param
+    list (schema, table, schema, table, ...).
+
+    Returns `("", [])` for an empty subset — the common case where the
+    schema is under the cap and no restriction is needed at all — so the
+    caller can render `{table_filter}` as a no-op blank line and leave the
+    query byte-for-byte what it was before this guardrail existed.
+    """
+    if not selected_keys:
+        return "", []
+    placeholders = ", ".join(["(%s, %s)"] * len(selected_keys))
+    params = [value for pair in selected_keys for value in pair]
+    return f"AND (TABLE_SCHEMA, TABLE_NAME) IN ({placeholders})", params
+
+
+def _run_filtered_query(cursor, template: str, excluded: str, table_filter: str, params: list):
+    """Render `template` with the excluded-schemas + table-filter clauses
+    and execute it, passing `params` only when the filter is non-empty —
+    keeps the common (unfiltered) call an exact `cursor.execute(sql)`, same
+    as before this guardrail existed."""
+    sql = template.format(excluded_schemas=excluded, table_filter=table_filter)
+    if params:
+        cursor.execute(sql, params)
+    else:
+        cursor.execute(sql)
+    return cursor.fetchall()
+
 
 class SchemaSnapshotCollector(BaseCollector):
     """
@@ -31,10 +94,14 @@ class SchemaSnapshotCollector(BaseCollector):
 
     Workflow:
         1. Load previous hashes from monitoring DB (first run only, per server).
-        2. Compute MD5 hash of column + index definitions per table.
-        3. Compare with previous hashes.
-        4. If changed → capture full SHOW CREATE TABLE and log the change.
-        5. Update cache for next run.
+        2. Discover the full table population and cap it to at most
+           `slow_loop.max_tables_per_cycle` tables, ordered by UPDATE_TIME
+           DESC / NULLS LAST (P1b-7 — large-schema guardrail; deferred
+           tables are logged, never silently dropped).
+        3. Compute MD5 hash of column + index definitions per selected table.
+        4. Compare with previous hashes.
+        5. If changed → capture full SHOW CREATE TABLE and log the change.
+        6. Update cache for next run.
 
     Multi-server: hashes are keyed by (server_id, schema, table).
     """
@@ -52,6 +119,9 @@ class SchemaSnapshotCollector(BaseCollector):
     def collect(self, now: datetime, ctx: ServerContext) -> dict:
         excluded = get_excluded_schemas_sql()
         sid = ctx.server_id
+        max_tables = get_config().get("slow_loop", {}).get(
+            "max_tables_per_cycle", DEFAULT_MAX_TABLES_PER_CYCLE
+        )
 
         # On first run for this server, load previous hashes from monitoring DB
         if sid not in self._initialized:
@@ -69,25 +139,52 @@ class SchemaSnapshotCollector(BaseCollector):
             # for any real table definition. Session-scoped; no privilege needed.
             cursor.execute("SET SESSION group_concat_max_len = 1048576")
 
+            # 0. Discover the full table population first (P1b-7 large-schema
+            # guardrail): a cheap, non-aggregating scan (no GROUP_CONCAT) whose
+            # row count tells us whether the fingerprint/size queries below —
+            # the genuinely expensive, per-column/per-index aggregations — need
+            # to be capped for this server this cycle.
+            cursor.execute(queries.TABLE_DISCOVERY.format(excluded_schemas=excluded))
+            discovered = cursor.fetchall()
+            selected_keys, deferred_count = _cap_tables_by_recency(discovered, max_tables)
+            if deferred_count:
+                logger.warning(
+                    f"slow_loop[{sid}]: {len(discovered)} tables found, processing "
+                    f"{len(selected_keys)} this cycle (slow_loop.max_tables_per_cycle="
+                    f"{max_tables}), deferring {deferred_count} to a later cycle"
+                )
+            # Only restrict the queries below when capping actually happened —
+            # the common case (schema at or under the cap) runs the exact same
+            # SQL as before this guardrail existed.
+            table_filter, table_filter_params = _table_filter_clause(
+                selected_keys if deferred_count else []
+            )
+
             # 1. Schema fingerprints
-            cursor.execute(queries.SCHEMA_FINGERPRINT.format(excluded_schemas=excluded))
             schema_fps = {
                 (r["table_schema"], r["table_name"]): r["schema_hash"]
-                for r in cursor.fetchall()
+                for r in _run_filtered_query(
+                    cursor, queries.SCHEMA_FINGERPRINT, excluded,
+                    table_filter, table_filter_params,
+                )
             }
 
             # 2. Index fingerprints
-            cursor.execute(queries.INDEX_FINGERPRINT.format(excluded_schemas=excluded))
             index_fps = {
                 (r["table_schema"], r["table_name"]): r["index_hash"]
-                for r in cursor.fetchall()
+                for r in _run_filtered_query(
+                    cursor, queries.INDEX_FINGERPRINT, excluded,
+                    table_filter, table_filter_params,
+                )
             }
 
             # 3. Table sizes
-            cursor.execute(queries.TABLE_SIZES.format(excluded_schemas=excluded))
             table_sizes = {
                 (r["table_schema"], r["table_name"]): r
-                for r in cursor.fetchall()
+                for r in _run_filtered_query(
+                    cursor, queries.TABLE_SIZES, excluded,
+                    table_filter, table_filter_params,
+                )
             }
 
             # 4. Detect changes and capture DDL

@@ -42,6 +42,7 @@ from tests.fixtures.mysql_mock_data import (
     MOCK_SCHEMA_FINGERPRINT,
     MOCK_INDEX_FINGERPRINT,
     MOCK_TABLE_SIZES,
+    MOCK_TABLE_DISCOVERY,
 )
 
 
@@ -279,7 +280,7 @@ class TestSchemaSnapshotCollectorCrashSafety:
 
     def _ctx(self, server_id):
         conn = self._multi_fetchall_conn(
-            [MOCK_SCHEMA_FINGERPRINT, MOCK_INDEX_FINGERPRINT, MOCK_TABLE_SIZES]
+            [MOCK_TABLE_DISCOVERY, MOCK_SCHEMA_FINGERPRINT, MOCK_INDEX_FINGERPRINT, MOCK_TABLE_SIZES]
         )
         ctx = MagicMock()
         ctx.server_id = server_id
@@ -359,6 +360,180 @@ class TestSchemaSnapshotCollectorCrashSafety:
             collector._previous_hashes[sid][("mydb", "loyalty_members")]["schema_hash"]
             == "abc123hash"
         )
+
+
+class TestSlowLoopMaxTablesPerCycle:
+    """P1b-7: large-schema guardrail.
+
+    The schema-snapshot collector must cap how many tables it fingerprints
+    per cycle, ordering by UPDATE_TIME DESC with NULLS LAST, and it must
+    LOG whatever gets deferred rather than silently dropping it.
+    """
+
+    def test_cap_tables_by_recency_orders_desc_nulls_last(self):
+        from collectors.slow_loop import _cap_tables_by_recency
+
+        rows = [
+            {"table_schema": "mydb", "table_name": "t_old", "update_time": None},
+            {"table_schema": "mydb", "table_name": "t_new", "update_time": "2025-06-01 00:00:00"},
+            {"table_schema": "mydb", "table_name": "t_mid", "update_time": "2025-03-01 00:00:00"},
+        ]
+
+        selected, deferred = _cap_tables_by_recency(rows, max_tables=2)
+
+        assert selected == [("mydb", "t_new"), ("mydb", "t_mid")], (
+            "must be ordered most-recent-first, with the NULL UPDATE_TIME "
+            "table sorted last rather than winning by missing data"
+        )
+        assert deferred == 1
+
+    def test_cap_tables_by_recency_no_cap_needed(self):
+        from collectors.slow_loop import _cap_tables_by_recency
+
+        rows = [{"table_schema": "mydb", "table_name": "t1", "update_time": None}]
+        selected, deferred = _cap_tables_by_recency(rows, max_tables=2000)
+
+        assert selected == [("mydb", "t1")]
+        assert deferred == 0
+
+    def test_table_filter_clause_empty_when_no_tables_selected(self):
+        from collectors.slow_loop import _table_filter_clause
+
+        clause, params = _table_filter_clause([])
+        assert clause == ""
+        assert params == []
+
+    def test_table_filter_clause_builds_parameterized_in_list(self):
+        from collectors.slow_loop import _table_filter_clause
+
+        clause, params = _table_filter_clause([("mydb", "a"), ("mydb", "b")])
+
+        assert clause == "AND (TABLE_SCHEMA, TABLE_NAME) IN ((%s, %s), (%s, %s))"
+        assert params == ["mydb", "a", "mydb", "b"]
+
+    def test_collect_defers_tables_beyond_cap_and_logs_it(self, monkeypatch, caplog):
+        """3 discovered tables, max_tables_per_cycle=2: only the 2
+        most-recently-changed tables must be fingerprinted/sized/stored,
+        and the 1 deferred table must show up in a WARNING log (not just
+        vanish)."""
+        import logging
+        import config as config_module
+
+        config_module._config = {
+            "excluded_schemas": ["mysql", "performance_schema", "sys", "information_schema"],
+            "slow_loop": {"max_tables_per_cycle": 2},
+        }
+
+        discovery = [
+            {"table_schema": "mydb", "table_name": "t_old", "update_time": "2024-01-01 00:00:00"},
+            {"table_schema": "mydb", "table_name": "t_new", "update_time": "2025-06-01 00:00:00"},
+            {"table_schema": "mydb", "table_name": "t_mid", "update_time": "2025-03-01 00:00:00"},
+        ]
+        fingerprints = [
+            {"table_schema": "mydb", "table_name": "t_new", "schema_hash": "hnew"},
+            {"table_schema": "mydb", "table_name": "t_mid", "schema_hash": "hmid"},
+        ]
+        index_fps = [
+            {"table_schema": "mydb", "table_name": "t_new", "index_hash": "inew"},
+            {"table_schema": "mydb", "table_name": "t_mid", "index_hash": "imid"},
+        ]
+        sizes = [
+            {"table_schema": "mydb", "table_name": "t_new", "table_rows": 1, "data_mb": 1, "index_mb": 1},
+            {"table_schema": "mydb", "table_name": "t_mid", "table_rows": 2, "data_mb": 2, "index_mb": 2},
+        ]
+
+        class _RecordingCursor:
+            def __init__(self):
+                self.executed: list[tuple[str, object]] = []
+                self._results = iter([discovery, fingerprints, index_fps, sizes])
+
+            def execute(self, sql, params=None):
+                self.executed.append((sql, params))
+
+            def fetchall(self):
+                return next(self._results)
+
+            def fetchone(self):
+                return None
+
+        class _RecordingConnection:
+            def __init__(self, cursor):
+                self._cursor = cursor
+
+            def cursor(self, *args, **kwargs):
+                return self._cursor
+
+        cursor = _RecordingCursor()
+        mock_conn = _RecordingConnection(cursor)
+
+        ctx = MagicMock()
+        ctx.server_id = "test-server"
+        ctx.get_connection.return_value.__enter__.return_value = mock_conn
+        ctx.get_connection.return_value.__exit__.return_value = False
+
+        collector = SchemaSnapshotCollector()
+        collector._initialized.add(ctx.server_id)  # skip real SQLite read
+
+        with caplog.at_level(logging.WARNING):
+            data = collector.collect(_utcnow(), ctx)
+
+        table_names = {row["table_name"] for row in data["snapshots"]}
+        assert table_names == {"t_new", "t_mid"}, (
+            f"only the 2 tables under the cap should be processed; got {table_names}"
+        )
+
+        assert any("deferring 1" in r.message for r in caplog.records), (
+            f"expected a deferred-count WARNING; got: {[r.message for r in caplog.records]}"
+        )
+
+        # SCHEMA_FINGERPRINT, INDEX_FINGERPRINT, and TABLE_SIZES must all
+        # have been restricted to exactly the 2 selected tables.
+        filtered_calls = [
+            (sql, params) for sql, params in cursor.executed
+            if params is not None
+        ]
+        assert len(filtered_calls) == 3, (
+            f"expected all 3 heavy queries restricted via a parameterized "
+            f"filter; got executed statements: {cursor.executed}"
+        )
+        for _, params in filtered_calls:
+            pairs = set(zip(params[0::2], params[1::2]))
+            assert pairs == {("mydb", "t_new"), ("mydb", "t_mid")}
+
+    def test_collect_under_cap_runs_unfiltered_queries(self, monkeypatch):
+        """A schema at/under the cap must be byte-for-byte the same query
+        shape as before this guardrail — no filter clause, no params."""
+        import config as config_module
+
+        config_module._config = {
+            "excluded_schemas": ["mysql", "performance_schema", "sys", "information_schema"],
+            "slow_loop": {"max_tables_per_cycle": 2000},
+        }
+
+        conn = TestSchemaSnapshotCollectorCrashSafety._multi_fetchall_conn(
+            [MOCK_TABLE_DISCOVERY, MOCK_SCHEMA_FINGERPRINT, MOCK_INDEX_FINGERPRINT, MOCK_TABLE_SIZES]
+        )
+        ctx = MagicMock()
+        ctx.server_id = "test-server"
+        ctx.get_connection.return_value.__enter__.return_value = conn
+        ctx.get_connection.return_value.__exit__.return_value = False
+
+        collector = SchemaSnapshotCollector()
+        collector._initialized.add(ctx.server_id)
+
+        data = collector.collect(_utcnow(), ctx)
+
+        # Every cursor.execute() call in the unfiltered path takes a single
+        # positional arg (sql only) — never (sql, params) — same call shape
+        # as before P1b-7.
+        cursor = conn.cursor()
+        for call in cursor.execute.call_args_list:
+            args, kwargs = call
+            assert len(args) == 1 and not kwargs, (
+                f"unfiltered query must be called as execute(sql) only; got {call}"
+            )
+
+        assert {row["table_name"] for row in data["snapshots"]} == {"loyalty_members", "users"}
 
 
 class TestMonitoringCredentialsSelfHeal:

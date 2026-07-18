@@ -183,6 +183,25 @@ GLOBAL_STATUS = "SHOW GLOBAL STATUS"
 # SLOW LOOP QUERIES (every 30 minutes)
 # =============================================================================
 
+TABLE_DISCOVERY = """
+SELECT
+    TABLE_SCHEMA                    AS table_schema,
+    TABLE_NAME                      AS table_name,
+    UPDATE_TIME                     AS update_time
+FROM information_schema.TABLES
+WHERE TABLE_SCHEMA NOT IN ({excluded_schemas})
+  AND TABLE_TYPE = 'BASE TABLE'
+"""
+# ^ P1b-7 large-schema guardrail: a cheap, non-aggregating enumeration (just
+# the table catalog — no per-column/per-index GROUP_CONCAT) used ONLY to
+# decide, in Python, which tables SCHEMA_FINGERPRINT / INDEX_FINGERPRINT /
+# TABLE_SIZES below should be restricted to via {table_filter} on schemas
+# with more tables than slow_loop.max_tables_per_cycle. Deliberately left
+# unbounded/unordered here (no LIMIT, no ORDER BY) — the row count is what
+# lets the caller compute how many tables were deferred, and the actual
+# UPDATE_TIME DESC / NULLS LAST ordering + capping happens collector-side
+# (collectors/slow_loop.py), where it's trivial to unit test in isolation.
+
 TABLE_SIZES = """
 SELECT
     TABLE_SCHEMA                    AS table_schema,
@@ -198,6 +217,7 @@ SELECT
 FROM information_schema.TABLES
 WHERE TABLE_SCHEMA NOT IN ({excluded_schemas})
   AND TABLE_TYPE = 'BASE TABLE'
+{table_filter}
 ORDER BY DATA_LENGTH + INDEX_LENGTH DESC
 """
 
@@ -213,6 +233,7 @@ SELECT
     ))                              AS schema_hash
 FROM information_schema.COLUMNS
 WHERE TABLE_SCHEMA NOT IN ({excluded_schemas})
+{table_filter}
 GROUP BY TABLE_SCHEMA, TABLE_NAME
 """
 
@@ -226,6 +247,7 @@ SELECT
     ))                              AS index_hash
 FROM information_schema.STATISTICS
 WHERE TABLE_SCHEMA NOT IN ({excluded_schemas})
+{table_filter}
 GROUP BY TABLE_SCHEMA, TABLE_NAME
 """
 
