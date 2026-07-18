@@ -1,11 +1,14 @@
 """
 SeeQL doctor — diagnostic command that makes environment state legible.
 
-Runs 7 checks against the local environment and reports pass/fail with
-actionable fix suggestions drawn from the E001–E010 error catalog.
+Runs 9 checks against the local environment and reports pass/fail/skip with
+actionable fix suggestions drawn from the E001–E010 error catalog. Checks
+that don't apply to this install (no GCP configured, LLM agent disabled)
+report SKIP rather than FAIL — a healthy install that never opted into those
+features should still be able to exit 0.
 
 Exit codes:
-    0 — all checks passed
+    0 — all applicable checks passed (skipped checks don't count either way)
     N>0 — N checks failed (exit code = failure count, capped at 99)
 
 Each check is independent: one failure doesn't skip the rest. The output
@@ -17,15 +20,16 @@ is a sketch-aesthetic-adjacent plain text report:
     [PASS] performance_schema enabled  ON
     [FAIL] dba_agent has PROCESS grant missing
            → Run: GRANT PROCESS ON *.* TO 'dba_agent'@'...';
+    [SKIP] GCP credentials (ADC)       gcp not configured
     ...
-    6/7 checks passed.
+    6 passed, 1 skipped, 0 failed.
 """
 
 from __future__ import annotations
 
 import os
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from seeql import errors
@@ -40,11 +44,17 @@ class CheckResult:
     passed: bool
     detail: str = ""
     error_code: str | None = None  # For failed checks, points at E0XX in the catalog
+    skipped: bool = False  # Check doesn't apply to this install — not a failure
 
     def format(self, width: int) -> str:
-        status = "[PASS]" if self.passed else "[FAIL]"
+        if self.skipped:
+            status = "[SKIP]"
+        elif self.passed:
+            status = "[PASS]"
+        else:
+            status = "[FAIL]"
         line = f"{status} {self.name:<{width}} {self.detail}"
-        if not self.passed and self.error_code:
+        if not self.passed and not self.skipped and self.error_code:
             err = errors.CATALOG.get(self.error_code)
             if err:
                 line += f"\n       → {err.fix}"
@@ -233,8 +243,116 @@ def check_performance_schema() -> CheckResult:
         )
 
 
+def check_perf_schema_consumers() -> CheckResult:
+    """Are the performance_schema *consumers* SeeQL's collectors need turned on?
+
+    `performance_schema enabled` (above) only proves the feature flag is on.
+    Cloud SQL and some hardened installs ship with performance_schema ON but
+    individual consumers OFF — which silently starves query_digests,
+    wait_events, and execution_stages of data while every other doctor check
+    stays green. This is exactly the "green doctor sitting on empty digest
+    data" failure mode this check exists to catch.
+    """
+    try:
+        from storage.connection import get_prod_connection
+        from collectors.queries import DOCTOR_CONSUMERS
+        with get_prod_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(DOCTOR_CONSUMERS)
+            rows = cursor.fetchall()
+        if not rows:
+            return CheckResult(
+                name="performance_schema consumers enabled",
+                passed=False,
+                detail="setup_consumers query returned no rows — unexpected",
+            )
+        disabled = [str(name) for name, enabled in rows if str(enabled).upper() != "YES"]
+        if disabled:
+            fix = "; ".join(
+                "UPDATE performance_schema.setup_consumers SET ENABLED='YES' "
+                f"WHERE NAME='{name}'"
+                for name in disabled
+            )
+            return CheckResult(
+                name="performance_schema consumers enabled",
+                passed=False,
+                detail=(
+                    f"disabled: {', '.join(disabled)}\n"
+                    f"       → Run as an admin user (dba_agent typically can't): {fix};"
+                ),
+            )
+        return CheckResult(
+            name="performance_schema consumers enabled",
+            passed=True,
+            detail=f"all {len(rows)} required consumers ON",
+        )
+    except Exception as e:
+        return CheckResult(
+            name="performance_schema consumers enabled",
+            passed=False,
+            detail=str(e)[:60],
+        )
+
+
+def check_stage_instruments() -> CheckResult:
+    """INFO — execution_stages collector needs setup_instruments 'stage/%' ON.
+
+    Non-failing by design: stage instrumentation is optional and adds
+    overhead, and SeeQL degrades gracefully without it (the execution_stages
+    collector just returns no rows). This surfaces the tradeoff instead of
+    leaving an operator to discover a silently-empty
+    execution_stage_snapshots table on their own.
+    """
+    try:
+        from storage.connection import get_prod_connection
+        from collectors.queries import DOCTOR_STAGE_INSTRUMENTS
+        with get_prod_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(DOCTOR_STAGE_INSTRUMENTS)
+            rows = cursor.fetchall()
+        total = len(rows)
+        enabled = sum(1 for _, e in rows if str(e).upper() == "YES")
+        if total == 0:
+            detail = "no stage/% instruments found on this server"
+        elif enabled == 0:
+            detail = (
+                f"0/{total} stage/% instruments enabled — execution_stages "
+                "collector will see no data (informational only, not required)"
+            )
+        else:
+            detail = f"{enabled}/{total} stage/% instruments enabled"
+        return CheckResult(
+            name="Execution-stage instruments (info)",
+            passed=True,
+            detail=detail,
+        )
+    except Exception as e:
+        # Informational only — a query/connection failure here must never
+        # contribute to doctor's failure count.
+        return CheckResult(
+            name="Execution-stage instruments (info)",
+            passed=True,
+            detail=f"could not check (informational only): {str(e)[:60]}",
+        )
+
+
 def check_gcp_creds() -> CheckResult:
-    """E003 — Is GCP ADC configured for Cloud Monitoring + Vertex AI?"""
+    """E003 — Is GCP ADC configured for Cloud Monitoring + Vertex AI?
+
+    SKIPs (rather than FAILs) when this install never opted into GCP —
+    i.e. `gcp.project_id` is unset or still the stock `your-...` placeholder
+    shipped in settings.yaml. A non-GCP install has no way to satisfy this
+    check and shouldn't be penalized for it.
+    """
+    from config import get_config
+    project_id = get_config().get("gcp", {}).get("project_id")
+    if not project_id or project_id.startswith("your-"):
+        return CheckResult(
+            name="GCP credentials (ADC)",
+            passed=False,
+            skipped=True,
+            detail="gcp not configured",
+        )
     adc = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
     if not adc:
         return CheckResult(
@@ -266,11 +384,25 @@ def check_gcp_creds() -> CheckResult:
 
 
 def check_llm_backend() -> CheckResult:
-    """E009 — Is any LLM backend configured?"""
+    """E009 — Is any LLM backend configured?
+
+    SKIPs (rather than FAILs) when `agent.enabled` is false — an install
+    that intentionally runs SeeQL without the LLM layer (collection +
+    alerting only) shouldn't be penalized for not having Gemini/Claude/OpenAI
+    credentials it never asked for.
+    """
     try:
         from agent.llm_agent import _detect_backend
         from config import get_config
-        backend = _detect_backend(get_config().get("agent", {}))
+        agent_config = get_config().get("agent", {})
+        if not agent_config.get("enabled"):
+            return CheckResult(
+                name="LLM backend configured",
+                passed=False,
+                skipped=True,
+                detail="agent disabled",
+            )
+        backend = _detect_backend(agent_config)
         if backend is None:
             return CheckResult(
                 name="LLM backend configured",
@@ -301,6 +433,8 @@ CHECKS = [
     check_mon_schema_current,
     check_prod_reachable,
     check_performance_schema,
+    check_perf_schema_consumers,
+    check_stage_instruments,
     check_gcp_creds,
     check_llm_backend,
 ]
@@ -328,9 +462,10 @@ def run() -> int:
         print(r.format(name_width))
 
     print("=" * 60)
-    failures = sum(1 for r in results if not r.passed)
-    passed = len(results) - failures
-    print(f"{passed}/{len(results)} checks passed.")
+    failures = sum(1 for r in results if not r.passed and not r.skipped)
+    skipped = sum(1 for r in results if r.skipped)
+    passed = len(results) - failures - skipped
+    print(f"{passed} passed, {skipped} skipped, {failures} failed.")
 
     if failures == 0:
         print("\n✓ SeeQL is healthy and ready to run.")
