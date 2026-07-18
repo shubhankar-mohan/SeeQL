@@ -189,7 +189,8 @@ class TestIncidentsEndpoint:
 
     def test_seeded(self, api_client, tmp_path):
         """Seed one incident row and confirm the endpoint shapes it correctly."""
-        import sqlite3, json as _json
+        import sqlite3
+        import json as _json
         # Find the DB path from config
         import config as config_module
         db_path = config_module._config["monitoring_db"]["path"]
@@ -207,7 +208,6 @@ class TestIncidentsEndpoint:
         conn.close()
 
         # Reset any cached reader connection so we pick up the seeded row.
-        from api.query_helpers import _reader_conn
         import api.query_helpers as qh
         if qh._reader_conn is not None:
             qh._reader_conn.close()
@@ -317,3 +317,162 @@ class TestStatusEndpoint:
     def test_scheduler_not_running(self, api_client):
         resp = api_client.get("/status")
         assert resp.status_code == 200
+
+
+class TestPrometheusMetrics:
+    """Guards P1c-4 (freshness) and P1c-9 (per-server labels) in api/prometheus.py.
+
+    The `mysql_*`/`seeql_*` Gauges are module-level singletons registered
+    once against prometheus_client's global REGISTRY (they persist for the
+    life of the test process), so each test resets the metrics-cache TTL
+    guard (`api.prometheus._last_update`) and the server-registry singleton
+    before hitting `/metrics` — otherwise a prior test's cached read, or a
+    stale server list from a previous test's config, would leak in.
+
+    `config.server_registry._registry` is itself a process-wide singleton
+    that `conftest.py`'s autouse fixtures do NOT reset (only `config._config`
+    and storage connections are). The two-server test below points it at a
+    registry with no 'default' entry — left in place, that changes
+    `get_default_server_id()` for every later test in the same process. Reset
+    it after each test here too, not just before.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_server_registry(self):
+        import config.server_registry as sr
+        sr._registry = None
+        yield
+        sr._registry = None
+
+    @staticmethod
+    def _has_sample(metric_name: str, **labels) -> bool:
+        """Inspect the live prometheus_client REGISTRY for an exact
+        (metric, label-set) sample. More precise than substring-matching the
+        exposition text: it can tell "never set" apart from "set to a value
+        that just doesn't happen to appear in the text elsewhere."""
+        from prometheus_client import REGISTRY
+        for family in REGISTRY.collect():
+            for sample in family.samples:
+                if sample.name == metric_name and all(
+                    sample.labels.get(k) == v for k, v in labels.items()
+                ):
+                    return True
+        return False
+
+    def test_stale_data_dropped_and_freshness_exported(self, api_client):
+        """P1c-4: a row older than the freshness window must not be served
+        as a live gauge value forever, but the collection-freshness signal
+        itself must always be exported so the staleness is observable."""
+        import sqlite3
+        import config as config_module
+        import api.prometheus as prom
+
+        db_path = config_module._config["monitoring_db"]["path"]
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """INSERT INTO global_status_snapshots
+               (snapshot_time, server_id, variable_name, raw_value)
+               VALUES (datetime('now','-30 minutes'), 'default', 'Threads_running', 42)"""
+        )
+        conn.commit()
+        conn.close()
+
+        # Bypass the metrics-cache TTL so this scrape actually re-reads SQLite.
+        prom._last_update = 0
+
+        resp = api_client.get("/metrics")
+        assert resp.status_code == 200
+
+        # The collection-freshness signal is always exported...
+        assert self._has_sample("seeql_collection_last_timestamp", loop="metrics_cache")
+        # ...but the 30-minute-stale row must not be served as a live gauge.
+        assert not self._has_sample("mysql_threads_running", server="default")
+
+    def test_two_server_labels_both_present(self, api_client):
+        """P1c-9: gauges must carry a per-server label so a two-server
+        install reports independent time series instead of one gauge
+        flapping between servers."""
+        import sqlite3
+        import config as config_module
+        import api.prometheus as prom
+
+        # The registry singleton is already None here (reset by the autouse
+        # fixture above before this test started), so the next
+        # get_server_registry() call will lazily rebuild it from this
+        # two-server config.
+        config_module._config["servers"] = {
+            "server_a": {"display_name": "Server A"},
+            "server_b": {"display_name": "Server B"},
+        }
+
+        db_path = config_module._config["monitoring_db"]["path"]
+        conn = sqlite3.connect(db_path)
+        for sid in ("server_a", "server_b"):
+            conn.execute(
+                """INSERT INTO global_status_snapshots
+                   (snapshot_time, server_id, variable_name, raw_value)
+                   VALUES (datetime('now'), ?, 'Threads_running', 7)""",
+                (sid,),
+            )
+        conn.commit()
+        conn.close()
+
+        prom._last_update = 0
+
+        resp = api_client.get("/metrics")
+        assert resp.status_code == 200
+        assert self._has_sample("mysql_threads_running", server="server_a")
+        assert self._has_sample("mysql_threads_running", server="server_b")
+
+    def test_gauge_disappears_after_going_stale_in_same_process(self, api_client):
+        """P1c-4, the core "frozen forever" scenario: a gauge that WAS live
+        during this process must actually disappear once its data goes
+        stale, not just fail to appear the first time.
+
+        Gauge.set() has no complementary "unset" — once a label combination
+        has been set, prometheus_client keeps reporting that value on every
+        future scrape until something calls .remove() on it, even if the
+        code simply stops calling .set(). The other two tests in this class
+        can't catch a regression here: the freshness test never sets the
+        gauge in the first place, and the two-server test never lets its
+        rows go stale. This test seeds a fresh row, confirms the gauge is
+        live, ages the row past the freshness window, and confirms the
+        gauge is gone — using a server_id not touched by any other test in
+        this class, so it can't pick up a leftover value from one of them.
+        """
+        import sqlite3
+        import config as config_module
+        import api.prometheus as prom
+
+        config_module._config["servers"] = {"server_transient": {"display_name": "Transient"}}
+
+        db_path = config_module._config["monitoring_db"]["path"]
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """INSERT INTO global_status_snapshots
+               (snapshot_time, server_id, variable_name, raw_value)
+               VALUES (datetime('now'), 'server_transient', 'Threads_running', 99)"""
+        )
+        conn.commit()
+        conn.close()
+
+        prom._last_update = 0
+        resp = api_client.get("/metrics")
+        assert resp.status_code == 200
+        assert self._has_sample("mysql_threads_running", server="server_transient")
+
+        # Age the same row past the freshness window — simulates the
+        # collector for this server dying without any new row arriving.
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """UPDATE global_status_snapshots
+               SET snapshot_time = datetime('now','-30 minutes')
+               WHERE server_id = 'server_transient'"""
+        )
+        conn.commit()
+        conn.close()
+
+        prom._last_update = 0
+        resp = api_client.get("/metrics")
+        assert resp.status_code == 200
+        assert not self._has_sample("mysql_threads_running", server="server_transient")

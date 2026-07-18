@@ -193,5 +193,13 @@ def _store_alert(alert: Alert):
                     1 if alert.delivered else 0,
                 ),
             )
+
+        # Prometheus counter (P1c-4). Guarded so the engine still works
+        # without the `api` extra installed (prometheus_client/FastAPI absent).
+        try:
+            from api.prometheus import seeql_alerts_fired
+            seeql_alerts_fired.labels(rule=alert.rule_name).inc()
+        except Exception:
+            pass
     except Exception as e:
         logger.error(f"Failed to store alert: {e}")

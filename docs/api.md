@@ -152,30 +152,39 @@ API consumption.
 
 ## Prometheus metrics
 
-`GET /metrics` exposes ~20 gauges + counters:
+`GET /metrics` exposes ~20 gauges + counters. Every `mysql_*` gauge below
+carries a `server` label (the configured `server_id`) so a multi-server
+install gets independent time series per server instead of one gauge
+flapping between them, e.g. `mysql_threads_running{server="db-prod-west"}`.
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `mysql_threads_running` | Gauge | Active threads |
-| `mysql_threads_connected` | Gauge | Total connections |
-| `mysql_queries_per_second` | Gauge | QPS from SHOW GLOBAL STATUS delta |
-| `mysql_slow_queries_per_second` | Gauge | Slow queries per second |
-| `mysql_lock_waits_current` | Gauge | Active InnoDB lock waits |
-| `mysql_lock_wait_max_seconds` | Gauge | Longest lock wait duration |
-| `mysql_buffer_pool_hit_ratio` | Gauge | Cumulative hit ratio, target > 0.99 |
-| `mysql_buffer_pool_dirty_pages` | Gauge | Dirty pages |
-| `mysql_buffer_pool_free_buffers` | Gauge | Free buffers |
-| `mysql_cpu_utilization` | Gauge | Cloud SQL CPU (0-1) — requires `[gcp]` |
-| `mysql_memory_utilization` | Gauge | Cloud SQL memory (0-1) — requires `[gcp]` |
-| `mysql_disk_utilization` | Gauge | Cloud SQL disk (0-1) — requires `[gcp]` |
-| `mysql_disk_read_ops` | Gauge | Disk read ops — requires `[gcp]` |
-| `mysql_disk_write_ops` | Gauge | Disk write ops — requires `[gcp]` |
-| `mysql_network_connections` | Gauge | Connections — requires `[gcp]` |
-| `mysql_unused_indexes_count` | Gauge | Detected unused indexes |
-| `mysql_redundant_indexes_count` | Gauge | Detected redundant indexes |
-| `mysql_innodb_rows_read_per_sec` | Gauge | InnoDB rows read/s |
-| `mysql_innodb_row_lock_waits_per_sec` | Gauge | InnoDB row lock waits/s |
-| `seeql_alerts_fired_total` | Counter | Alerts fired, labelled by rule |
+| `mysql_threads_running` | Gauge (`server`) | Active threads |
+| `mysql_threads_connected` | Gauge (`server`) | Total connections |
+| `mysql_queries_per_second` | Gauge (`server`) | QPS from SHOW GLOBAL STATUS delta |
+| `mysql_slow_queries_per_second` | Gauge (`server`) | Slow queries per second |
+| `mysql_lock_waits_current` | Gauge (`server`) | Active InnoDB lock waits |
+| `mysql_lock_wait_max_seconds` | Gauge (`server`) | Longest lock wait duration |
+| `mysql_buffer_pool_hit_ratio` | Gauge (`server`) | Cumulative hit ratio, target > 0.99 |
+| `mysql_buffer_pool_dirty_pages` | Gauge (`server`) | Dirty pages |
+| `mysql_buffer_pool_free_buffers` | Gauge (`server`) | Free buffers |
+| `mysql_cpu_utilization` | Gauge (`server`) | Cloud SQL CPU (0-1) — requires `[gcp]` |
+| `mysql_memory_utilization` | Gauge (`server`) | Cloud SQL memory (0-1) — requires `[gcp]` |
+| `mysql_disk_utilization` | Gauge (`server`) | Cloud SQL disk (0-1) — requires `[gcp]` |
+| `mysql_disk_read_ops` | Gauge (`server`) | Disk read ops — requires `[gcp]` |
+| `mysql_disk_write_ops` | Gauge (`server`) | Disk write ops — requires `[gcp]` |
+| `mysql_network_connections` | Gauge (`server`) | Connections — requires `[gcp]` |
+| `mysql_unused_indexes_count` | Gauge (`server`) | Detected unused indexes |
+| `mysql_redundant_indexes_count` | Gauge (`server`) | Detected redundant indexes |
+| `mysql_innodb_rows_read_per_sec` | Gauge (`server`) | InnoDB rows read/s |
+| `mysql_innodb_row_lock_waits_per_sec` | Gauge (`server`) | InnoDB row lock waits/s |
+| `seeql_collection_last_timestamp` | Gauge (`loop`) | Unix timestamp of last collection; `loop="metrics_cache"` is set on every scrape as a liveness signal |
+| `seeql_alerts_fired_total` | Counter (`rule`) | Alerts fired, labelled by rule |
+
+Each `mysql_*` gauge above is only set for a server when that server's
+backing SQLite row is fresh (within 10 minutes) — once a server's collector
+stops writing, its label is simply absent from the next scrape instead of
+serving a frozen last-known value forever.
 
 `SEEQL_PROM_CACHE_TTL` (default 10 s) controls the re-read cadence
 from SQLite.
