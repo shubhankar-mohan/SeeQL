@@ -69,6 +69,19 @@ def get_current_server() -> str | None:
     return _current_server_id.get()
 
 
+def _resolve_server_id() -> str:
+    """Resolve which server_id a snapshot tool query should be scoped to.
+
+    Prefers the current-context server (set by the agent loop / MCP layer
+    before running tools). Falls back to the registry's default server so a
+    snapshot tool never silently reads across every monitored server (P1-1):
+    without this, a "latest snapshot" read has no server to scope to and can
+    return another server's row.
+    """
+    from config.server_registry import get_server_registry
+    return get_current_server() or get_server_registry().get_default_server_id()
+
+
 def set_current_budget(budget) -> None:
     """Set the active tool budget for this context. Pass None to clear."""
     _current_budget.set(budget)
@@ -419,10 +432,11 @@ def execute_tool(name: str, input_data: dict) -> str:
 
 def _tool_run_explain(input_data: dict) -> dict:
     digest = input_data["digest"]
+    sid = _resolve_server_id()
 
     # Check for recent cached EXPLAIN
     with get_mon_reader() as conn:
-        row = conn.execute(Q.EXPLAIN_FOR_DIGEST, (digest,)).fetchone()
+        row = conn.execute(Q.EXPLAIN_FOR_DIGEST, (digest, sid)).fetchone()
         if row and row["explain_json"]:
             return {
                 "source": "cached",
@@ -433,8 +447,8 @@ def _tool_run_explain(input_data: dict) -> dict:
         # Get query text — prefer query_sample_text (real SQL) over digest_text (parameterized)
         digest_row = conn.execute(
             "SELECT digest_text, query_sample_text, schema_name FROM query_digest_snapshots "
-            "WHERE digest = ? ORDER BY snapshot_time DESC LIMIT 1",
-            (digest,)
+            "WHERE digest = ? AND server_id = ? ORDER BY snapshot_time DESC LIMIT 1",
+            (digest, sid)
         ).fetchone()
 
     if not digest_row:
@@ -461,7 +475,7 @@ def _tool_run_explain(input_data: dict) -> dict:
         budget.record("run_explain")
 
     try:
-        with get_prod_connection(_current_server_id.get()) as conn:
+        with get_prod_connection(sid) as conn:
             cursor = conn.cursor(dictionary=True)
             if schema:
                 cursor.execute(f"USE `{schema}`")
@@ -486,9 +500,11 @@ def _tool_get_table_schema(input_data: dict) -> dict:
     if not _valid_identifier(schema_name) or not _valid_identifier(table_name):
         return {"error": f"Invalid identifier: {schema_name}.{table_name}"}
 
+    sid = _resolve_server_id()
+
     # Try monitoring DB first
     with get_mon_reader() as conn:
-        row = conn.execute(Q.SCHEMA_FOR_TABLE, (schema_name, table_name)).fetchone()
+        row = conn.execute(Q.SCHEMA_FOR_TABLE, (schema_name, table_name, sid)).fetchone()
         if row and row["create_stmt"]:
             return {"source": "snapshot", "create_statement": row["create_stmt"]}
 
@@ -502,7 +518,7 @@ def _tool_get_table_schema(input_data: dict) -> dict:
 
     # Fall back to production
     try:
-        with get_prod_connection(_current_server_id.get()) as conn:
+        with get_prod_connection(sid) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT 1 FROM information_schema.tables "
@@ -524,13 +540,14 @@ def _tool_get_table_schema(input_data: dict) -> dict:
 def _tool_get_query_history(input_data: dict) -> dict:
     digest = input_data["digest"]
     days = input_data.get("days", 7)
+    sid = _resolve_server_id()
 
     with get_mon_reader() as conn:
-        rows = conn.execute(Q.QUERY_HISTORY, (digest, f"-{days} days")).fetchall()
+        rows = conn.execute(Q.QUERY_HISTORY, (digest, sid, f"-{days} days")).fetchall()
         history = [dict(r) for r in rows]
 
         # Also get latest EXPLAIN if available
-        explain_row = conn.execute(Q.EXPLAIN_FOR_DIGEST, (digest,)).fetchone()
+        explain_row = conn.execute(Q.EXPLAIN_FOR_DIGEST, (digest, sid)).fetchone()
         explain = None
         if explain_row and explain_row["explain_json"]:
             try:
@@ -546,9 +563,10 @@ def _tool_get_query_history(input_data: dict) -> dict:
 
 
 def _tool_get_lock_graph(input_data: dict) -> dict:
+    sid = _resolve_server_id()
     with get_mon_reader() as conn:
-        lock_rows = conn.execute(Q.LOCK_GRAPH).fetchall()
-        txn_rows = conn.execute(Q.ACTIVE_TRANSACTIONS).fetchall()
+        lock_rows = conn.execute(Q.LOCK_GRAPH, (sid, sid)).fetchall()
+        txn_rows = conn.execute(Q.ACTIVE_TRANSACTIONS, (sid, sid)).fetchall()
 
     return {
         "lock_waits": [dict(r) for r in lock_rows],
@@ -834,16 +852,12 @@ def _tool_explain_query(input_data: dict) -> dict:
 def _tool_search_slow_log(input_data: dict) -> dict:
     keyword = input_data["keyword"]
     limit = input_data.get("limit", 10)
+    sid = _resolve_server_id()
 
     with get_mon_reader() as conn:
         rows = conn.execute(
-            """SELECT snapshot_time, user, host, query_time_sec, lock_time_sec,
-                      rows_sent, rows_examined, sql_text
-               FROM slow_query_log
-               WHERE sql_text LIKE ?
-               ORDER BY query_time_sec DESC
-               LIMIT ?""",
-            (f"%{keyword}%", limit),
+            Q.SEARCH_SLOW_LOG,
+            (sid, f"%{keyword}%", limit),
         ).fetchall()
 
     return {
@@ -870,10 +884,11 @@ def _tool_search_slow_log(input_data: dict) -> dict:
 def _tool_get_recent_analyses(input_data: dict) -> dict:
     hours = input_data.get("hours", 24)
     limit = input_data.get("limit", 5)
+    sid = _resolve_server_id()
 
     with get_mon_reader() as conn:
         rows = conn.execute(
-            Q.RECENT_ANALYSES, (f"-{hours} hours", limit)
+            Q.RECENT_ANALYSES, (sid, f"-{hours} hours", limit)
         ).fetchall()
 
     analyses = []

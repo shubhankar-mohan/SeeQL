@@ -210,11 +210,18 @@ WHERE server_id = ?
 """
 
 # --- For Agent Tools ---
+#
+# All six queries below back tools the LLM agent can call for ANY server it is
+# currently analyzing (agent/llm_agent.py sets the current-server ContextVar
+# before the tool loop runs). Each MUST filter by server_id -- including in any
+# MAX(snapshot_time) subquery -- otherwise a snapshot/global "latest" read can
+# silently return another server's data (P1-1).
 
 EXPLAIN_FOR_DIGEST = """
 SELECT explain_json, captured_at
 FROM explain_captures
 WHERE digest = ?
+  AND server_id = ?
 ORDER BY captured_at DESC
 LIMIT 1
 """
@@ -223,6 +230,7 @@ SCHEMA_FOR_TABLE = """
 SELECT create_stmt
 FROM schema_snapshots
 WHERE table_schema = ? AND table_name = ?
+  AND server_id = ?
 ORDER BY snapshot_time DESC
 LIMIT 1
 """
@@ -232,6 +240,7 @@ SELECT snapshot_time, avg_time_sec, exec_count, total_time_sec,
        rows_examined, rows_sent
 FROM query_digest_snapshots
 WHERE digest = ?
+  AND server_id = ?
   AND snapshot_time >= datetime('now', ?)
 ORDER BY snapshot_time ASC
 """
@@ -241,14 +250,16 @@ SELECT waiting_trx_id, waiting_pid, waiting_query, wait_seconds,
        blocking_trx_id, blocking_pid, blocking_query,
        blocking_trx_age_sec, blocking_rows_locked
 FROM lock_wait_snapshots
-WHERE snapshot_time = (SELECT MAX(snapshot_time) FROM lock_wait_snapshots)
+WHERE server_id = ?
+  AND snapshot_time = (SELECT MAX(snapshot_time) FROM lock_wait_snapshots WHERE server_id = ?)
 """
 
 ACTIVE_TRANSACTIONS = """
 SELECT trx_id, trx_state, age_sec, pid, trx_query,
        rows_locked, rows_modified, isolation_level
 FROM transaction_snapshots
-WHERE snapshot_time = (SELECT MAX(snapshot_time) FROM transaction_snapshots)
+WHERE server_id = ?
+  AND snapshot_time = (SELECT MAX(snapshot_time) FROM transaction_snapshots WHERE server_id = ?)
 ORDER BY age_sec DESC
 """
 
@@ -257,8 +268,19 @@ ORDER BY age_sec DESC
 RECENT_ANALYSES = """
 SELECT analyzed_at, analysis_type, severity, findings, recommendations
 FROM agent_analyses
-WHERE analyzed_at >= datetime('now', ?)
+WHERE server_id = ?
+  AND analyzed_at >= datetime('now', ?)
 ORDER BY analyzed_at DESC
+LIMIT ?
+"""
+
+SEARCH_SLOW_LOG = """
+SELECT snapshot_time, user, host, query_time_sec, lock_time_sec,
+       rows_sent, rows_examined, sql_text
+FROM slow_query_log
+WHERE server_id = ?
+  AND sql_text LIKE ?
+ORDER BY query_time_sec DESC
 LIMIT ?
 """
 
