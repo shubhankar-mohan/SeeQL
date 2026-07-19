@@ -533,33 +533,17 @@ def _parse_and_store(text: str, analysis_type: str, input_summary: str,
     that `incident_windows` row via `alerting.incidents.set_incident_analysis`
     — best-effort, never raises.
     """
-    # Strip code fences — Gemini sometimes wraps its output in ```markdown blocks
-    cleaned = re.sub(r'^```(?:markdown)?\s*\n?', '', text, flags=re.MULTILINE)
-    cleaned = re.sub(r'\n?```\s*$', '', cleaned, flags=re.MULTILINE)
-    cleaned = cleaned.strip()
-
-    # Extract severity — only match the header line, not mentions in body text.
-    severity = "info"
-    sev_match = re.search(
-        r'^#{2,3}\s*Severity:\s*(critical|warning|info)',
-        cleaned, re.IGNORECASE | re.MULTILINE,
-    )
-    if sev_match:
-        severity = sev_match.group(1).lower()
-
-    # Extract findings and recommendations sections (case-insensitive, flexible markdown)
-    findings = _extract_section(cleaned, "findings", "recommendations")
-    recommendations = _extract_section(cleaned, "recommendations", None)
-
-    # If both are empty, store the full response so nothing is lost
-    if not findings and not recommendations:
-        findings = cleaned
-        logger.warning("Could not parse sections from agent response, storing full text as findings")
-
-    confidence = _extract_confidence(cleaned)
+    # One shared parser for severity/sections/confidence/addresses (P1-18) —
+    # see `parse_agent_response` below for the tolerant-form fixes (P1-2,
+    # P1-3, P1-19, P3-5, P3-9).
+    parsed = parse_agent_response(text)
+    severity = parsed["severity"]
+    findings = parsed["findings"]
+    recommendations = parsed["recommendations"]
+    confidence = parsed["confidence"]
     # An explicit incident_id (scheduler-driven) wins over anything the model
     # self-reports; otherwise fall back to what the model claims to address.
-    addressed_incident = incident_id if incident_id is not None else _extract_addresses_incident(cleaned)
+    addressed_incident = incident_id if incident_id is not None else parsed["addresses_incident"]
 
     analysis = {
         "analyzed_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
@@ -600,20 +584,79 @@ def _parse_and_store(text: str, analysis_type: str, input_summary: str,
 # Parser contract for the confidence + incident-linkage headers (P1.3 / E(a)):
 #   ### Confidence: 0.82 — strong evidence
 #   ### Addresses incident #7
-_CONFIDENCE_RE = re.compile(r'^#{2,3}\s*Confidence:\s*([01](?:\.\d+)?)', re.IGNORECASE | re.MULTILINE)
-_ADDRESSES_RE = re.compile(r'^#{2,3}\s*Addresses\s+incident\s*#?(\d+)', re.IGNORECASE | re.MULTILINE)
+#
+# Tolerant forms (parser correctness batch, Task 4.2 — P1-2 / P1-19): the
+# severity regex used to be `^#{2,3}\s*Severity:` — stricter than everything
+# else in this file — so `**Severity:** critical` (bold), `#### Severity:`
+# (4+ hashes), and looser punctuation between label and value all silently
+# defaulted to "info", defeating every downstream severity filter.
+# Confidence used to reject a leading-dot decimal (".85") and never clamped
+# values above 1. Addresses used to reject a colon before the "#"
+# ("incident: #7").
+_SEV_RE = re.compile(
+    r'^\s*(?:#{1,6}\s*|\*\*)\s*Severity\s*[:*\s-]+\s*(critical|warning|info)',
+    re.IGNORECASE | re.MULTILINE,
+)
+_CONF_RE = re.compile(
+    r'^\s*(?:#{1,6}\s*|\*\*|-\s*\*\*)\s*Confidence\s*[:*]*\s*[:\s]\s*(\d?\.\d+|[01])',
+    re.IGNORECASE | re.MULTILINE,
+)
+_ADDR_RE = re.compile(
+    r'^\s*(?:#{1,6}\s*|\*\*)\s*Addresses\s+incident\s*[:#]*\s*#?(\d+)',
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 def _extract_confidence(text: str) -> float | None:
-    """Parse the `### Confidence: 0.xx` header line, if present."""
-    m = _CONFIDENCE_RE.search(text or "")
-    return float(m.group(1)) if m else None
+    """Parse the `### Confidence: 0.xx` header line, if present (tolerant
+    forms + clamped to [0, 1] — P1-19)."""
+    m = _CONF_RE.search(text or "")
+    return min(1.0, float(m.group(1))) if m else None
 
 
 def _extract_addresses_incident(text: str) -> int | None:
-    """Parse the `### Addresses incident #N` header line, if present."""
-    m = _ADDRESSES_RE.search(text or "")
+    """Parse the `### Addresses incident #N` header line, if present
+    (tolerant forms — P1-19)."""
+    m = _ADDR_RE.search(text or "")
     return int(m.group(1)) if m else None
+
+
+def _strip_outer_fence(text: str) -> str:
+    """Strip a single OUTER code fence wrapping the entire payload — Gemini
+    sometimes wraps its whole response in a ```markdown block.
+
+    A single DOTALL match anchored to the start/end of the (stripped) text —
+    never a per-line MULTILINE substitution — so an inner ```sql fence
+    nested inside a Recommendations section survives intact (P1-3).
+    """
+    m = re.match(r'^```(?:markdown)?\s*\n(.*)\n```\s*$', text.strip(), re.DOTALL)
+    return m.group(1) if m else text
+
+
+def parse_agent_response(text: str) -> dict:
+    """Parse a raw LLM analysis response into its structured parts.
+
+    The single shared parser used by both `_parse_and_store` (routine /
+    incident analyses) and `run_llm_analysis` (replay / investigator) —
+    P1-18: these used to be two independently-maintained copies of the same
+    severity/section/confidence/addresses regex logic that had already
+    drifted from each other.
+    """
+    cleaned = _strip_outer_fence(text or "").strip()
+    first_header = cleaned.find("###")
+    if first_header > 0:
+        cleaned = cleaned[first_header:]          # drop model preamble (P3-9)
+    sev = _SEV_RE.search(cleaned)
+    severity = sev.group(1).lower() if sev else "info"
+    if not sev and cleaned:
+        logger.warning("Agent response has no Severity header; defaulting to info")
+    findings, recommendations = _split_findings_recommendations(cleaned)
+    conf = _CONF_RE.search(cleaned)
+    confidence = min(1.0, float(conf.group(1))) if conf else None
+    addr = _ADDR_RE.search(cleaned)
+    return {"cleaned": cleaned, "severity": severity, "findings": findings,
+            "recommendations": recommendations, "confidence": confidence,
+            "addresses_incident": int(addr.group(1)) if addr else None}
 
 
 # Regex to find markdown section headers like "### Findings", "## FINDINGS", "**Findings**"
@@ -621,9 +664,13 @@ _SECTION_RE_CACHE = {}
 
 def _section_pattern(name: str) -> re.Pattern:
     if name not in _SECTION_RE_CACHE:
-        # Note: use string concatenation, not f-string — f-string mangles {2,3} quantifiers
+        # Note: use string concatenation, not f-string — f-string mangles {2,3} quantifiers.
+        # No trailing `$` (P3-5): tolerates inline text after the header on the same
+        # line, e.g. "### Findings: No change since analysis #4", while the trailing
+        # `\s*` still eats the newline before real body text on the standard
+        # multi-line form ("### Findings\n<body>").
         _SECTION_RE_CACHE[name] = re.compile(
-            r'^(?:#{2,3}\s*|\*\*)' + name + r'(?:\*\*)?[:\s]*$',
+            r'^(?:#{2,3}\s*|\*\*)' + name + r'(?:\*\*)?\s*[:]?\s*',
             re.IGNORECASE | re.MULTILINE,
         )
     return _SECTION_RE_CACHE[name]
@@ -744,22 +791,15 @@ def run_llm_analysis(
         except Exception:
             pass
 
-    # Parse severity + sections locally (same logic as _parse_and_store) so
-    # we can use the one-shot writer and capture the row id.
-    cleaned = re.sub(r'^```(?:markdown)?\s*\n?', '', text, flags=re.MULTILINE)
-    cleaned = re.sub(r'\n?```\s*$', '', cleaned, flags=re.MULTILINE).strip()
-
-    severity = "info"
-    m = re.search(
-        r'^#{2,3}\s*Severity:\s*(critical|warning|info)',
-        cleaned, re.IGNORECASE | re.MULTILINE,
-    )
-    if m:
-        severity = m.group(1).lower()
-
-    findings, recommendations = _split_findings_recommendations(cleaned)
-    confidence = _extract_confidence(cleaned)
-    addressed_incident = incident_id if incident_id is not None else _extract_addresses_incident(cleaned)
+    # One shared parser for severity/sections/confidence/addresses (P1-18) —
+    # same call as `_parse_and_store` so we can use the one-shot writer and
+    # capture the row id.
+    parsed = parse_agent_response(text)
+    severity = parsed["severity"]
+    findings = parsed["findings"]
+    recommendations = parsed["recommendations"]
+    confidence = parsed["confidence"]
+    addressed_incident = incident_id if incident_id is not None else parsed["addresses_incident"]
 
     try:
         analysis_id = writer.write_agent_analysis_one({
