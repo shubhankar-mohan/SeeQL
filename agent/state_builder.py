@@ -57,6 +57,14 @@ def build_state_report(since: str | None = None, server_id: str | None = None) -
         server_id = get_server_registry().get_default_server_id()
     config = get_config().get("agent", {}).get("state_builder", {})
     regression_threshold = config.get("regression_threshold", 3.0)
+    # Absolute floor (P1c-8): suppress ratio-only "regressions" whose recent
+    # avg is still negligibly fast (e.g. 0.1ms -> 0.5ms). This is the state
+    # builder's OWN floor, read from agent.state_builder.min_recent_avg_sec
+    # (default 0.01s). Like regression_threshold above (3.0 here vs the
+    # alerting rule's 5.0), it is configured independently of
+    # alerting.rules.query_regression.min_recent_avg_sec -- the shipped
+    # default value happens to match, but they are not wired together.
+    min_recent_avg = config.get("min_recent_avg_sec", 0.01)
     long_txn_sec = config.get("long_transaction_sec", 30)
 
     report = StateReport(generated_at=datetime.now(timezone.utc).replace(tzinfo=None).isoformat())
@@ -72,7 +80,7 @@ def build_state_report(since: str | None = None, server_id: str | None = None) -
         # ---------------------------------------------------------------
         if since is None:
             since = _get_last_analysis_time(conn, server_id)
-        report.changes = _build_changes(conn, since, regression_threshold, server_id)
+        report.changes = _build_changes(conn, since, regression_threshold, min_recent_avg, server_id)
 
         # ---------------------------------------------------------------
         # 3. Historical Context
@@ -154,7 +162,7 @@ def _build_current_state(conn, long_txn_sec: int, server_id: str) -> dict:
     return state
 
 
-def _build_changes(conn, since: str, regression_threshold: float, server_id: str) -> dict:
+def _build_changes(conn, since: str, regression_threshold: float, min_recent_avg: float, server_id: str) -> dict:
     changes = {}
     sid = server_id
 
@@ -167,7 +175,7 @@ def _build_changes(conn, since: str, regression_threshold: float, server_id: str
     changes["new_queries"] = [dict(r) for r in rows]
 
     # Query regressions
-    rows = conn.execute(Q.QUERY_REGRESSIONS, (sid, sid, regression_threshold)).fetchall()
+    rows = conn.execute(Q.QUERY_REGRESSIONS, (sid, sid, regression_threshold, min_recent_avg)).fetchall()
     changes["regressions"] = [dict(r) for r in rows]
 
     # Recent deadlocks
@@ -359,7 +367,9 @@ def _render_markdown(report: StateReport) -> str:
     lines.append(f"### Server: Threads_running={running}, Threads_connected={connected}, QPS={qps:.1f}")
     lines.append("")
 
-    # GCP metrics
+    # GCP metrics. Empty is now common because the query filters out stale
+    # rows (>15 min old); say so explicitly rather than silently omitting the
+    # section, so the LLM knows infra data is stale/absent, not just missing.
     gcp = cs.get("gcp_metrics", {})
     if gcp:
         cpu = gcp.get("cpu_utilization")
@@ -368,6 +378,9 @@ def _render_markdown(report: StateReport) -> str:
         lines.append(
             f"### Infrastructure: CPU={_pct(cpu)}, Memory={_pct(mem)}, Disk={_pct(disk)}"
         )
+        lines.append("")
+    else:
+        lines.append("### Infrastructure: no recent GCP metrics (none within the last 15 min)")
         lines.append("")
 
     # Long transactions

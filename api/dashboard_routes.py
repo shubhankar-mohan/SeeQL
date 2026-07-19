@@ -204,6 +204,7 @@ def dashboard_queries(request: Request, range: str = "24h", sort: str = "total_t
         SELECT r.digest, r.recent_avg / NULLIF(b.baseline_avg, 0) as factor
         FROM recent r JOIN baseline b ON r.digest = b.digest
         WHERE b.baseline_avg > 0 AND r.recent_avg / b.baseline_avg >= 3.0
+          AND r.recent_avg >= 0.01
     """)
     regression_digests = {r["digest"] for r in regressions}
 
@@ -469,6 +470,7 @@ def dashboard_todo(request: Request, server: str = None):
                r.recent_avg / NULLIF(b.baseline_avg, 0) as factor
         FROM recent r JOIN baseline b ON r.digest = b.digest
         WHERE b.baseline_avg > 0 AND r.recent_avg / b.baseline_avg >= 3.0
+          AND r.recent_avg >= 0.01
         ORDER BY factor DESC LIMIT 10
     """)
     reg_rem = get_remediation("query_regression")

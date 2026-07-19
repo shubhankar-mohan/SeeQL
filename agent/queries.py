@@ -87,6 +87,7 @@ WHERE snapshot_time = (
     SELECT MAX(snapshot_time) FROM gcp_metric_snapshots WHERE server_id = ?
 )
   AND server_id = ?
+  AND datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now','-15 minutes')
 """
 
 CURRENT_QPS = """
@@ -145,6 +146,7 @@ FROM recent r
 JOIN baseline b ON r.digest = b.digest
 WHERE b.baseline_avg > 0
   AND r.recent_avg / b.baseline_avg >= ?
+  AND r.recent_avg >= ?
 ORDER BY regression_factor DESC
 LIMIT 20
 """

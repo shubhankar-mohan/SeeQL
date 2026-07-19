@@ -87,6 +87,7 @@ agent:
   state_builder:
     trend_threshold: 0.2            # 20% change = "up" or "down"
     regression_threshold: 3.0       # 3x slowdown = regression
+    min_recent_avg_sec: 0.01        # absolute floor: ignore ratio-only "regressions" faster than this
     long_transaction_sec: 30
     lookback_minutes: 5
 
@@ -123,6 +124,7 @@ alerting:
       enabled: true
       severity: warning
       threshold: 5.0
+      min_recent_avg_sec: 0.01        # absolute floor: ignore ratio-only "regressions" faster than this
       cooldown_minutes: 30
       channels: [slack, log]
     ddl_change:

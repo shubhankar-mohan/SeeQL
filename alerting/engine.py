@@ -133,18 +133,42 @@ def evaluate(loop_name: str = "fast") -> list[Alert]:
             # Set channels from config
             alert.channels = rule_cfg.get("channels", ["log"])
 
-            # Dispatch to channels
+            # Dispatch to channels. `delivered` gates the cooldown and must
+            # reflect ONLY real notification channels -- never "log". The log
+            # channel always succeeds and is a *record*, not a delivery; the
+            # shipped config uses `channels: [slack, log]`, so if "log"
+            # counted as delivery the cooldown would be set even when Slack is
+            # down, suppressing every retry for the whole cooldown window
+            # (the exact P1c-6 bug).
             delivered = False
             for ch_name in alert.channels:
                 channel = channels.get(ch_name)
-                if channel:
-                    if channel.send(alert):
+                if channel and channel.send(alert):
+                    if ch_name != "log":
                         delivered = True
 
-            alert.delivered = delivered
-            _cooldowns[scoped_key] = alert.fired_at
+            # If no real channel delivered and "log" wasn't already in the
+            # rule's channel list, still log the alert as a visibility
+            # fallback (LogChannel never fails). This does NOT count towards
+            # `delivered` -- the cooldown stays unset so the real channels get
+            # retried next cycle instead of going quiet.
+            if not delivered and "log" not in alert.channels:
+                log_channel = channels.get("log")
+                if log_channel:
+                    log_channel.send(alert)
 
-            # Store in alert_history
+            alert.delivered = delivered
+
+            # Only start the cooldown once a real (non-log) channel actually
+            # delivered the alert. If delivery failed everywhere (e.g. Slack
+            # is down), leave the cooldown unset so the next evaluation cycle
+            # retries immediately instead of waiting out the full cooldown
+            # while the outage continues.
+            if delivered:
+                _cooldowns[scoped_key] = alert.fired_at
+
+            # Store in alert_history either way -- delivered=0 is recorded
+            # when no real channel succeeded, so the failure stays visible.
             _store_alert(alert)
             fired.append(alert)
 
