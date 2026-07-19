@@ -213,3 +213,72 @@ class TestCooldownSetOnDeliverySuccess(_EngineTestBase):
             assert fired2 == []
         finally:
             self._teardown()
+
+
+class TestRestartSafeCooldown(_EngineTestBase):
+    """P1c-6 across a process restart.
+
+    The live path (evaluate()) already withholds the cooldown when delivery
+    fails. But `_init_cooldowns()` re-seeds `_cooldowns` from alert_history
+    on every process start by taking MAX(fired_at) GROUP BY rule_name with
+    NO `delivered` filter. If the only alert_history row for a rule is a
+    delivered=0 failure (e.g. the process restarted mid-Slack-outage), the
+    restart re-suppresses the rule for the full cooldown window -- silently
+    defeating the live-path fix the moment the process bounces.
+    """
+
+    def test_restart_does_not_reseed_cooldown_from_failed_delivery(
+        self, tmp_path, test_config, monkeypatch
+    ):
+        # Rule configured with "slack" only so a failing Slack channel
+        # leaves `delivered` False and stores a delivered=0 alert_history row.
+        self._setup(tmp_path, test_config, rule_channels=["slack"])
+        try:
+            monkeypatch.setattr("alerting.channels.SlackChannel.send", lambda self, alert: False)
+
+            fired = self.engine.evaluate()
+            assert len(fired) == 1
+            assert fired[0].delivered is False
+            # Live path already withholds the cooldown -- this much is covered
+            # by TestCooldownNotSetOnDeliveryFailure. The gap is what happens
+            # to _cooldowns on the NEXT process start.
+            assert "lock_cascade:default" not in self.engine._cooldowns
+
+            # Simulate a restart: a fresh process has an empty in-memory
+            # _cooldowns dict and _initialized=False, so the next evaluate()
+            # (or a direct call) re-populates it from alert_history.
+            self.engine._cooldowns.clear()
+            self.engine._initialized = False
+            self.engine._init_cooldowns()
+
+            # The only alert_history row for this rule has delivered=0 -- it
+            # must NOT seed a cooldown. Otherwise the rule is re-suppressed
+            # for the full cooldown window even though nothing was ever
+            # actually delivered.
+            assert "lock_cascade:default" not in self.engine._cooldowns
+        finally:
+            self._teardown()
+
+    def test_restart_does_reseed_cooldown_from_delivered_alert(
+        self, tmp_path, test_config, monkeypatch
+    ):
+        """Sanity check the other direction: a genuinely delivered alert
+        MUST still survive a restart and keep suppressing -- otherwise the
+        fix would just be disabling restart-seeding altogether."""
+        self._setup(tmp_path, test_config, rule_channels=["slack"])
+        try:
+            monkeypatch.setattr("alerting.channels.SlackChannel.send", lambda self, alert: True)
+
+            fired = self.engine.evaluate()
+            assert len(fired) == 1
+            assert fired[0].delivered is True
+            assert "lock_cascade:default" in self.engine._cooldowns
+
+            # Simulate a restart.
+            self.engine._cooldowns.clear()
+            self.engine._initialized = False
+            self.engine._init_cooldowns()
+
+            assert "lock_cascade:default" in self.engine._cooldowns
+        finally:
+            self._teardown()

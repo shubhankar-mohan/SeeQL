@@ -23,7 +23,14 @@ _initialized = False
 
 
 def _init_cooldowns():
-    """Load last fire times from alert_history on first run."""
+    """Load last fire times from alert_history on first run.
+
+    Only seeds from rows where delivered=1. Without this filter, a restart
+    during a channel outage (delivered=0 stored, no live cooldown -- see the
+    `delivered` gate in evaluate()) would re-suppress the rule for a full
+    cooldown window on the very next process start, silently defeating the
+    live-path fix the moment the process bounces (P1c-6 across restart).
+    """
     global _initialized
     if _initialized:
         return
@@ -34,6 +41,7 @@ def _init_cooldowns():
             rows = conn.execute("""
                 SELECT rule_name, MAX(fired_at) as last_fired
                 FROM alert_history
+                WHERE delivered = 1
                 GROUP BY rule_name
             """).fetchall()
             for row in rows:
