@@ -324,6 +324,19 @@ METRIC_CONFIGS = {
             WHERE datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-5 minutes')
               AND server_id = ?
         """,
+        # P1c-2: baseline_type=="custom" bypasses the _BASELINE_* templates
+        # (and their _EXCLUDE_INCIDENTS splice) entirely -- _query_baseline
+        # runs this string verbatim. The exclusion has to be hand-rolled
+        # here, at the level that actually selects raw lock_wait_snapshots
+        # ROWS (before GROUP BY collapses them into per-hour counts), so an
+        # hour fully consumed by an incident just vanishes from the
+        # GROUP BY result instead of contributing an inflated count. Same
+        # REPLACE-wrapped BETWEEN correlation as _EXCLUDE_INCIDENTS, but
+        # correlating on the bare table name (no alias here) instead of a
+        # `{table}` template placeholder, and with no new `?` -- server_id
+        # is a plain column reference, so _query_baseline's
+        # `n = q.count("?")` / `[server_id] * n` still binds correctly (2
+        # placeholders, unchanged).
         "baseline_query": """
             SELECT AVG(val) as mean,
                    CASE WHEN COUNT(*) > 1
@@ -336,6 +349,12 @@ METRIC_CONFIGS = {
                 WHERE datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-7 days')
                   AND datetime(REPLACE(snapshot_time,'T',' ')) < datetime('now', '-30 minutes')
                   AND server_id = ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM incident_windows iw
+                      WHERE iw.server_id = lock_wait_snapshots.server_id
+                        AND datetime(REPLACE(lock_wait_snapshots.snapshot_time,'T',' '))
+                            BETWEEN datetime(REPLACE(iw.start_time,'T',' ')) AND datetime(REPLACE(iw.end_time,'T',' '))
+                  )
                 GROUP BY strftime('%Y-%m-%d %H', snapshot_time)
             ) sub
             CROSS JOIN (
@@ -345,6 +364,12 @@ METRIC_CONFIGS = {
                     WHERE datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-7 days')
                       AND datetime(REPLACE(snapshot_time,'T',' ')) < datetime('now', '-30 minutes')
                       AND server_id = ?
+                      AND NOT EXISTS (
+                          SELECT 1 FROM incident_windows iw
+                          WHERE iw.server_id = lock_wait_snapshots.server_id
+                            AND datetime(REPLACE(lock_wait_snapshots.snapshot_time,'T',' '))
+                                BETWEEN datetime(REPLACE(iw.start_time,'T',' ')) AND datetime(REPLACE(iw.end_time,'T',' '))
+                      )
                     GROUP BY strftime('%Y-%m-%d %H', snapshot_time)
                 )
             ) avg_sub
@@ -381,6 +406,14 @@ METRIC_CONFIGS = {
               AND requests.raw_value > 0
             ORDER BY reads.snapshot_time DESC LIMIT 1
         """,
+        # P1c-2: same gap as lock_frequency above -- baseline_type=="custom"
+        # bypasses _EXCLUDE_INCIDENTS entirely. Here the exclusion only
+        # needs to appear ONCE, inside the `ratios` CTE's WHERE clause,
+        # because both downstream references (`FROM ratios` and avg_sub's
+        # `FROM ratios`) read the same already-filtered CTE -- unlike
+        # lock_frequency, which repeats the raw SELECT per branch. Still no
+        # new `?`: correlates on the `reads` alias already in scope, so
+        # _query_baseline's placeholder count (1) is unchanged.
         "baseline_query": """
             WITH ratios AS (
                 SELECT
@@ -396,6 +429,12 @@ METRIC_CONFIGS = {
                   AND requests.raw_value > 0
                   AND datetime(REPLACE(reads.snapshot_time,'T',' ')) >= datetime('now', '-24 hours')
                   AND datetime(REPLACE(reads.snapshot_time,'T',' ')) < datetime('now', '-30 minutes')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM incident_windows iw
+                      WHERE iw.server_id = reads.server_id
+                        AND datetime(REPLACE(reads.snapshot_time,'T',' '))
+                            BETWEEN datetime(REPLACE(iw.start_time,'T',' ')) AND datetime(REPLACE(iw.end_time,'T',' '))
+                  )
             )
             SELECT AVG(val) as mean,
                    CASE WHEN COUNT(*) > 1

@@ -359,3 +359,100 @@ class TestIncidentExclusionAndVarianceFloor:
             f"flat metric (all history=1) with a small move to 3 must not "
             f"explode the z-score: {b}"
         )
+
+
+class TestCustomBaselineIncidentExclusion:
+    """P1c-2 gap: lock_frequency and buffer_pool_hit_ratio use
+    baseline_type: "custom" and run their hand-written baseline_query
+    verbatim via _query_baseline() -- they never went through
+    _EXCLUDE_INCIDENTS (spliced only into _BASELINE_SAME_HOUR_DOW /
+    _BASELINE_24H), and the _BASELINE_ALL fallback explicitly skips
+    baseline_type == "custom" too. So an ongoing lock cascade -- the
+    headline metric this whole incident-exclusion feature exists to
+    protect -- poisoned its own baseline forever."""
+
+    def test_lock_frequency_baseline_excludes_incident_windows(self, tmp_path, test_config):
+        """3 clean hour-buckets (2 lock waits/hour) and 3 incident
+        hour-buckets (20 lock waits/hour, entirely inside a stored
+        incident_windows row -- a simulated ongoing lock cascade) are
+        seeded into lock_wait_snapshots over the last ~33 hours.
+
+        lock_frequency's baseline_query counts rows per hour
+        (GROUP BY strftime('%Y-%m-%d %H', snapshot_time)) and then
+        averages those per-hour counts. Without exclusion, the mean is
+        dragged up to (2+2+2+20+20+20)/6 = 11.0. With exclusion, the
+        incident buckets' raw rows are filtered out of the per-hour
+        COUNT(*) before GROUP BY even runs, so those hours vanish from the
+        result entirely and the mean reflects only the 3 clean buckets
+        (~2.0), same shape as the SAME_HOUR_DOW/24H exclusion proven in
+        TestIncidentExclusionAndVarianceFloor above."""
+        from alerting.anomaly import compute_baseline, METRIC_CONFIGS
+
+        db_path = tmp_path / "lock_freq_exclusion.db"
+        test_config["monitoring_db"]["path"] = str(db_path)
+        config_module._config = test_config
+
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript(SCHEMA_SQL_PATH.read_text())
+
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+        def fmt(dt):
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        def hour_anchor(hours_ago):
+            # Truncate to the top of the hour first so rows offset by a few
+            # minutes from the anchor stay inside the same hour bucket, and
+            # distinct hours_ago values land on distinct, non-adjacent-risk
+            # hour boundaries.
+            return now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=hours_ago)
+
+        # 3 clean hour-buckets, comfortably inside the 7-day/30-minute
+        # window, each with exactly 2 lock_wait_snapshots rows -> val=2.
+        for hours_ago in (10, 15, 20):
+            anchor = hour_anchor(hours_ago)
+            for i in range(2):
+                conn.execute(
+                    "INSERT INTO lock_wait_snapshots (snapshot_time, server_id, wait_seconds) "
+                    "VALUES (?, 'default', 12)",
+                    (fmt(anchor + timedelta(minutes=5 * i)),),
+                )
+
+        # 3 incident hour-buckets (30/31/32 hours ago), each with 20 rows
+        # -> val=20 per bucket pre-fix. One incident_windows row spans all
+        # three consecutive hours [-32h, -28h] so every row in each bucket
+        # falls inside it; the clean buckets (10/15/20h ago) are well
+        # outside this range.
+        incident_start = hour_anchor(32)
+        incident_end = hour_anchor(28)
+        conn.execute(
+            "INSERT INTO incident_windows "
+            "(server_id, start_time, end_time, severity, involved_metrics, event_count, status) "
+            "VALUES ('default', ?, ?, 'critical', '[\"lock_frequency\"]', 1, 'detected')",
+            (fmt(incident_start), fmt(incident_end)),
+        )
+        for hours_ago in (30, 31, 32):
+            anchor = hour_anchor(hours_ago)
+            for i in range(20):
+                conn.execute(
+                    "INSERT INTO lock_wait_snapshots (snapshot_time, server_id, wait_seconds) "
+                    "VALUES (?, 'default', 30)",
+                    (fmt(anchor + timedelta(seconds=90 * i)),),
+                )
+
+        conn.commit()
+        conn.close()
+        reset_connections()
+
+        b = compute_baseline("lock_frequency", METRIC_CONFIGS["lock_frequency"])
+        assert b is not None
+        assert b.sample_count == 3, (
+            f"expected exactly the 3 non-incident hour-buckets, got "
+            f"{b.sample_count} (incident-window rows were not excluded from "
+            f"lock_frequency's custom baseline_query)"
+        )
+        assert abs(b.mean - 2.0) < 0.01, (
+            f"baseline mean {b.mean} should reflect only the 3 clean "
+            f"hour-buckets (~2.0); a broken exclusion pulls it toward the "
+            f"inflated incident buckets (mean would be ~11.0)"
+        )
