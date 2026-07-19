@@ -246,3 +246,116 @@ class TestAnomalyDetection:
         from alerting.anomaly import evaluate_anomaly
         alert = evaluate_anomaly({"z_threshold": 3.0})
         assert alert is None
+
+
+class TestIncidentExclusionAndVarianceFloor:
+    """P1c-2 (exclude incident windows from the DETECTION baseline) and
+    P1c-3 (variance floor so a flat/near-flat baseline can't explode a
+    z-score off a near-zero denominator)."""
+
+    def test_baseline_excludes_incident_windows(self, tmp_path, test_config):
+        """Half of the same-hour/same-weekday history sits inside a stored
+        incident_windows row with 10x values. compute_baseline's mean must
+        reflect only the non-incident samples — otherwise the DETECTION
+        baseline is poisoned by the very incident it should be compared
+        against (P1c-2)."""
+        from alerting.anomaly import compute_baseline, METRIC_CONFIGS
+
+        db_path = tmp_path / "incident_exclusion.db"
+        test_config["monitoring_db"]["path"] = str(db_path)
+        config_module._config = test_config
+
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript(SCHEMA_SQL_PATH.read_text())
+
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+        def fmt(dt):
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        # 3 weeks of same-hour/same-weekday history using pure whole-day
+        # offsets (7/14/21 days), so hour-of-day and day-of-week always match
+        # 'now' exactly regardless of wall-clock alignment — no midnight or
+        # hour-boundary flakiness, and comfortably clear of the 28-day window
+        # edge. Each week contributes one clean sample (value=10) and one
+        # incident-window sample (value=100, 10x) offset by 30s so an
+        # incident_windows row can bracket just the latter.
+        for days_ago in (7, 14, 21):
+            anchor = now - timedelta(days=days_ago)
+            clean_ts = anchor
+            incident_ts = anchor + timedelta(seconds=30)
+            conn.execute(
+                "INSERT INTO global_status_snapshots (snapshot_time, variable_name, raw_value) "
+                "VALUES (?, 'Threads_running', 10)",
+                (fmt(clean_ts),),
+            )
+            conn.execute(
+                "INSERT INTO global_status_snapshots (snapshot_time, variable_name, raw_value) "
+                "VALUES (?, 'Threads_running', 100)",
+                (fmt(incident_ts),),
+            )
+            conn.execute(
+                "INSERT INTO incident_windows "
+                "(server_id, start_time, end_time, severity, involved_metrics, event_count, status) "
+                "VALUES ('default', ?, ?, 'warning', '[\"threads_running\"]', 1, 'detected')",
+                (fmt(incident_ts - timedelta(seconds=15)), fmt(incident_ts + timedelta(seconds=15))),
+            )
+
+        # Current reading: comfortably clear of the flat-baseline gate (Step
+        # 3) so this test isolates the exclusion (Step 2) rather than tripping
+        # the "no material move" early-return. sample_count/mean assertions
+        # below are what actually prove exclusion; this just keeps
+        # compute_baseline from returning None before we can check them.
+        conn.execute(
+            "INSERT INTO global_status_snapshots (snapshot_time, variable_name, raw_value) "
+            "VALUES (?, 'Threads_running', 20)",
+            (fmt(now - timedelta(seconds=5)),),
+        )
+        conn.commit()
+        conn.close()
+        reset_connections()
+
+        b = compute_baseline("threads_running", METRIC_CONFIGS["threads_running"])
+        assert b is not None
+        assert b.sample_count == 3, (
+            f"expected exactly the 3 non-incident samples, got {b.sample_count} "
+            f"(incident-window rows were not excluded)"
+        )
+        assert abs(b.mean - 10.0) < 0.01, (
+            f"baseline mean {b.mean} should reflect only the non-incident samples (10.0); "
+            f"a broken exclusion would pull it toward the 10x incident values (~55.0)"
+        )
+
+    def test_flat_metric_does_not_false_alarm(self, anomaly_db):
+        """20 identical samples (value=1) with current=3 must not explode
+        into a huge z-score — guards the old `stddev = mean * 0.01` fallback,
+        which turned any nonzero move on a flat baseline into z~100+ (P1c-3)."""
+        from alerting.anomaly import compute_baseline, METRIC_CONFIGS
+
+        conn = sqlite3.connect(str(anomaly_db))
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        for i in range(20):
+            ts = (now - timedelta(minutes=35 + i * 60)).strftime("%Y-%m-%d %H:%M:%S")
+            conn.execute(
+                "INSERT INTO global_status_snapshots (snapshot_time, variable_name, raw_value) "
+                "VALUES (?, 'Threads_connected', 1)",
+                (ts,),
+            )
+        current_ts = (now - timedelta(seconds=20)).strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute(
+            "INSERT INTO global_status_snapshots (snapshot_time, variable_name, raw_value) "
+            "VALUES (?, 'Threads_connected', 3)",
+            (current_ts,),
+        )
+        conn.commit()
+        conn.close()
+        reset_connections()
+
+        b = compute_baseline("threads_connected", METRIC_CONFIGS["threads_connected"])
+        # Either compute_baseline declines to call this an anomaly at all
+        # (None), or — if it does return a Baseline — the z-score must be
+        # sane, nowhere near the z~100+ explosion the old fallback produced.
+        assert b is None or abs(b.z_score) < 10, (
+            f"flat metric (all history=1) with a small move to 3 must not "
+            f"explode the z-score: {b}"
+        )

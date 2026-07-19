@@ -18,9 +18,7 @@ Metrics monitored:
 are active in METRIC_CONFIGS.)
 """
 
-import json
 import logging
-import math
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -104,7 +102,44 @@ class AnomalyResult:
 # All baseline queries use _TS() macro to handle both '2026-03-08T13:29:14' and '2026-03-08 13:29:14'
 _TS = "REPLACE({time_col}, 'T', ' ')"
 
-# Same hour, same day-of-week, last 4 weeks
+# Excludes samples that fall inside a recorded incident window on the same
+# server (P1c-2). Without this, the DETECTION baseline is poisoned by the
+# very incident data it should be comparing the current value against — an
+# ongoing lock cascade inflates its own baseline mean/stddev, which can mask
+# the next incident or blow up the "normal" band. Mirrors the exclusion the
+# display query already uses (agent/queries.py BASELINE_THREADS_RUNNING /
+# BASELINE_QPS), but correlates via `{table}.server_id` — a plain column
+# reference, not a bound parameter — instead of a fresh `?`. `{table}` has no
+# alias in these templates, so qualifying by its real name is the only way to
+# reach the outer row from inside the NOT EXISTS subquery, and it always
+# matches whichever server_id the enclosing `{extra_where}` already filtered
+# on. This keeps the existing (server_id, server_id) param tuples in
+# _query_baseline() unchanged — no new `?` to thread through.
+_EXCLUDE_INCIDENTS = """
+      AND NOT EXISTS (
+          SELECT 1 FROM incident_windows iw
+          WHERE iw.server_id = {table}.server_id
+            AND datetime(""" + _TS + """)
+                BETWEEN datetime(REPLACE(iw.start_time,'T',' ')) AND datetime(REPLACE(iw.end_time,'T',' '))
+      )
+"""
+
+
+def _same_hour_band() -> str:
+    """SQL IN-list for the current UTC hour +/- 1, wraparound, zero-padded.
+
+    P1c-10: an exact-hour match over a 28-day same-weekday window yields only
+    ~4 samples (one per matching weekday) — too thin for a stable stddev. A
+    +/-1-hour band roughly triples that to ~12. The three hours are computed
+    here from wall-clock integers, not user input, so interpolating them
+    directly into the query string is injection-safe.
+    """
+    h = datetime.now(timezone.utc).hour
+    hours = ((h - 1) % 24, h, (h + 1) % 24)
+    return ", ".join(f"'{x:02d}'" for x in hours)
+
+
+# Same hour (+/- 1h band), same day-of-week, last 4 weeks
 _BASELINE_SAME_HOUR_DOW = """
 SELECT AVG(val) as mean,
        CASE WHEN COUNT(*) > 1
@@ -117,8 +152,8 @@ FROM (
     WHERE datetime(""" + _TS + """) >= datetime('now', '-28 days')
       AND datetime(""" + _TS + """) < datetime('now', '-10 minutes')
       AND strftime('%w', """ + _TS + """) = strftime('%w', 'now')
-      AND strftime('%H', """ + _TS + """) = strftime('%H', 'now')
-      {extra_where}
+      AND strftime('%H', """ + _TS + """) IN ({hour_band})
+      {extra_where}""" + _EXCLUDE_INCIDENTS + """
 ) sub
 CROSS JOIN (
     SELECT AVG({value_col}) as avg_val
@@ -126,8 +161,8 @@ CROSS JOIN (
     WHERE datetime(""" + _TS + """) >= datetime('now', '-28 days')
       AND datetime(""" + _TS + """) < datetime('now', '-10 minutes')
       AND strftime('%w', """ + _TS + """) = strftime('%w', 'now')
-      AND strftime('%H', """ + _TS + """) = strftime('%H', 'now')
-      {extra_where}
+      AND strftime('%H', """ + _TS + """) IN ({hour_band})
+      {extra_where}""" + _EXCLUDE_INCIDENTS + """
 ) avg_sub
 """
 
@@ -143,14 +178,14 @@ FROM (
     FROM {table}
     WHERE datetime(""" + _TS + """) >= datetime('now', '-24 hours')
       AND datetime(""" + _TS + """) < datetime('now', '-30 minutes')
-      {extra_where}
+      {extra_where}""" + _EXCLUDE_INCIDENTS + """
 ) sub
 CROSS JOIN (
     SELECT AVG({value_col}) as avg_val
     FROM {table}
     WHERE datetime(""" + _TS + """) >= datetime('now', '-24 hours')
       AND datetime(""" + _TS + """) < datetime('now', '-30 minutes')
-      {extra_where}
+      {extra_where}""" + _EXCLUDE_INCIDENTS + """
 ) avg_sub
 """
 
@@ -393,6 +428,33 @@ def _resolve_server_id(server_id: str | None) -> str:
         return "default"
 
 
+# Variance-floor constants (P1c-3). A flat/near-flat baseline makes a raw
+# z-score explode on a near-zero denominator — the fallback this replaces
+# (stddev = mean * 0.01) could turn a trivial wobble into z=100+. _MIN_STDDEV
+# floors the stddev so the resulting z-score stays finite. _MIN_ABS_DELTA is
+# an ADDITIONAL gate for integer count metrics only (threads_running,
+# threads_connected, qps): below that absolute move, don't even call it an
+# anomaly. It intentionally has no entry — and no mean-relative fallback —
+# for bounded-ratio metrics (buffer_pool_hit_ratio, cpu/memory_utilization):
+# on a 0..1 scale a "50% of the mean" absolute move is structurally
+# impossible, which would suppress a real catastrophic move (e.g. hit ratio
+# 0.999 -> 0.95); those metrics rely on the floored stddev alone.
+_MIN_STDDEV = {
+    "qps": 1.0,
+    "threads_running": 2.0,
+    "threads_connected": 5.0,
+    "cpu_utilization": 0.02,
+    "memory_utilization": 0.02,
+    "buffer_pool_hit_ratio": 0.005,
+    "lock_frequency": 1.0,
+}
+_MIN_ABS_DELTA = {
+    "threads_running": 5,
+    "threads_connected": 20,
+    "qps": 50,
+}
+
+
 def compute_baseline(
     metric_name: str,
     config: dict,
@@ -430,15 +492,18 @@ def compute_baseline(
             mean = float(brow["mean"] or 0)
             stddev = float(brow["stddev"] or 0)
 
-            # Guard: if stddev is 0 and we have few samples, skip
-            # (not enough variance data to detect anomalies).
-            # With many samples and zero stddev, use a small epsilon
-            # so any meaningful deviation is detected.
-            if stddev == 0:
-                if brow["cnt"] < 10:
+            # Variance floor (P1c-3): flat/near-flat history would make a raw
+            # z-score explode on a near-zero denominator, so floor the stddev.
+            # INTEGER count metrics (those with a _MIN_ABS_DELTA entry) also
+            # require a material absolute move — a 1->3 threads blip is noise.
+            # Bounded-ratio metrics (hit_ratio, cpu, memory) use the stddev
+            # floor ALONE: a mean*0.5 absolute move is impossible on a 0-1
+            # scale and would suppress a catastrophic 0.999->0.95 drop.
+            if stddev == 0 or stddev < max(mean * 0.05, _MIN_STDDEV.get(metric_name, 1.0)):
+                abs_delta_floor = _MIN_ABS_DELTA.get(metric_name)
+                if abs_delta_floor is not None and abs(current - mean) < abs_delta_floor:
                     return None
-                # All historical values identical — use 1% of mean as pseudo-stddev
-                stddev = abs(mean) * 0.01 if mean != 0 else 0.001
+                stddev = max(stddev, _MIN_STDDEV.get(metric_name, 1.0))
 
             return Baseline(
                 metric=metric_name,
@@ -466,7 +531,7 @@ def _query_baseline(conn, config: dict, server_id: str):
         params = tuple([server_id] * n)
         return conn.execute(q, params).fetchone()
     elif config["baseline_type"] == "same_hour":
-        query = _BASELINE_SAME_HOUR_DOW.format(**config)
+        query = _BASELINE_SAME_HOUR_DOW.format(hour_band=_same_hour_band(), **config)
         # {extra_where} is inlined twice in the template
         return conn.execute(query, (server_id, server_id)).fetchone()
     else:  # 24h
@@ -603,8 +668,6 @@ def evaluate_anomaly(rule_config: dict, server_id: str | None = None) -> Alert |
 
     # Build message from worst anomaly
     worst = anomalies[0]
-    direction_word = "above" if worst.direction == "high" else "below"
-    desc = METRIC_CONFIGS.get(worst.metric, {}).get("description", worst.metric)
 
     message_parts = []
     for a in anomalies[:3]:  # Top 3 in message
