@@ -4,7 +4,6 @@ import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -222,6 +221,34 @@ class TestIncidentWindowing:
         incidents = _incidents(incident_db)
         assert len(incidents) == 1
         assert incidents[0]["event_count"] == 2
+
+    def test_out_of_order_event_does_not_rewind_end_time(self, incident_db):
+        """P1-20: a late-arriving event with an OLDER `detected_at` than the
+        incident's current `end_time` must still extend the incident (same
+        as any other in-gap event) but must NOT move `end_time` backwards.
+        Before the fix, the extension unconditionally set
+        `end_time = event["detected_at"]`, so this out-of-order event would
+        rewind end_time from ~5 minutes ago to ~20 minutes ago."""
+        persist([_make_result(5, "threads_running")])
+        new_ids = update_windows("default")
+        assert len(new_ids) == 1
+        incident_id = new_ids[0]
+
+        before = _incidents(incident_db)[0]
+        assert before["id"] == incident_id
+        original_end_time = before["end_time"]
+
+        # Out-of-order: this event's detected_at (20 min ago) is OLDER than
+        # the incident's current end_time (~5 min ago) but still within the
+        # gap/duration window, so it extends rather than fragments.
+        persist([_make_result(20, "lock_frequency")])
+        new_second = update_windows("default")
+        assert new_second == []  # extends, does not fragment
+
+        after = _incidents(incident_db)[0]
+        assert after["id"] == incident_id
+        assert after["end_time"] == original_end_time  # NOT rewound
+        assert after["event_count"] == 2
 
     def test_metric_dedup(self, incident_db):
         """Duplicate metrics in involved_metrics should collapse."""

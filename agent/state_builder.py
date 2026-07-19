@@ -12,6 +12,7 @@ Markdown string (for the LLM prompt).
 
 import json
 import logging
+import re as _re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -355,7 +356,7 @@ def _render_markdown(report: StateReport) -> str:
     bp = cs.get("buffer_pool", {})
     if bp:
         hit = bp.get("hit_ratio")
-        hit_str = f"{hit:.4f}" if hit else "N/A"
+        hit_str = f"{hit:.4f}" if hit is not None else "N/A"
         lines.append(f"### Buffer Pool: hit_ratio={hit_str}, dirty_pages={bp.get('dirty_pages', 0)}")
     lines.append("")
 
@@ -480,11 +481,11 @@ def _render_markdown(report: StateReport) -> str:
     baseline_tr = hist.get("baseline_threads_running")
     if baseline_tr is not None:
         current_tr = threads.get("Threads_running", "?")
-        lines.append(f"- Threads_running now: {current_tr}, same hour last week avg: {baseline_tr:.1f}")
+        lines.append(f"- Threads_running now: {current_tr}, 28-day same-hour avg: {baseline_tr:.1f}")
 
     baseline_qps = hist.get("baseline_qps")
     if baseline_qps is not None:
-        lines.append(f"- QPS now: {qps:.1f}, same hour last week avg: {baseline_qps:.1f}")
+        lines.append(f"- QPS now: {qps:.1f}, 28-day same-hour avg: {baseline_qps:.1f}")
 
     peak_24h = hist.get("peak_threads_24h")
     if peak_24h is not None:
@@ -566,7 +567,6 @@ def _pct(val) -> str:
     return f"{val * 100:.1f}%"
 
 
-import re as _re
 _TABLE_RE = _re.compile(
     r'(?:FROM|JOIN|UPDATE|INTO)\s+`?(?:\w+`?\.`?)?(\w+)`?', _re.IGNORECASE)
 
