@@ -287,10 +287,15 @@ def check_perf_schema_consumers() -> CheckResult:
             detail=f"all {len(rows)} required consumers ON",
         )
     except Exception as e:
+        # Mirrors check_performance_schema's pattern: a connection failure
+        # (or a query failure that stems from performance_schema itself
+        # being unreachable/disabled) is reported under the same E002
+        # catalog entry, so the "-> Run: ..." remediation isn't dropped.
         return CheckResult(
             name="performance_schema consumers enabled",
             passed=False,
             detail=str(e)[:60],
+            error_code="E002",
         )
 
 

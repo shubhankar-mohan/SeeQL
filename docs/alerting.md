@@ -122,11 +122,13 @@ genuinely representative same-hour baseline needs several weeks of data to
 accumulate — up to the full 28-day window. To reach a usable sample count
 sooner, the same-hour query matches a **±1-hour band** (the current UTC
 hour and its two neighbours) rather than an exact hour, tripling the rows
-that qualify for each matching weekday. `min_samples` is 3: until the
-preferred same-hour window holds at least that many samples,
-`compute_baseline()` falls back to the all-data baseline (every sample
-older than 10 minutes), so anomaly detection works from early on but off a
-coarser, non-seasonal band. In practice, sensitivity ramps up over roughly
+that qualify for each matching weekday. `min_samples` ranges from 3 to 5
+depending on the metric (3 for most; `threads_connected`,
+`memory_utilization`, and `buffer_pool_hit_ratio` require 5) — until the
+preferred window holds at least that many samples, `compute_baseline()`
+falls back to the all-data baseline (every sample older than 10 minutes),
+so anomaly detection works from early on but off a coarser, non-seasonal
+band. In practice, sensitivity ramps up over roughly
 the first few weeks as same-weekday history builds and detection shifts
 onto the tighter weekly-seasonal baseline. (Metrics configured without a
 weekly pattern — e.g. `threads_connected`, `memory_utilization` — use a
