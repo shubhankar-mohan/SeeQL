@@ -275,6 +275,71 @@ def write_agent_analysis_one(row: dict) -> int:
         return cursor.lastrowid
 
 
+def write_agent_analysis_and_link(
+    analysis: dict, incident_id: int | None, server_id: str | None = None,
+    status: str = "analyzed",
+) -> tuple[int, bool]:
+    """
+    Insert an agent_analyses row and (when `incident_id` is given) link it to
+    an OPEN incident_windows row, in ONE get_mon_connection() transaction
+    (P1-21).
+
+    Storing the analysis and linking it to its incident used to be two
+    separate get_mon_connection() calls/commits (write_agent_analysis_one()
+    then alerting.incidents.set_incident_analysis()). Between them, a
+    concurrently-running resolve_returned_to_baseline() sweep could resolve
+    the incident, and the old *blind* UPDATE in the link step would then
+    resurrect it — a resolve-then-resurrect race. Running both statements on
+    the same connection, under the single get_mon_connection() lock/commit,
+    closes that window: either both land together, or the guarded UPDATE
+    below correctly no-ops against whatever status is already committed.
+
+    We can't just call alerting.incidents.set_incident_analysis() here: that
+    function opens its own get_mon_connection(), and _mon_lock is a plain
+    (non-reentrant) threading.Lock — calling it from inside a connection we
+    already hold would deadlock. So the guard below is intentionally a
+    duplicate of that function's UPDATE (same WHERE clause: only an OPEN
+    incident — status 'detected'/'analyzed' — on the given server_id is ever
+    touched; a 'resolved' incident is never resurrected). Keep both in sync.
+
+    Returns:
+        (analysis_id, linked) — `linked` is True only if the UPDATE actually
+        changed a row (mirrors set_incident_analysis's return contract).
+        `linked` is always False when incident_id is None.
+    """
+    cols = [
+        "analyzed_at", "server_id", "analysis_type", "severity", "input_summary",
+        "findings", "recommendations", "applied", "outcome_notes",
+    ]
+    placeholders = ", ".join(["?"] * len(cols))
+    col_names = ", ".join(cols)
+    insert_sql = f"INSERT INTO agent_analyses ({col_names}) VALUES ({placeholders})"
+
+    def _get(col: str):
+        val = analysis.get(col)
+        if val is None and col == "server_id":
+            return "default"
+        return _serialize_value(val)
+
+    values = tuple(_get(c) for c in cols)
+
+    with get_mon_connection() as conn:
+        cursor = conn.execute(insert_sql, values)
+        analysis_id = cursor.lastrowid
+
+        linked = False
+        if incident_id is not None:
+            link_cursor = conn.execute(
+                "UPDATE incident_windows SET status = ?, analysis_id = ? "
+                "WHERE id = ? AND status IN ('detected','analyzed')"
+                + (" AND server_id = ?" if server_id else ""),
+                (status, analysis_id, incident_id, *((server_id,) if server_id else ())),
+            )
+            linked = link_cursor.rowcount > 0
+
+    return analysis_id, linked
+
+
 def write_inbound_alert(row: dict) -> int:
     """
     Insert a single inbound_alerts row and return its lastrowid.

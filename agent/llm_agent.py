@@ -524,14 +524,47 @@ def _is_quiet(report) -> bool:
     return True
 
 
+def _resolve_addressed_incident(
+    incident_id: int | None, self_reported: int | None,
+    analysis_type: str, source_text: str,
+) -> int | None:
+    """Decide which incident (if any) an analysis should link to (P1-4).
+
+    An explicit `incident_id` — the caller (scheduler/replay) driving this
+    analysis *at* a specific incident — is authoritative and is never gated.
+
+    A model's self-reported `### Addresses incident #N` is a different
+    thing: a blind "routine" run has no incident in its prompt at all, so an
+    unprompted self-report there is far more likely to be hallucinated than
+    real — it's honored only when the id genuinely appears in the text the
+    model was shown. Non-routine runs (incident/investigation/replay) are
+    already triggered with real incident context, so their self-report is
+    trusted outright.
+    """
+    if incident_id is not None:
+        return incident_id
+    if self_reported is None:
+        return None
+    if analysis_type != "routine" or f"#{self_reported}" in (source_text or ""):
+        return self_reported
+    logger.warning(
+        f"Ignoring self-reported '### Addresses incident #{self_reported}' from a "
+        f"{analysis_type} analysis — id not present in the text the model was shown"
+    )
+    return None
+
+
 def _parse_and_store(text: str, analysis_type: str, input_summary: str,
                      server_id: str = "default", incident_id: int | None = None) -> dict:
     """Parse agent response and store in agent_analyses table.
 
     If `incident_id` is given (or the response self-reports one via
-    `### Addresses incident #N`), the newly-stored analysis is linked back to
-    that `incident_windows` row via `alerting.incidents.set_incident_analysis`
-    — best-effort, never raises.
+    `### Addresses incident #N` and that self-report passes
+    `_resolve_addressed_incident`'s gate — P1-4), the newly-stored analysis
+    is linked to that `incident_windows` row in the same transaction as the
+    insert via `storage.writer.write_agent_analysis_and_link` (P1-21) —
+    best-effort, never raises. The link itself never resurrects a
+    resolved/closed incident and never crosses server_id.
     """
     # One shared parser for severity/sections/confidence/addresses (P1-18) —
     # see `parse_agent_response` below for the tolerant-form fixes (P1-2,
@@ -541,9 +574,9 @@ def _parse_and_store(text: str, analysis_type: str, input_summary: str,
     findings = parsed["findings"]
     recommendations = parsed["recommendations"]
     confidence = parsed["confidence"]
-    # An explicit incident_id (scheduler-driven) wins over anything the model
-    # self-reports; otherwise fall back to what the model claims to address.
-    addressed_incident = incident_id if incident_id is not None else parsed["addresses_incident"]
+    addressed_incident = _resolve_addressed_incident(
+        incident_id, parsed["addresses_incident"], analysis_type, input_summary
+    )
 
     analysis = {
         "analyzed_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
@@ -561,22 +594,20 @@ def _parse_and_store(text: str, analysis_type: str, input_summary: str,
 
     analysis_id = None
     try:
-        analysis_id = writer.write_agent_analysis_one(analysis)
+        analysis_id, linked = writer.write_agent_analysis_and_link(
+            analysis, addressed_incident, server_id
+        )
         logger.info(f"Stored {analysis_type} analysis (severity={severity})")
+        if addressed_incident is not None and not linked:
+            logger.info(
+                f"Analysis {analysis_id} not linked to incident {addressed_incident} "
+                "(incident is not open on this server)"
+            )
     except Exception as e:
-        logger.error(f"Failed to store analysis: {e}")
+        logger.error(f"Failed to store/link analysis: {e}")
 
     analysis["id"] = analysis_id
     analysis["raw_response"] = text
-
-    if addressed_incident is not None and analysis_id is not None:
-        try:
-            from alerting.incidents import set_incident_analysis
-            set_incident_analysis(addressed_incident, analysis_id, status="analyzed")
-        except Exception as e:
-            logger.warning(
-                f"Failed to link analysis {analysis_id} to incident {addressed_incident}: {e}"
-            )
 
     return analysis
 
@@ -744,9 +775,12 @@ def run_llm_analysis(
     and a lower `max_tool_rounds_override` so Phase 2 stays bounded.
 
     incident_id: When set (or when the response self-reports one via
-    `### Addresses incident #N`), the stored analysis is linked back to that
-    `incident_windows` row via `alerting.incidents.set_incident_analysis`
-    (best-effort — never raises).
+    `### Addresses incident #N` and that self-report passes
+    `_resolve_addressed_incident`'s gate — P1-4), the stored analysis is
+    linked to that `incident_windows` row in the same transaction as the
+    insert via `storage.writer.write_agent_analysis_and_link` (P1-21) —
+    best-effort, never raises. The link never resurrects a resolved/closed
+    incident and never crosses server_id.
     """
     config = get_config().get("agent", {})
     backend = _detect_backend(config)
@@ -799,31 +833,33 @@ def run_llm_analysis(
     findings = parsed["findings"]
     recommendations = parsed["recommendations"]
     confidence = parsed["confidence"]
-    addressed_incident = incident_id if incident_id is not None else parsed["addresses_incident"]
+    addressed_incident = _resolve_addressed_incident(
+        incident_id, parsed["addresses_incident"], analysis_type, prompt
+    )
 
     try:
-        analysis_id = writer.write_agent_analysis_one({
-            "analyzed_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
-            "server_id": server_id,
-            "analysis_type": analysis_type,
-            "severity": severity,
-            "input_summary": prompt[:2000],
-            "findings": json.dumps(findings),
-            "recommendations": json.dumps(recommendations),
-            "applied": 0,
-            "outcome_notes": json.dumps({"confidence": confidence}) if confidence is not None else None,
-        })
+        analysis_id, linked = writer.write_agent_analysis_and_link(
+            {
+                "analyzed_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+                "server_id": server_id,
+                "analysis_type": analysis_type,
+                "severity": severity,
+                "input_summary": prompt[:2000],
+                "findings": json.dumps(findings),
+                "recommendations": json.dumps(recommendations),
+                "applied": 0,
+                "outcome_notes": json.dumps({"confidence": confidence}) if confidence is not None else None,
+            },
+            addressed_incident,
+            server_id,
+        )
+        if addressed_incident is not None and not linked:
+            logger.info(
+                f"Analysis {analysis_id} not linked to incident {addressed_incident} "
+                "(incident is not open on this server)"
+            )
     except Exception as e:
         logger.warning(f"Failed to persist {analysis_type} analysis: {e}")
         analysis_id = None
-
-    if addressed_incident is not None and analysis_id is not None:
-        try:
-            from alerting.incidents import set_incident_analysis
-            set_incident_analysis(addressed_incident, analysis_id, status="analyzed")
-        except Exception as e:
-            logger.warning(
-                f"Failed to link analysis {analysis_id} to incident {addressed_incident}: {e}"
-            )
 
     return {"text": text, "analysis_id": analysis_id, "severity": severity, "confidence": confidence}

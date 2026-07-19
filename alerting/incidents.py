@@ -201,20 +201,31 @@ def _attach_or_create(
 # ---------------------------------------------------------------------------
 # Incident -> analysis lifecycle (P1.3 / E(a))
 # ---------------------------------------------------------------------------
-def set_incident_analysis(incident_id: int, analysis_id: int, status: str = "analyzed") -> None:
-    """
-    Link a stored `agent_analyses` row to an `incident_windows` row and move
-    the incident out of "detected".
+def set_incident_analysis(incident_id: int, analysis_id: int, status: str = "analyzed",
+                          server_id: str | None = None) -> bool:
+    """Link an analysis to an OPEN incident on the same server. Returns True if a row changed.
+    Never resurrects resolved/closed incidents (post-mortems don't mutate lifecycle).
 
     Called by `agent.llm_agent._parse_and_store` / `run_llm_analysis` once an
-    LLM analysis that addresses this incident has been persisted, and by the
-    scheduler right after it triggers that analysis.
+    LLM analysis that addresses this incident has been persisted (those two
+    call sites actually go through `storage.writer.write_agent_analysis_and_link`
+    for atomicity — P1-21 — but it applies this exact same guard). Kept as a
+    standalone function for replay/other callers that don't need the atomic
+    insert+link.
+
+    P1-4: the old version was a blind `UPDATE ... WHERE id = ?` — no status
+    guard, no server scope — so a hallucinated self-report could flip an
+    arbitrary incident to "analyzed", and re-linking a resolved incident
+    (e.g. a replay post-mortem) would resurrect it.
     """
     with get_mon_connection() as conn:
-        conn.execute(
-            "UPDATE incident_windows SET status = ?, analysis_id = ? WHERE id = ?",
-            (status, analysis_id, incident_id),
+        cur = conn.execute(
+            "UPDATE incident_windows SET status = ?, analysis_id = ? "
+            "WHERE id = ? AND status IN ('detected','analyzed')"
+            + (" AND server_id = ?" if server_id else ""),
+            (status, analysis_id, incident_id, *((server_id,) if server_id else ())),
         )
+        return cur.rowcount > 0
 
 
 def resolve_returned_to_baseline(server_id: str) -> list[int]:

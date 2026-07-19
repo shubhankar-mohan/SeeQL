@@ -11,6 +11,7 @@ Covers:
 """
 
 import json
+import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -20,6 +21,7 @@ import pytest
 import agent.llm_agent as la
 import config as config_module
 from alerting import incidents as inc
+from storage import writer
 from storage.connection import reset_connections
 
 
@@ -63,12 +65,15 @@ def _iso(minutes_ago: int = 0) -> str:
     ).isoformat()
 
 
-def _insert_incident(db_path: Path, status: str = "detected", end_minutes_ago: int = 0) -> int:
+def _insert_incident(
+    db_path: Path, status: str = "detected", end_minutes_ago: int = 0,
+    server_id: str = "default",
+) -> int:
     conn = sqlite3.connect(str(db_path))
     cur = conn.execute(
         "INSERT INTO incident_windows (server_id, start_time, end_time, severity, "
-        "involved_metrics, status) VALUES ('default', ?, ?, 'critical', '[\"x\"]', ?)",
-        (_iso(end_minutes_ago + 5), _iso(end_minutes_ago), status),
+        "involved_metrics, status) VALUES (?, ?, ?, 'critical', '[\"x\"]', ?)",
+        (server_id, _iso(end_minutes_ago + 5), _iso(end_minutes_ago), status),
     )
     conn.commit()
     iid = cur.lastrowid
@@ -94,6 +99,23 @@ def _analysis_row(db_path: Path, analysis_id: int) -> dict:
     ).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def _analysis_dict(**overrides) -> dict:
+    """Minimal valid row for storage.writer.write_agent_analysis_and_link()."""
+    base = {
+        "analyzed_at": _iso(),
+        "server_id": "default",
+        "analysis_type": "incident",
+        "severity": "warning",
+        "input_summary": "s",
+        "findings": "[]",
+        "recommendations": "[]",
+        "applied": 0,
+        "outcome_notes": None,
+    }
+    base.update(overrides)
+    return base
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +172,108 @@ class TestSetIncidentAnalysis:
         row = _incident_row(incident_loop_db, iid)
         assert row["status"] == "analyzed"
         assert row["analysis_id"] == 999
+
+
+# ---------------------------------------------------------------------------
+# alerting/incidents.py: set_incident_analysis guards (P1-4)
+#
+# The old implementation was a blind `UPDATE ... WHERE id = ?` — no status
+# guard, no server scope. A hallucinated self-report could flip an arbitrary
+# incident to "analyzed", and re-linking a resolved incident (e.g. a replay
+# post-mortem) would resurrect it. Both are closed by scoping the UPDATE to
+# `status IN ('detected', 'analyzed')` (+ server_id when given) and
+# reporting back whether a row actually changed.
+# ---------------------------------------------------------------------------
+class TestSetIncidentAnalysisGuarded:
+    def test_does_not_link_across_servers(self, incident_loop_db):
+        iid = _insert_incident(incident_loop_db, status="detected", server_id="b")
+        linked = inc.set_incident_analysis(iid, 999, server_id="a")
+        assert linked is False
+        row = _incident_row(incident_loop_db, iid)
+        assert row["status"] == "detected"
+        assert row["analysis_id"] is None
+
+    def test_does_not_resurrect_resolved_incident(self, incident_loop_db):
+        iid = _insert_incident(incident_loop_db, status="resolved", server_id="a")
+        linked = inc.set_incident_analysis(iid, 999, server_id="a")
+        assert linked is False
+        row = _incident_row(incident_loop_db, iid)
+        assert row["status"] == "resolved"
+        assert row["analysis_id"] is None
+
+    def test_links_when_server_matches_and_incident_open(self, incident_loop_db):
+        iid = _insert_incident(incident_loop_db, status="detected", server_id="a")
+        linked = inc.set_incident_analysis(iid, 999, server_id="a")
+        assert linked is True
+        row = _incident_row(incident_loop_db, iid)
+        assert row["status"] == "analyzed"
+        assert row["analysis_id"] == 999
+
+    def test_no_server_filter_when_server_id_omitted(self, incident_loop_db):
+        """Backward-compatible: server_id=None keeps the old any-server
+        behavior for callers that don't (yet) track server scoping."""
+        iid = _insert_incident(incident_loop_db, status="detected", server_id="b")
+        linked = inc.set_incident_analysis(iid, 999)
+        assert linked is True
+        row = _incident_row(incident_loop_db, iid)
+        assert row["status"] == "analyzed"
+
+
+# ---------------------------------------------------------------------------
+# storage/writer.py: write_agent_analysis_and_link (P1-21)
+#
+# Store-then-link used to be two separate get_mon_connection() transactions.
+# A concurrent resolve_returned_to_baseline() sweep could run between them and
+# resolve the incident; the old blind UPDATE in the (now-separate) link step
+# would then resurrect it. Doing insert + guarded UPDATE inside ONE
+# transaction closes that window.
+# ---------------------------------------------------------------------------
+class TestWriteAgentAnalysisAndLink:
+    def test_inserts_and_links_in_one_call(self, incident_loop_db):
+        iid = _insert_incident(incident_loop_db, status="detected", server_id="default")
+
+        analysis_id, linked = writer.write_agent_analysis_and_link(
+            _analysis_dict(), iid, "default"
+        )
+
+        assert linked is True
+        assert _analysis_row(incident_loop_db, analysis_id) is not None
+        row = _incident_row(incident_loop_db, iid)
+        assert row["status"] == "analyzed"
+        assert row["analysis_id"] == analysis_id
+
+    def test_no_incident_id_only_inserts(self, incident_loop_db):
+        analysis_id, linked = writer.write_agent_analysis_and_link(
+            _analysis_dict(analysis_type="routine"), None, "default"
+        )
+        assert linked is False
+        assert _analysis_row(incident_loop_db, analysis_id) is not None
+
+    def test_resolved_incident_stores_analysis_but_does_not_link(self, incident_loop_db):
+        iid = _insert_incident(incident_loop_db, status="resolved", server_id="default")
+
+        analysis_id, linked = writer.write_agent_analysis_and_link(
+            _analysis_dict(analysis_type="replay"), iid, "default"
+        )
+
+        assert linked is False
+        assert _analysis_row(incident_loop_db, analysis_id) is not None  # still persisted
+        row = _incident_row(incident_loop_db, iid)
+        assert row["status"] == "resolved"
+        assert row["analysis_id"] is None
+
+    def test_does_not_link_across_servers(self, incident_loop_db):
+        iid = _insert_incident(incident_loop_db, status="detected", server_id="b")
+
+        analysis_id, linked = writer.write_agent_analysis_and_link(
+            _analysis_dict(server_id="a"), iid, "a"
+        )
+
+        assert linked is False
+        assert _analysis_row(incident_loop_db, analysis_id) is not None
+        row = _incident_row(incident_loop_db, iid)
+        assert row["status"] == "detected"
+        assert row["analysis_id"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +366,161 @@ class TestParseAndStoreLinksIncident:
         row = _incident_row(incident_loop_db, iid)
         assert row["status"] == "detected"
         assert row["analysis_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# agent/llm_agent.py: self-report gating (P1-4)
+#
+# A model's self-reported `### Addresses incident #N` is only trustworthy
+# when the analysis isn't a blind "routine" run, or when the id genuinely
+# appears in the text the model was shown. A routine analysis has no
+# incident in its prompt at all, so an unprompted "Addresses incident #N" is
+# far more likely to be a hallucination than a real reference.
+# ---------------------------------------------------------------------------
+class TestSelfReportGating:
+    def test_routine_self_report_absent_from_state_report_is_ignored(
+        self, incident_loop_db, caplog
+    ):
+        iid = _insert_incident(incident_loop_db, status="detected")
+        text = (
+            "### Severity: info\n### Findings\nx\n### Recommendations\ny\n"
+            f"### Addresses incident #{iid}\n"
+        )
+
+        with caplog.at_level(logging.WARNING):
+            analysis = la._parse_and_store(
+                text, "routine", "state report with no incident reference", "default"
+            )
+
+        assert analysis["id"] is not None  # analysis is still stored
+        row = _incident_row(incident_loop_db, iid)
+        assert row["status"] == "detected"
+        assert row["analysis_id"] is None
+        assert any("Ignoring self-reported" in r.message for r in caplog.records)
+
+    def test_routine_self_report_present_in_state_report_links(self, incident_loop_db):
+        iid = _insert_incident(incident_loop_db, status="detected")
+        text = (
+            "### Severity: info\n### Findings\nx\n### Recommendations\ny\n"
+            f"### Addresses incident #{iid}\n"
+        )
+
+        analysis = la._parse_and_store(
+            text, "routine", f"...incident #{iid} is still ongoing...", "default"
+        )
+
+        row = _incident_row(incident_loop_db, iid)
+        assert row["status"] == "analyzed"
+        assert row["analysis_id"] == analysis["id"]
+
+    def test_routine_via_run_llm_analysis_self_report_ignored_when_absent(
+        self, incident_loop_db, monkeypatch
+    ):
+        iid = _insert_incident(incident_loop_db, status="detected")
+        monkeypatch.setattr(
+            la, "_detect_backend",
+            lambda config: {"type": "anthropic", "model": "claude-x", "api_key": "sk-x"},
+        )
+        monkeypatch.setattr(
+            la, "_run_anthropic_loop",
+            lambda backend, max_tokens, max_rounds, prompt: (
+                "### Severity: info\n### Findings\nx\n### Recommendations\ny\n"
+                f"### Addresses incident #{iid}\n"
+            ),
+        )
+
+        result = la.run_llm_analysis(
+            "routine prompt with no incident reference",
+            analysis_type="routine", server_id="default",
+        )
+
+        assert result["analysis_id"] is not None
+        row = _incident_row(incident_loop_db, iid)
+        assert row["status"] == "detected"
+        assert row["analysis_id"] is None
+
+    def test_routine_via_run_llm_analysis_self_report_honored_when_present(
+        self, incident_loop_db, monkeypatch
+    ):
+        iid = _insert_incident(incident_loop_db, status="detected")
+        monkeypatch.setattr(
+            la, "_detect_backend",
+            lambda config: {"type": "anthropic", "model": "claude-x", "api_key": "sk-x"},
+        )
+        monkeypatch.setattr(
+            la, "_run_anthropic_loop",
+            lambda backend, max_tokens, max_rounds, prompt: (
+                "### Severity: info\n### Findings\nx\n### Recommendations\ny\n"
+                f"### Addresses incident #{iid}\n"
+            ),
+        )
+
+        result = la.run_llm_analysis(
+            f"routine prompt mentioning incident #{iid} explicitly",
+            analysis_type="routine", server_id="default",
+        )
+
+        row = _incident_row(incident_loop_db, iid)
+        assert row["status"] == "analyzed"
+        assert row["analysis_id"] == result["analysis_id"]
+
+
+# ---------------------------------------------------------------------------
+# agent/llm_agent.py: run_llm_analysis atomicity + resolved-incident guard
+# (P1-4 / P1-21) — this is the path agent.replay.run_replay uses.
+# ---------------------------------------------------------------------------
+class TestRunLlmAnalysisLinking:
+    def _stub_backend(self, monkeypatch, response_text: str):
+        monkeypatch.setattr(
+            la, "_detect_backend",
+            lambda config: {"type": "anthropic", "model": "claude-x", "api_key": "sk-x"},
+        )
+        monkeypatch.setattr(
+            la, "_run_anthropic_loop",
+            lambda backend, max_tokens, max_rounds, prompt: response_text,
+        )
+
+    def test_replay_on_resolved_incident_stores_but_does_not_relink(
+        self, incident_loop_db, monkeypatch
+    ):
+        """P1-4/P1-21: a post-mortem replay on an already-resolved incident
+        must still persist the analysis but must not resurrect the incident.
+        The explicit incident_id here is authoritative (not a self-report),
+        so it isn't gated by _resolve_addressed_incident — it's the guarded
+        UPDATE inside write_agent_analysis_and_link that blocks the link."""
+        iid = _insert_incident(incident_loop_db, status="resolved")
+        self._stub_backend(
+            monkeypatch,
+            "### Severity: info\n### Findings\nx\n### Recommendations\ny\n",
+        )
+
+        result = la.run_llm_analysis(
+            "replay prompt", analysis_type="replay", server_id="default",
+            incident_id=iid,
+        )
+
+        assert result["analysis_id"] is not None
+        assert _analysis_row(incident_loop_db, result["analysis_id"]) is not None
+
+        row = _incident_row(incident_loop_db, iid)
+        assert row["status"] == "resolved"       # not resurrected
+        assert row["analysis_id"] is None         # not linked
+
+    def test_replay_on_open_incident_links_normally(self, incident_loop_db, monkeypatch):
+        iid = _insert_incident(incident_loop_db, status="detected")
+        self._stub_backend(
+            monkeypatch,
+            "### Severity: info\n### Findings\nx\n### Recommendations\ny\n",
+        )
+
+        result = la.run_llm_analysis(
+            "replay prompt", analysis_type="replay", server_id="default",
+            incident_id=iid,
+        )
+
+        row = _incident_row(incident_loop_db, iid)
+        assert row["status"] == "analyzed"
+        assert row["analysis_id"] == result["analysis_id"]
 
 
 # ---------------------------------------------------------------------------
