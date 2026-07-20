@@ -2,6 +2,7 @@
 
 import logging
 from fastapi import APIRouter, Query as QueryParam
+from fastapi.responses import JSONResponse
 
 from api.query_helpers import query_rows, resolve_server_id
 
@@ -42,6 +43,32 @@ def trigger_analysis(
     result = run_analysis(analysis_type, server_id=server)
     if result is None:
         return {"status": "skipped", "reason": "Agent disabled or state is quiet"}
+    if isinstance(result, dict) and result.get("status") == "error":
+        # Honest failure (P1-6): a real LLM/provider error used to come back
+        # as the same `None` as "agent disabled" / "quiet state" and get
+        # reported as a 200 "skipped" — indistinguishable from a no-op.
+        return JSONResponse(
+            status_code=502,
+            content={
+                "status": "error",
+                "server_id": server,
+                "error": result.get("error"),
+            },
+        )
+    if isinstance(result, dict) and result.get("stored") is False:
+        # The agent ran but produced no usable analysis (max-rounds
+        # exhaustion or a safety block — P1-5): nothing was stored and no
+        # incident was linked. Report that honestly instead of a
+        # "completed" with null severity/findings that reads as success.
+        return JSONResponse(
+            status_code=502,
+            content={
+                "status": "no_analysis",
+                "server_id": server,
+                "reason": "The model produced no usable analysis "
+                          "(tool budget exhausted or response blocked).",
+            },
+        )
     return {
         "status": "completed",
         "server_id": server,

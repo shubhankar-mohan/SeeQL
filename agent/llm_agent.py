@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import datetime, timezone
 
 from agent.state_builder import build_state_report
@@ -66,7 +67,10 @@ def run_analysis(analysis_type: str = "routine", trigger_type: str | None = None
                       Used by the scheduler to close the incident -> analysis loop.
 
     Returns:
-        Analysis result dict, or None if skipped.
+        - Analysis result dict on success (includes `"stored"`/`"truncated"`).
+        - None if skipped (agent disabled, no backend configured, or quiet state).
+        - `{"status": "error", "error": <str>}` if the LLM loop raised (P1-6) —
+          distinguishable from a quiet skip so the API route can 502 honestly.
     """
     config = get_config().get("agent", {})
     if not config.get("enabled", False):
@@ -117,23 +121,34 @@ def run_analysis(analysis_type: str = "routine", trigger_type: str | None = None
 
     try:
         if backend["type"] == "gemini":
-            result = _run_gemini_loop(backend, max_tokens, max_tool_rounds, user_msg)
+            result, truncated = _run_gemini_loop(backend, max_tokens, max_tool_rounds, user_msg)
         elif backend["type"] == "vertex-claude":
-            result = _run_vertex_claude_loop(backend, max_tokens, max_tool_rounds, user_msg)
+            result, truncated = _run_vertex_claude_loop(
+                backend, max_tokens, max_tool_rounds, user_msg
+            )
         elif backend["type"] == "openai":
-            result = _run_openai_loop(backend, max_tokens, max_tool_rounds, user_msg)
+            result, truncated = _run_openai_loop(backend, max_tokens, max_tool_rounds, user_msg)
         else:
-            result = _run_anthropic_loop(backend, max_tokens, max_tool_rounds, user_msg)
+            result, truncated = _run_anthropic_loop(backend, max_tokens, max_tool_rounds, user_msg)
     except Exception as e:
+        # Honest failure (P1-6): a loop exception (e.g. a non-retryable LLM
+        # API error, or a retryable one that never recovered) used to be
+        # swallowed into the same `None` a caller also gets for "agent
+        # disabled" / "quiet state" — the API route then reported a real
+        # failure as "skipped". Return a distinguishable error shape so the
+        # route can respond honestly (502) instead.
         logger.error(f"Agent analysis failed: {e}")
-        return None
+        return {"status": "error", "error": str(e)}
     finally:
         # Symmetric with run_llm_analysis: reset the target-server ContextVar so
         # a pooled worker thread can't leak it into a later call.
         set_current_server(None)
 
     # Parse and store the result
-    analysis = _parse_and_store(result, analysis_type, state_md, server_id, incident_id=incident_id)
+    analysis = _parse_and_store(
+        result, analysis_type, state_md, server_id, incident_id=incident_id,
+        truncated=truncated,
+    )
     return analysis
 
 
@@ -247,8 +262,67 @@ def _missing(what: str) -> None:
     return None
 
 
-def _run_gemini_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: str) -> str:
-    """Run tool-use loop with Gemini via Vertex AI."""
+# repr(exception) substrings (matched case-insensitively) that indicate a
+# transient provider error worth retrying: rate limits (429), overload
+# (529 / "overloaded"), general rate-limit wording, upstream unavailability,
+# and request timeouts. Anything else (auth, bad request, schema errors) is
+# not retried.
+_RETRYABLE_ERROR_MARKERS = ("429", "529", "overloaded", "rate", "unavailable", "timeout")
+
+# Backoff between attempts: 2s after the 1st failure, 8s after the 2nd, ...
+# (the last configured delay repeats if `attempts` is raised beyond this).
+_RETRY_BACKOFF_SECONDS = (2, 8)
+
+
+def _create_with_retry(fn, *, attempts: int = 3):
+    """Call `fn()`, retrying on transient LLM provider errors (P1-6).
+
+    A single 429/529/overload used to discard every tool round already
+    completed in the loop, and `run_analysis` had no way to tell that
+    failure apart from "agent disabled" / "quiet state" (both return None).
+    This wraps every provider `create()` call so a transient blip doesn't
+    throw away completed work.
+
+    Retries (up to `attempts` total calls) when `repr(exception)` contains
+    one of `_RETRYABLE_ERROR_MARKERS`, sleeping `_RETRY_BACKOFF_SECONDS`
+    between attempts. A non-retryable error re-raises immediately without
+    sleeping; a retryable error still re-raises once `attempts` is
+    exhausted, so the caller can report an honest failure.
+    """
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except Exception as e:
+            retryable = any(marker in repr(e).lower() for marker in _RETRYABLE_ERROR_MARKERS)
+            if not retryable or attempt == attempts - 1:
+                raise
+            delay = _RETRY_BACKOFF_SECONDS[min(attempt, len(_RETRY_BACKOFF_SECONDS) - 1)]
+            logger.warning(
+                "Retryable LLM provider error (attempt %d/%d): %r — retrying in %ss",
+                attempt + 1, attempts, e, delay,
+            )
+            time.sleep(delay)
+
+
+# Appended as a final user turn when a loop exhausts max_rounds while the
+# model is still calling tools (P1-5), with tool-calling disabled for that
+# one call so the model is forced to summarize instead of asking for more.
+_FINALIZE_NUDGE = (
+    "Tool budget exhausted. Produce your final structured analysis now from "
+    "the evidence gathered. Do not call tools."
+)
+
+
+def _run_gemini_loop(backend: dict, max_tokens: int, max_rounds: int,
+                      user_msg: str) -> tuple[str, bool]:
+    """Run tool-use loop with Gemini via Vertex AI.
+
+    Returns (final_text, truncated) — `truncated` is True if ANY response
+    during the loop (a tool-calling round or the max-rounds finalize call)
+    was cut off at MAX_TOKENS (P1-13); the flag is monotonic, so a
+    mid-stream truncation stays flagged even if a later round completes
+    cleanly.
+    """
     from google import genai
     from google.genai import types
 
@@ -266,11 +340,29 @@ def _run_gemini_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: 
     # System instruction + initial message
     contents = [types.Content(role="user", parts=[types.Part.from_text(text=user_msg)])]
 
+    def _response_text(response) -> str:
+        """Concatenated text parts, tolerating empty/None candidates or parts
+        (safety blocks, MAX_TOKENS with no emitted content)."""
+        candidates = response.candidates or []
+        if not candidates:
+            return ""
+        candidate_content = candidates[0].content
+        parts = (candidate_content.parts if candidate_content else None) or []
+        return "\n".join(part.text for part in parts if part.text)
+
+    def _response_truncated(response) -> bool:
+        candidates = response.candidates or []
+        if not candidates:
+            return False
+        finish_reason = getattr(candidates[0], "finish_reason", None)
+        return "MAX_TOKENS" in str(finish_reason or "").upper()
+
     final_text = ""
+    truncated = False
     total_tool_calls = 0
     for round_num in range(max_rounds):
         logger.info(f"  Agent round {round_num + 1}/{max_rounds}")
-        response = client.models.generate_content(
+        response = _create_with_retry(lambda: client.models.generate_content(
             model=backend["model"],
             contents=contents,
             config=types.GenerateContentConfig(
@@ -279,7 +371,11 @@ def _run_gemini_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: 
                 max_output_tokens=max_tokens,
                 temperature=0,
             ),
-        )
+        ))
+
+        if _response_truncated(response):
+            logger.warning("  Gemini response truncated (finish_reason=MAX_TOKENS)")
+            truncated = True
 
         # Gemini can return no candidates (safety/recitation block, or
         # MAX_TOKENS with no emitted content), and a candidate's `parts` can be
@@ -323,18 +419,45 @@ def _run_gemini_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: 
             logger.info(f"  Tool call [{total_tool_calls + 1}]: {name}({json.dumps(args)[:200]})")
             result = execute_tool(name, args)
             total_tool_calls += 1
-            tool_response_parts.append(
-                types.Part.from_function_response(name=name, response={"result": result})
-            )
+            # Key parallel same-turn tool responses by id, not just name, so
+            # two calls to the same tool in one turn can't get crossed
+            # results (P1-12). `from_function_response()` in the installed
+            # google-genai SDK has no `id` kwarg, so build the FunctionResponse
+            # directly; `id=None` (no id on the call) serializes the same as
+            # the classmethod, so this one path covers both cases.
+            tool_response_parts.append(types.Part(function_response=types.FunctionResponse(
+                id=getattr(fc, "id", None), name=name, response={"result": result},
+            )))
 
         contents.append(types.Content(role="user", parts=tool_response_parts))
     else:
+        # Max rounds reached and the model was still calling tools (P1-5):
+        # make one final call with tools disabled so the model summarizes
+        # whatever evidence it already gathered, instead of storing "" or
+        # stale text left over from an earlier round.
         logger.warning(f"  Agent hit max rounds ({max_rounds}) with {total_tool_calls} tool calls")
+        contents.append(
+            types.Content(role="user", parts=[types.Part.from_text(text=_FINALIZE_NUDGE)])
+        )
+        finalize_response = _create_with_retry(lambda: client.models.generate_content(
+            model=backend["model"],
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                max_output_tokens=max_tokens,
+                temperature=0,
+            ),
+        ))
+        if _response_truncated(finalize_response):
+            logger.warning("  Gemini finalize response truncated (finish_reason=MAX_TOKENS)")
+            truncated = True
+        final_text = _response_text(finalize_response)
 
-    return final_text
+    return final_text, truncated
 
 
-def _run_vertex_claude_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: str) -> str:
+def _run_vertex_claude_loop(backend: dict, max_tokens: int, max_rounds: int,
+                             user_msg: str) -> tuple[str, bool]:
     """Run tool-use loop with Claude via Vertex AI (GCP credentials)."""
     try:
         from anthropic import AnthropicVertex
@@ -354,14 +477,28 @@ def _run_vertex_claude_loop(backend: dict, max_tokens: int, max_rounds: int, use
     return _run_claude_loop(client, backend["model"], max_tokens, max_rounds, user_msg)
 
 
-def _run_anthropic_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: str) -> str:
+def _run_anthropic_loop(backend: dict, max_tokens: int, max_rounds: int,
+                         user_msg: str) -> tuple[str, bool]:
     """Run tool-use loop with Claude via Anthropic API."""
     import anthropic
     client = anthropic.Anthropic(api_key=backend["api_key"])
     return _run_claude_loop(client, backend["model"], max_tokens, max_rounds, user_msg)
 
 
-def _run_openai_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: str) -> str:
+def _openai_token_kwargs(model: str, max_tokens: int) -> dict:
+    """Token/sampling kwargs for chat.completions.create() (P1-11).
+
+    o-series reasoning models (o1/o3/o4/...) reject `max_tokens` and
+    `temperature` outright (400) — they take `max_completion_tokens` instead
+    and have no sampling temperature to set.
+    """
+    if re.match(r"^o\d", model):
+        return {"max_completion_tokens": max_tokens}
+    return {"max_tokens": max_tokens, "temperature": 0}
+
+
+def _run_openai_loop(backend: dict, max_tokens: int, max_rounds: int,
+                      user_msg: str) -> tuple[str, bool]:
     """Tool-use loop for OpenAI and any OpenAI-compatible endpoint.
 
     A `base_url` in the backend points the OpenAI SDK at a compatible server
@@ -388,27 +525,34 @@ def _run_openai_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: 
     if base_url:
         client_kwargs["base_url"] = base_url
     client = OpenAI(**client_kwargs)
+    model = backend["model"]
+    # Invariant for the whole call — derive once (o-series vs. standard token
+    # params, P1-11) rather than per round + on the finalize call.
+    token_kwargs = _openai_token_kwargs(model, max_tokens)
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_msg},
     ]
     final_text = ""
+    truncated = False
     total_tool_calls = 0
 
     for round_num in range(max_rounds):
         logger.info(f"  Agent round {round_num + 1}/{max_rounds}")
-        response = client.chat.completions.create(
-            model=backend["model"],
-            max_tokens=max_tokens,
+        response = _create_with_retry(lambda: client.chat.completions.create(
+            model=model,
             tools=OPENAI_TOOL_DEFINITIONS,
             messages=messages,
-            temperature=0,
-        )
+            **token_kwargs,
+        ))
         choices = response.choices or []
         if not choices:
             logger.warning("OpenAI-compatible endpoint returned no choices; ending tool loop")
             break
+        if getattr(choices[0], "finish_reason", None) == "length":
+            logger.warning("  OpenAI response truncated (finish_reason=length)")
+            truncated = True
         msg = choices[0].message
         if msg.content:
             final_text = msg.content
@@ -445,27 +589,58 @@ def _run_openai_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: 
                 "content": result if isinstance(result, str) else json.dumps(result),
             })
     else:
+        # Max rounds reached and the model was still calling tools (P1-5):
+        # make one final call with tools omitted so the model summarizes
+        # whatever evidence it already gathered, instead of storing "" or
+        # stale text left over from an earlier round.
         logger.warning(f"  Agent hit max rounds ({max_rounds}) with {total_tool_calls} tool calls")
+        messages.append({"role": "user", "content": _FINALIZE_NUDGE})
+        finalize_response = _create_with_retry(lambda: client.chat.completions.create(
+            model=model,
+            messages=messages,
+            **token_kwargs,
+        ))
+        choices = finalize_response.choices or []
+        if choices:
+            if getattr(choices[0], "finish_reason", None) == "length":
+                logger.warning("  OpenAI finalize response truncated (finish_reason=length)")
+                truncated = True
+            final_text = choices[0].message.content or ""
+        else:
+            final_text = ""
 
-    return final_text
+    return final_text, truncated
 
 
-def _run_claude_loop(client, model: str, max_tokens: int, max_rounds: int, user_msg: str) -> str:
-    """Shared tool-use loop for any Claude client (API or Vertex)."""
+def _run_claude_loop(client, model: str, max_tokens: int, max_rounds: int,
+                      user_msg: str) -> tuple[str, bool]:
+    """Shared tool-use loop for any Claude client (API or Vertex).
+
+    Returns (final_text, truncated) — `truncated` is True if ANY response
+    during the loop (a tool-calling round or the max-rounds finalize call)
+    ended on stop_reason "max_tokens" (P1-13); the flag is monotonic, so a
+    mid-stream truncation stays flagged even if a later round completes
+    cleanly.
+    """
     messages = [{"role": "user", "content": user_msg}]
     final_text = ""
+    truncated = False
     total_tool_calls = 0
 
     for round_num in range(max_rounds):
         logger.info(f"  Agent round {round_num + 1}/{max_rounds}")
-        response = client.messages.create(
+        response = _create_with_retry(lambda: client.messages.create(
             model=model,
             max_tokens=max_tokens,
             system=SYSTEM_PROMPT,
             tools=TOOL_DEFINITIONS,
             messages=messages,
             temperature=0,
-        )
+        ))
+
+        if response.stop_reason == "max_tokens":
+            logger.warning("  Claude response truncated (stop_reason=max_tokens)")
+            truncated = True
 
         text_parts = []
         tool_uses = []
@@ -489,17 +664,43 @@ def _run_claude_loop(client, model: str, max_tokens: int, max_rounds: int, user_
             logger.info(f"  Tool call [{total_tool_calls + 1}]: {tool_use.name}({json.dumps(tool_use.input)[:200]})")
             result = execute_tool(tool_use.name, tool_use.input)
             total_tool_calls += 1
-            tool_results.append({
+            tool_result = {
                 "type": "tool_result",
                 "tool_use_id": tool_use.id,
                 "content": result,
-            })
+            }
+            # Flag tool-level errors so Claude treats them as failed calls
+            # rather than legitimate data (P1-26). execute_tool() always
+            # serializes errors as `{"error": ...}` (see agent/tools.py).
+            if isinstance(result, str) and result.startswith('{"error'):
+                tool_result["is_error"] = True
+            tool_results.append(tool_result)
 
         messages.append({"role": "user", "content": tool_results})
     else:
+        # Max rounds reached and the model was still calling tools (P1-5):
+        # make one final call with tool use disabled so the model summarizes
+        # whatever evidence it already gathered, instead of storing "" or
+        # stale text left over from an earlier round.
         logger.warning(f"  Agent hit max rounds ({max_rounds}) with {total_tool_calls} tool calls")
+        messages.append({"role": "user", "content": _FINALIZE_NUDGE})
+        finalize_response = _create_with_retry(lambda: client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            system=SYSTEM_PROMPT,
+            tools=TOOL_DEFINITIONS,
+            tool_choice={"type": "none"},
+            messages=messages,
+            temperature=0,
+        ))
+        if finalize_response.stop_reason == "max_tokens":
+            logger.warning("  Claude finalize response truncated (stop_reason=max_tokens)")
+            truncated = True
+        final_text = "\n".join(
+            block.text for block in finalize_response.content if block.type == "text"
+        )
 
-    return final_text
+    return final_text, truncated
 
 
 def _is_quiet(report) -> bool:
@@ -554,8 +755,27 @@ def _resolve_addressed_incident(
     return None
 
 
+def _build_outcome_notes(confidence: float | None, truncated: bool) -> str | None:
+    """Serialize the extra per-analysis signals stashed in `outcome_notes`.
+
+    There are no dedicated `confidence`/`truncated` columns on
+    agent_analyses, so both are stored as JSON in `outcome_notes` rather than
+    a schema migration. Shared by `_parse_and_store` and `run_llm_analysis`
+    (P1-18: those two store paths are near-twins that have drifted before)
+    so a future signal added here can't silently land in only one of them.
+    Returns None when there's nothing to record (keeps the column NULL).
+    """
+    outcome = {}
+    if confidence is not None:
+        outcome["confidence"] = confidence
+    if truncated:
+        outcome["truncated"] = True
+    return json.dumps(outcome) if outcome else None
+
+
 def _parse_and_store(text: str, analysis_type: str, input_summary: str,
-                     server_id: str = "default", incident_id: int | None = None) -> dict:
+                     server_id: str = "default", incident_id: int | None = None,
+                     truncated: bool = False) -> dict:
     """Parse agent response and store in agent_analyses table.
 
     If `incident_id` is given (or the response self-reports one via
@@ -565,11 +785,34 @@ def _parse_and_store(text: str, analysis_type: str, input_summary: str,
     insert via `storage.writer.write_agent_analysis_and_link` (P1-21) —
     best-effort, never raises. The link itself never resurrects a
     resolved/closed incident and never crosses server_id.
+
+    If the response has no usable text after parsing (max-rounds exhaustion
+    that never produced a finalize answer, or a Gemini safety block — P1-5),
+    nothing is written and no incident is linked: the caller gets back
+    `{"stored": False, ...}` and any incident is left `detected` so it can
+    be retried, instead of being silently marked "analyzed" forever with an
+    empty analysis attached.
     """
     # One shared parser for severity/sections/confidence/addresses (P1-18) —
     # see `parse_agent_response` below for the tolerant-form fixes (P1-2,
     # P1-3, P1-19, P3-5, P3-9).
     parsed = parse_agent_response(text)
+    if not parsed["cleaned"]:
+        logger.error(
+            f"Agent response for {analysis_type} analysis was empty after parsing "
+            "(max-rounds exhaustion or safety block) — not storing, not linking any incident"
+        )
+        return {
+            "stored": False,
+            "id": None,
+            "severity": None,
+            "findings": None,
+            "recommendations": None,
+            "confidence": None,
+            "truncated": truncated,
+            "raw_response": text,
+        }
+
     severity = parsed["severity"]
     findings = parsed["findings"]
     recommendations = parsed["recommendations"]
@@ -587,9 +830,7 @@ def _parse_and_store(text: str, analysis_type: str, input_summary: str,
         "findings": json.dumps(findings),
         "recommendations": json.dumps(recommendations),
         "applied": 0,
-        # No dedicated `confidence` column on agent_analyses — stash it in
-        # outcome_notes as JSON rather than a schema migration.
-        "outcome_notes": json.dumps({"confidence": confidence}) if confidence is not None else None,
+        "outcome_notes": _build_outcome_notes(confidence, truncated),
     }
 
     analysis_id = None
@@ -608,6 +849,8 @@ def _parse_and_store(text: str, analysis_type: str, input_summary: str,
 
     analysis["id"] = analysis_id
     analysis["raw_response"] = text
+    analysis["stored"] = analysis_id is not None
+    analysis["truncated"] = truncated
 
     return analysis
 
@@ -764,7 +1007,9 @@ def run_llm_analysis(
     """
     Public wrapper that dispatches any custom prompt to the configured LLM
     backend, stores the result in `agent_analyses`, and returns
-    `{"text": str, "analysis_id": int}`.
+    `{"text": str, "analysis_id": int, "severity": str, "confidence": float,
+    "truncated": bool}` (P1-13 — True if the final response was cut off at
+    max_tokens).
 
     Used by `agent.replay.run_replay` so the replay module doesn't have to
     reimplement backend detection or row-id wiring. Raises RuntimeError if
@@ -807,13 +1052,13 @@ def run_llm_analysis(
 
     try:
         if backend["type"] == "gemini":
-            text = _run_gemini_loop(backend, max_tokens, max_tool_rounds, prompt)
+            text, truncated = _run_gemini_loop(backend, max_tokens, max_tool_rounds, prompt)
         elif backend["type"] == "vertex-claude":
-            text = _run_vertex_claude_loop(backend, max_tokens, max_tool_rounds, prompt)
+            text, truncated = _run_vertex_claude_loop(backend, max_tokens, max_tool_rounds, prompt)
         elif backend["type"] == "openai":
-            text = _run_openai_loop(backend, max_tokens, max_tool_rounds, prompt)
+            text, truncated = _run_openai_loop(backend, max_tokens, max_tool_rounds, prompt)
         else:
-            text = _run_anthropic_loop(backend, max_tokens, max_tool_rounds, prompt)
+            text, truncated = _run_anthropic_loop(backend, max_tokens, max_tool_rounds, prompt)
     finally:
         # Clear the per-investigation context so later calls on this (possibly
         # pooled) thread don't inherit a stale budget or target server.
@@ -829,6 +1074,21 @@ def run_llm_analysis(
     # same call as `_parse_and_store` so we can use the one-shot writer and
     # capture the row id.
     parsed = parse_agent_response(text)
+    if not parsed["cleaned"]:
+        # Same empty-response guard as `_parse_and_store` (P1-5): this sibling
+        # path (used by replay + the webhook investigator, which pass
+        # incident_id explicitly) must NOT persist a content-free analysis or
+        # link/close an incident against one. Leave the incident as-is and
+        # return an unstored result.
+        logger.error(
+            f"{analysis_type} LLM response was empty after parsing "
+            "(max-rounds exhaustion or safety block) — not storing, not linking any incident"
+        )
+        return {
+            "text": text, "analysis_id": None, "severity": None,
+            "confidence": None, "truncated": truncated,
+        }
+
     severity = parsed["severity"]
     findings = parsed["findings"]
     recommendations = parsed["recommendations"]
@@ -848,7 +1108,7 @@ def run_llm_analysis(
                 "findings": json.dumps(findings),
                 "recommendations": json.dumps(recommendations),
                 "applied": 0,
-                "outcome_notes": json.dumps({"confidence": confidence}) if confidence is not None else None,
+                "outcome_notes": _build_outcome_notes(confidence, truncated),
             },
             addressed_incident,
             server_id,
@@ -862,4 +1122,7 @@ def run_llm_analysis(
         logger.warning(f"Failed to persist {analysis_type} analysis: {e}")
         analysis_id = None
 
-    return {"text": text, "analysis_id": analysis_id, "severity": severity, "confidence": confidence}
+    return {
+        "text": text, "analysis_id": analysis_id, "severity": severity,
+        "confidence": confidence, "truncated": truncated,
+    }

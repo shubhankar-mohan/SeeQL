@@ -423,9 +423,11 @@ class TestSelfReportGating:
         )
         monkeypatch.setattr(
             la, "_run_anthropic_loop",
+            # _run_anthropic_loop returns (text, truncated) since P1-13.
             lambda backend, max_tokens, max_rounds, prompt: (
                 "### Severity: info\n### Findings\nx\n### Recommendations\ny\n"
-                f"### Addresses incident #{iid}\n"
+                f"### Addresses incident #{iid}\n",
+                False,
             ),
         )
 
@@ -449,9 +451,11 @@ class TestSelfReportGating:
         )
         monkeypatch.setattr(
             la, "_run_anthropic_loop",
+            # _run_anthropic_loop returns (text, truncated) since P1-13.
             lambda backend, max_tokens, max_rounds, prompt: (
                 "### Severity: info\n### Findings\nx\n### Recommendations\ny\n"
-                f"### Addresses incident #{iid}\n"
+                f"### Addresses incident #{iid}\n",
+                False,
             ),
         )
 
@@ -477,7 +481,8 @@ class TestRunLlmAnalysisLinking:
         )
         monkeypatch.setattr(
             la, "_run_anthropic_loop",
-            lambda backend, max_tokens, max_rounds, prompt: response_text,
+            # _run_anthropic_loop returns (text, truncated) since P1-13.
+            lambda backend, max_tokens, max_rounds, prompt: (response_text, False),
         )
 
     def test_replay_on_resolved_incident_stores_but_does_not_relink(

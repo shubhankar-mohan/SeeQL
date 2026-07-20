@@ -193,8 +193,9 @@ class TestRunLlmAnalysisUsesSharedParser:
         )
         monkeypatch.setattr(
             la, "_run_anthropic_loop",
+            # _run_anthropic_loop returns (text, truncated) since P1-13.
             lambda backend, max_tokens, max_rounds, prompt: (
-                "**Severity:** critical\n**Findings**\nSomething bad.\n"
+                "**Severity:** critical\n**Findings**\nSomething bad.\n", False
             ),
         )
 
