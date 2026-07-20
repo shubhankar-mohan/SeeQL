@@ -219,6 +219,12 @@ investigator:
     rows_examined_ratio: 100
   confidence_completion_threshold: 0.8
 
+# --- HTTP API (dashboard, /api/v1, /collect/*, /metrics) ---
+api:
+  bind: "0.0.0.0"                   # set 127.0.0.1 if fronted by a local reverse proxy
+  auth_token: ${SEEQL_API_TOKEN}    # unset = no auth (private networks only)
+  protect_reads: false              # also require the token on /api/v1 GETs
+
 # --- MCP Server (Model Context Protocol — external Claude clients) ---
 mcp:
   enabled: true

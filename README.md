@@ -298,6 +298,9 @@ FastAPI app at `http://<host>:8080/`. Full reference:
 | `GET` | `/api/v1/incidents/recent` | Detected incident windows |
 | `GET` | `/api/v1/alerts` | Alert history |
 
+**No auth by default — never expose this publicly without a token.** See
+[Securing the endpoint](docs/deployment.md#securing-the-endpoint).
+
 ---
 
 ## GCP / Cloud SQL extras
