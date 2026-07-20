@@ -115,6 +115,20 @@ def run_analysis(analysis_type: str = "routine", trigger_type: str | None = None
 
     logger.info(f"Running {analysis_type} analysis with {backend['type']} ({backend['model']})")
 
+    # Tool budget (P2-6): routine/incident analysis was the one LLM path with no cap on
+    # live-MySQL tool calls (webhook Phase 2 has always been budgeted — see
+    # alerting/investigator.py's Budget(...) construction, mirrored here). Build the
+    # SAME kind of Budget from agent.live_tool_cap / agent.explain_cap so a scheduled
+    # 15-minute check can't run unbounded live calls against prod.
+    from agent.tools import set_current_budget
+    from alerting.budget import Budget
+    budget = Budget(
+        investigation_id=0,  # not a real investigation row — routine/incident analysis
+        live_tool_cap=int(config.get("live_tool_cap", 6) or 6),
+        explain_cap=int(config.get("explain_cap", 3) or 3),
+    )
+    set_current_budget(budget)
+
     try:
         if backend["type"] == "gemini":
             result = _run_gemini_loop(backend, max_tokens, max_tool_rounds, user_msg)
@@ -128,9 +142,10 @@ def run_analysis(analysis_type: str = "routine", trigger_type: str | None = None
         logger.error(f"Agent analysis failed: {e}")
         return None
     finally:
-        # Symmetric with run_llm_analysis: reset the target-server ContextVar so
-        # a pooled worker thread can't leak it into a later call.
+        # Symmetric with run_llm_analysis: reset the target-server ContextVar and the
+        # tool budget so a pooled worker thread can't leak either into a later call.
         set_current_server(None)
+        set_current_budget(None)
 
     # Parse and store the result
     analysis = _parse_and_store(result, analysis_type, state_md, server_id, incident_id=incident_id)
@@ -247,7 +262,8 @@ def _missing(what: str) -> None:
     return None
 
 
-def _run_gemini_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: str) -> str:
+def _run_gemini_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: str,
+                      system_prompt: str = SYSTEM_PROMPT) -> str:
     """Run tool-use loop with Gemini via Vertex AI."""
     from google import genai
     from google.genai import types
@@ -274,7 +290,7 @@ def _run_gemini_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: 
             model=backend["model"],
             contents=contents,
             config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
+                system_instruction=system_prompt,
                 tools=[tools],
                 max_output_tokens=max_tokens,
                 temperature=0,
@@ -334,7 +350,8 @@ def _run_gemini_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: 
     return final_text
 
 
-def _run_vertex_claude_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: str) -> str:
+def _run_vertex_claude_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: str,
+                             system_prompt: str = SYSTEM_PROMPT) -> str:
     """Run tool-use loop with Claude via Vertex AI (GCP credentials)."""
     try:
         from anthropic import AnthropicVertex
@@ -351,17 +368,19 @@ def _run_vertex_claude_loop(backend: dict, max_tokens: int, max_rounds: int, use
         project_id=backend["project_id"],
         region=backend["region"],
     )
-    return _run_claude_loop(client, backend["model"], max_tokens, max_rounds, user_msg)
+    return _run_claude_loop(client, backend["model"], max_tokens, max_rounds, user_msg, system_prompt)
 
 
-def _run_anthropic_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: str) -> str:
+def _run_anthropic_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: str,
+                         system_prompt: str = SYSTEM_PROMPT) -> str:
     """Run tool-use loop with Claude via Anthropic API."""
     import anthropic
     client = anthropic.Anthropic(api_key=backend["api_key"])
-    return _run_claude_loop(client, backend["model"], max_tokens, max_rounds, user_msg)
+    return _run_claude_loop(client, backend["model"], max_tokens, max_rounds, user_msg, system_prompt)
 
 
-def _run_openai_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: str) -> str:
+def _run_openai_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: str,
+                      system_prompt: str = SYSTEM_PROMPT) -> str:
     """Tool-use loop for OpenAI and any OpenAI-compatible endpoint.
 
     A `base_url` in the backend points the OpenAI SDK at a compatible server
@@ -390,7 +409,7 @@ def _run_openai_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: 
     client = OpenAI(**client_kwargs)
 
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_msg},
     ]
     final_text = ""
@@ -450,7 +469,8 @@ def _run_openai_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: 
     return final_text
 
 
-def _run_claude_loop(client, model: str, max_tokens: int, max_rounds: int, user_msg: str) -> str:
+def _run_claude_loop(client, model: str, max_tokens: int, max_rounds: int, user_msg: str,
+                      system_prompt: str = SYSTEM_PROMPT) -> str:
     """Shared tool-use loop for any Claude client (API or Vertex)."""
     messages = [{"role": "user", "content": user_msg}]
     final_text = ""
@@ -461,7 +481,7 @@ def _run_claude_loop(client, model: str, max_tokens: int, max_rounds: int, user_
         response = client.messages.create(
             model=model,
             max_tokens=max_tokens,
-            system=SYSTEM_PROMPT,
+            system=system_prompt,
             tools=TOOL_DEFINITIONS,
             messages=messages,
             temperature=0,
@@ -682,6 +702,7 @@ def run_llm_analysis(
     tool_budget=None,
     max_tool_rounds_override: int | None = None,
     incident_id: int | None = None,
+    system_prompt: str | None = None,
 ) -> dict:
     """
     Public wrapper that dispatches any custom prompt to the configured LLM
@@ -696,6 +717,12 @@ def run_llm_analysis(
     The webhook investigator passes `tool_budget` (an `alerting.budget.Budget`)
     and a lower `max_tool_rounds_override` so Phase 2 stays bounded.
 
+    system_prompt: Which system message to send (P3-1 contract unification).
+    Defaults to the routine/incident SYSTEM_PROMPT when omitted. Replay passes
+    `agent.prompts.REPLAY_SYSTEM_PROMPT`; the webhook investigator passes
+    `agent.prompts.WEBHOOK_SYSTEM_PROMPT` — each path gets exactly one output
+    contract instead of the system message and the user message disagreeing.
+
     incident_id: When set (or when the response self-reports one via
     `### Addresses incident #N`), the stored analysis is linked back to that
     `incident_windows` row via `alerting.incidents.set_incident_analysis`
@@ -705,6 +732,8 @@ def run_llm_analysis(
     backend = _detect_backend(config)
     if backend is None:
         raise RuntimeError("No LLM backend configured")
+
+    sys_prompt = system_prompt or SYSTEM_PROMPT
 
     if server_id is None:
         from config.server_registry import get_server_registry
@@ -726,13 +755,13 @@ def run_llm_analysis(
 
     try:
         if backend["type"] == "gemini":
-            text = _run_gemini_loop(backend, max_tokens, max_tool_rounds, prompt)
+            text = _run_gemini_loop(backend, max_tokens, max_tool_rounds, prompt, sys_prompt)
         elif backend["type"] == "vertex-claude":
-            text = _run_vertex_claude_loop(backend, max_tokens, max_tool_rounds, prompt)
+            text = _run_vertex_claude_loop(backend, max_tokens, max_tool_rounds, prompt, sys_prompt)
         elif backend["type"] == "openai":
-            text = _run_openai_loop(backend, max_tokens, max_tool_rounds, prompt)
+            text = _run_openai_loop(backend, max_tokens, max_tool_rounds, prompt, sys_prompt)
         else:
-            text = _run_anthropic_loop(backend, max_tokens, max_tool_rounds, prompt)
+            text = _run_anthropic_loop(backend, max_tokens, max_tool_rounds, prompt, sys_prompt)
     finally:
         # Clear the per-investigation context so later calls on this (possibly
         # pooled) thread don't inherit a stale budget or target server.

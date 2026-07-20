@@ -117,7 +117,9 @@ class PagerDutyAdapter:
             external_id=external_id,
             alert_type=alert_type,
             severity=severity,
-            summary=title,
+            # P2-4: cap at normalization — alert_summary reaches the LLM prompt and this
+            # payload is authenticated-but-untrusted (any HMAC-holder can submit any text).
+            summary=title[:500],
             fired_at=fired_at,
             server_id=server_id,
             callback_url=(custom or {}).get("callback_url") if isinstance(custom, dict) else None,

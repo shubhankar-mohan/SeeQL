@@ -487,16 +487,19 @@ def _render_markdown(report: StateReport) -> str:
 
     lines.append("")
 
-    # Previous recommendations — prevents duplicate suggestions
+    # Previous recommendations — prevents duplicate suggestions. This is our OWN model's
+    # prior output being re-injected into a new prompt (second-order injection, P2-2): fence
+    # it as untrusted and strip `#` so a stored analysis can't inject new markdown headers /
+    # fake instructions into this prompt.
     prev_recs = hist.get("previous_recommendations", [])
     if prev_recs:
         lines.append("### Previous Recommendations (last 24h)")
         lines.append("Do NOT repeat these unless the issue persists and was not acted on.")
+        lines.append("<untrusted_prior_output>")
         for pr in prev_recs:
-            lines.append(
-                f"- [{pr['severity']}] at {pr['analyzed_at']}: "
-                f"{pr['recommendations'][:200]}"
-            )
+            text = (pr["recommendations"] or "")[:200].replace("#", "")
+            lines.append(f"- [{pr['severity']}] at {pr['analyzed_at']}: {text}")
+        lines.append("</untrusted_prior_output>")
         lines.append("")
 
     trends = hist.get("regression_trends", [])

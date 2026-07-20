@@ -15,10 +15,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any
 
 from storage.connection import get_mon_reader
-from agent.prompts import INCIDENT_INVESTIGATOR_PROMPT
+from agent.prompts import INCIDENT_INVESTIGATOR_PROMPT, REPLAY_SYSTEM_PROMPT
 from agent.redact import maybe_redact
 
 logger = logging.getLogger(__name__)
@@ -257,6 +256,7 @@ def run_replay(
             analysis_type="replay",
             server_id=server_id,
             incident_id=incident_id,
+            system_prompt=REPLAY_SYSTEM_PROMPT,
         )
         result.analysis_md = llm.get("text")
         result.analysis_id = llm.get("analysis_id")

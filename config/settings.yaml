@@ -77,6 +77,12 @@ agent:
   # provider: openai               # Force a backend: openai | anthropic | vertex-claude | gemini
   max_tokens: 8192
   max_tool_rounds: 10
+  # Tool budget for ROUTINE/incident analysis (P2-6). Mirrors the webhook
+  # investigator's Phase 2 budget (see `investigator:` below) so a scheduled
+  # 15-minute check can't run unbounded live-MySQL tool calls against prod.
+  # Snapshot tools (local SQLite) are never capped by this.
+  live_tool_cap: 6                  # max live-MySQL tool calls per analysis
+  explain_cap: 3                    # max EXPLAIN-against-prod calls per analysis
   schedule_seconds: 900             # 15 minutes
   skip_quiet: true                  # Skip analysis when nothing interesting is happening
   # --- Privacy: what reaches the LLM ---

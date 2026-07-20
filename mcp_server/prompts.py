@@ -7,8 +7,69 @@ by calling the tools registered in mcp_server/tools/).
 """
 
 import logging
+import re
 
 logger = logging.getLogger(__name__)
+
+# P2-8: prompt args (digest/table/server) are interpolated directly into the
+# returned prompt text, which the calling LLM then reads as instructions —
+# an unvalidated value could break out of its "just a name" context and
+# inject new instructions. Validate before interpolation, not after.
+
+# Same bare-identifier contract as agent.tools._IDENT_RE — table names have
+# no legitimate use for anything outside this character set, and a value
+# that fails this is already guaranteed to be rejected by the downstream
+# seeql_get_table_schema/seeql_get_index_stats tool calls anyway.
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
+# server_id is a SeeQL config key (operator-chosen), not a MySQL identifier —
+# this codebase's own server ids use hyphens (e.g. "prod-primary"), so this
+# is intentionally more permissive than _IDENT_RE while still rejecting
+# whitespace/quotes/backticks/braces/semicolons that could break out of the
+# surrounding prompt text.
+_SERVER_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+# MySQL performance_schema digests are SHA-256-family hex strings.
+_DIGEST_RE = re.compile(r"^[0-9a-fA-F]{8,64}$")
+# ISO-8601-ish timestamp: accepts both the `T` and space separators the
+# codebase actually produces (naive `YYYY-MM-DDTHH:MM:SS`, space-separated,
+# optional fractional seconds, optional `Z`/`+HH:MM` offset). Lenient enough
+# not to reject the app's own timestamps, strict enough that a value can't
+# carry quotes/newlines/instructions into the interpolated prompt text.
+_ISO_TS_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:?\d{2}|Z)?"
+)
+
+
+def _require_digest(digest: str) -> None:
+    if not digest or not _DIGEST_RE.fullmatch(digest):
+        raise ValueError(
+            f"Invalid digest {digest!r} — expected an 8-64 character hex string "
+            "(a performance_schema query digest)."
+        )
+
+
+def _require_table(table: str) -> None:
+    if not table or not _IDENT_RE.fullmatch(table):
+        raise ValueError(
+            f"Invalid table name {table!r} — expected a bare identifier: "
+            "letters, digits, underscore, no quotes/spaces/semicolons."
+        )
+
+
+def _require_server(server: str) -> None:
+    if not server or not _SERVER_ID_RE.fullmatch(server):
+        raise ValueError(
+            f"Invalid server id {server!r} — expected letters, digits, "
+            "underscore, dot, or hyphen only."
+        )
+
+
+def _require_timestamp(ts: str) -> None:
+    if not ts or not _ISO_TS_RE.fullmatch(ts):
+        raise ValueError(
+            f"Invalid timestamp {ts!r} — expected an ISO-8601 datetime like "
+            "2026-04-23T12:34:56 (the `T` or a space separator, optional "
+            "fractional seconds, optional Z/+HH:MM offset)."
+        )
 
 
 def register(mcp) -> None:
@@ -22,6 +83,8 @@ def register(mcp) -> None:
         ),
     )
     def rca_prompt(server: str | None = None) -> str:
+        if server is not None:
+            _require_server(server)
         server_hint = (
             f" Target server: `{server}`. "
             if server
@@ -83,6 +146,7 @@ def register(mcp) -> None:
         ),
     )
     def explain_digest_prompt(digest: str, days: int = 7) -> str:
+        _require_digest(digest)
         return (
             f"Deep-dive the query digest `{digest}`.\n\n"
             f"1. seeql_get_query_history(digest='{digest}', days={days}) — "
@@ -108,6 +172,10 @@ def register(mcp) -> None:
     def schema_audit_prompt(
         server: str | None = None, table: str | None = None,
     ) -> str:
+        if server is not None:
+            _require_server(server)
+        if table is not None:
+            _require_table(table)
         target = f"for table `{table}`" if table else "for the whole server"
         server_note = f" (server `{server}`)" if server else ""
         return (
@@ -136,6 +204,10 @@ def register(mcp) -> None:
     def investigate_window_prompt(
         from_ts: str, to_ts: str, server: str | None = None,
     ) -> str:
+        _require_timestamp(from_ts)
+        _require_timestamp(to_ts)
+        if server is not None:
+            _require_server(server)
         server_arg = f", server='{server}'" if server else ""
         return (
             f"Reconstruct what happened between {from_ts} and {to_ts}.\n\n"
