@@ -80,6 +80,22 @@ class TestDetectBackend:
         )
         assert b is None
 
+    def test_claude_with_both_gcp_and_api_key_prefers_anthropic(self, monkeypatch, caplog):
+        """P1-28: when a claude-* model has BOTH GCP credentials and an
+        explicit ANTHROPIC_API_KEY configured, prefer the Anthropic API — an
+        explicit key is a deliberate choice, and it must be logged which
+        backend was chosen."""
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/tmp/fake.json")
+        monkeypatch.setattr(llm_agent, "get_config", lambda: {"gcp": {"project_id": "p"}})
+        with caplog.at_level(logging.INFO):
+            b = llm_agent._detect_backend(
+                {"model": "claude-opus-4-6", "anthropic_api_key": "sk-real-key"}
+            )
+        assert b is not None
+        assert b["type"] == "anthropic"
+        assert b["model"] == "claude-opus-4-6"
+        assert any("preferring the Anthropic API" in r.message for r in caplog.records)
+
 
 class TestOpenAIBackend:
     """OpenAI + any OpenAI-compatible endpoint (custom base_url)."""
@@ -131,11 +147,11 @@ class TestOpenAIBackend:
     def _run_with_responses(self, responses, base_url=None, api_key="sk-x", model="gpt-4o"):
         """Drive _run_openai_loop with a fake OpenAI client returning `responses`
         (one per round). Returns (text, truncated, ctor) — _run_openai_loop
-        itself returns (text, truncated) since P1-13."""
+        itself returns (text, truncated, tool_calls) since P1-22."""
         fake_client = MagicMock()
         fake_client.chat.completions.create.side_effect = responses
         with patch("openai.OpenAI", return_value=fake_client) as ctor:
-            text, truncated = llm_agent._run_openai_loop(
+            text, truncated, _tool_calls = llm_agent._run_openai_loop(
                 {"model": model, "api_key": api_key, "base_url": base_url},
                 max_tokens=100, max_rounds=3, user_msg="hi",
             )
@@ -244,12 +260,13 @@ class TestOpenAIBackend:
             keeps_calling, keeps_calling, finalize_text,
         ]
         with patch("openai.OpenAI", return_value=fake_client):
-            text, truncated = llm_agent._run_openai_loop(
+            text, truncated, tool_calls = llm_agent._run_openai_loop(
                 {"model": "gpt-4o", "api_key": "sk-x", "base_url": None},
                 max_tokens=100, max_rounds=2, user_msg="hi",
             )
 
         assert text == "Final: locks cleared."
+        assert tool_calls == 2
         assert fake_client.chat.completions.create.call_count == 3
         finalize_kwargs = fake_client.chat.completions.create.call_args_list[2].kwargs
         assert "tools" not in finalize_kwargs
@@ -275,12 +292,43 @@ class TestOpenAIBackend:
         fake_client = MagicMock()
         fake_client.chat.completions.create.side_effect = [stale_then_calls, empty_finalize]
         with patch("openai.OpenAI", return_value=fake_client):
-            text, _ = llm_agent._run_openai_loop(
+            text, _, _ = llm_agent._run_openai_loop(
                 {"model": "gpt-4o", "api_key": "sk-x", "base_url": None},
                 max_tokens=100, max_rounds=1, user_msg="hi",
             )
 
         assert text == ""
+
+    def test_custom_system_prompt_used_in_messages(self):
+        """P3-2: a system_prompt passed in must be what's actually sent —
+        not the bare SYSTEM_PROMPT constant."""
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.side_effect = [self._resp(content="ok")]
+        with patch("openai.OpenAI", return_value=fake_client):
+            llm_agent._run_openai_loop(
+                {"model": "gpt-4o", "api_key": "sk-x", "base_url": None},
+                max_tokens=100, max_rounds=3, user_msg="hi",
+                system_prompt="CUSTOM VERSIONED PROMPT",
+            )
+        kwargs = fake_client.chat.completions.create.call_args.kwargs
+        assert kwargs["messages"][0] == {
+            "role": "system", "content": "CUSTOM VERSIONED PROMPT",
+        }
+
+    def test_default_system_prompt_is_the_bare_constant(self):
+        """Regression guard: omitting system_prompt must still behave like
+        before P3-2 (direct callers/tests don't have to supply one)."""
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.side_effect = [self._resp(content="ok")]
+        with patch("openai.OpenAI", return_value=fake_client):
+            llm_agent._run_openai_loop(
+                {"model": "gpt-4o", "api_key": "sk-x", "base_url": None},
+                max_tokens=100, max_rounds=3, user_msg="hi",
+            )
+        kwargs = fake_client.chat.completions.create.call_args.kwargs
+        assert kwargs["messages"][0] == {
+            "role": "system", "content": llm_agent.SYSTEM_PROMPT,
+        }
 
 
 class TestGeminiResponseShapes:
@@ -288,7 +336,7 @@ class TestGeminiResponseShapes:
     MAX_TOKENS with no content) — the tool loop must not IndexError."""
 
     def _run_with_response(self, fake_response, max_rounds=3):
-        """Returns (text, truncated) — _run_gemini_loop's contract since P1-13."""
+        """Returns (text, truncated, tool_calls) — _run_gemini_loop's contract since P1-22."""
         fake_client = MagicMock()
         fake_client.models.generate_content.return_value = fake_response
         with patch("google.genai.Client", return_value=fake_client):
@@ -314,17 +362,17 @@ class TestGeminiResponseShapes:
     def test_empty_candidates_does_not_crash(self):
         resp = MagicMock()
         resp.candidates = []
-        assert self._run_with_response(resp) == ("", False)
+        assert self._run_with_response(resp) == ("", False, 0)
 
     def test_none_candidates_does_not_crash(self):
         resp = MagicMock()
         resp.candidates = None
-        assert self._run_with_response(resp) == ("", False)
+        assert self._run_with_response(resp) == ("", False, 0)
 
     def test_text_only_response_returns_text(self):
         resp = MagicMock()
         resp.candidates = [self._candidate(text="All healthy.")]
-        text, truncated = self._run_with_response(resp)
+        text, truncated, _ = self._run_with_response(resp)
         assert text == "All healthy."
         assert truncated is False
 
@@ -333,7 +381,7 @@ class TestGeminiResponseShapes:
         resp = MagicMock()
         resp.candidates = [self._candidate(text="cut off", finish_reason="MAX_TOKENS")]
         with caplog.at_level(logging.WARNING):
-            text, truncated = self._run_with_response(resp)
+            text, truncated, _ = self._run_with_response(resp)
         assert text == "cut off"
         assert truncated is True
         assert any("truncated" in r.message.lower() for r in caplog.records)
@@ -357,7 +405,7 @@ class TestGeminiResponseShapes:
         fake_client = MagicMock()
         fake_client.models.generate_content.side_effect = [round1, round2]
         with patch("google.genai.Client", return_value=fake_client):
-            text, _ = llm_agent._run_gemini_loop(
+            text, _, _ = llm_agent._run_gemini_loop(
                 {"model": "gemini-2.0-flash", "project_id": "p", "region": "us-central1"},
                 max_tokens=100, max_rounds=3, user_msg="hi",
             )
@@ -391,7 +439,7 @@ class TestGeminiResponseShapes:
         fake_client = MagicMock()
         fake_client.models.generate_content.side_effect = [round1, round2]
         with patch("google.genai.Client", return_value=fake_client):
-            text, _ = llm_agent._run_gemini_loop(
+            text, _, _ = llm_agent._run_gemini_loop(
                 {"model": "gemini-2.0-flash", "project_id": "p", "region": "us-central1"},
                 max_tokens=100, max_rounds=3, user_msg="hi",
             )
@@ -423,13 +471,14 @@ class TestGeminiResponseShapes:
             keeps_calling, keeps_calling, finalize,
         ]
         with patch("google.genai.Client", return_value=fake_client):
-            text, truncated = llm_agent._run_gemini_loop(
+            text, truncated, tool_calls = llm_agent._run_gemini_loop(
                 {"model": "gemini-2.0-flash", "project_id": "p", "region": "us-central1"},
                 max_tokens=100, max_rounds=2, user_msg="hi",
             )
 
         assert text == "Final: locks cleared."
         assert truncated is False
+        assert tool_calls == 2
         assert fake_client.models.generate_content.call_count == 3
         finalize_kwargs = fake_client.models.generate_content.call_args_list[2].kwargs
         assert finalize_kwargs["config"].tools is None
@@ -455,12 +504,103 @@ class TestGeminiResponseShapes:
         fake_client = MagicMock()
         fake_client.models.generate_content.side_effect = [stale_then_calls, empty_finalize]
         with patch("google.genai.Client", return_value=fake_client):
-            text, _ = llm_agent._run_gemini_loop(
+            text, _, _ = llm_agent._run_gemini_loop(
                 {"model": "gemini-2.0-flash", "project_id": "p", "region": "us-central1"},
                 max_tokens=100, max_rounds=1, user_msg="hi",
             )
 
         assert text == ""
+
+    def test_custom_system_prompt_passed_to_system_instruction(self):
+        """P3-2: a system_prompt passed in must be what's actually sent —
+        not the bare SYSTEM_PROMPT constant."""
+        resp = MagicMock()
+        resp.candidates = [self._candidate(text="ok")]
+        fake_client = MagicMock()
+        fake_client.models.generate_content.return_value = resp
+        with patch("google.genai.Client", return_value=fake_client):
+            llm_agent._run_gemini_loop(
+                {"model": "gemini-2.0-flash", "project_id": "p", "region": "us-central1"},
+                max_tokens=100, max_rounds=3, user_msg="hi",
+                system_prompt="CUSTOM VERSIONED PROMPT",
+            )
+        kwargs = fake_client.models.generate_content.call_args.kwargs
+        assert kwargs["config"].system_instruction == "CUSTOM VERSIONED PROMPT"
+
+    def test_default_system_prompt_is_the_bare_constant(self):
+        """Regression guard: omitting system_prompt must still behave like
+        before P3-2 (direct callers/tests don't have to supply one)."""
+        resp = MagicMock()
+        resp.candidates = [self._candidate(text="ok")]
+        fake_client = MagicMock()
+        fake_client.models.generate_content.return_value = resp
+        with patch("google.genai.Client", return_value=fake_client):
+            llm_agent._run_gemini_loop(
+                {"model": "gemini-2.0-flash", "project_id": "p", "region": "us-central1"},
+                max_tokens=100, max_rounds=3, user_msg="hi",
+            )
+        kwargs = fake_client.models.generate_content.call_args.kwargs
+        assert kwargs["config"].system_instruction == llm_agent.SYSTEM_PROMPT
+
+    def test_tool_result_passed_as_parsed_object_not_json_string(self, monkeypatch):
+        """P1-24: execute_tool() returns a JSON string; Gemini must get the
+        PARSED object in response={"result": ...}, not a string it has to
+        re-parse itself on every tool result."""
+        monkeypatch.setattr(
+            llm_agent, "execute_tool",
+            lambda name, args: json.dumps({"rows_examined": 500000, "rows_sent": 3}),
+        )
+        fc = MagicMock()
+        fc.name = "run_explain"
+        fc.args = {}
+        fc.id = "call_1"
+        round1 = MagicMock()
+        round1.candidates = [self._candidate(function_call=fc)]
+        round2 = MagicMock()
+        round2.candidates = [self._candidate(text="Done.")]
+
+        fake_client = MagicMock()
+        fake_client.models.generate_content.side_effect = [round1, round2]
+        with patch("google.genai.Client", return_value=fake_client):
+            llm_agent._run_gemini_loop(
+                {"model": "gemini-2.0-flash", "project_id": "p", "region": "us-central1"},
+                max_tokens=100, max_rounds=3, user_msg="hi",
+            )
+
+        second_call_contents = fake_client.models.generate_content.call_args_list[1].kwargs[
+            "contents"
+        ]
+        response_part = second_call_contents[-1].parts[0]
+        assert response_part.function_response.response == {
+            "result": {"rows_examined": 500000, "rows_sent": 3}
+        }
+
+    def test_tool_result_falls_back_to_raw_string_when_not_json(self, monkeypatch):
+        """P1-24: a handler that doesn't return valid JSON (e.g. a plain
+        status string) must still be passed through, not crash the loop."""
+        monkeypatch.setattr(llm_agent, "execute_tool", lambda name, args: "no locks")
+        fc = MagicMock()
+        fc.name = "get_lock_graph"
+        fc.args = {}
+        fc.id = "call_1"
+        round1 = MagicMock()
+        round1.candidates = [self._candidate(function_call=fc)]
+        round2 = MagicMock()
+        round2.candidates = [self._candidate(text="Done.")]
+
+        fake_client = MagicMock()
+        fake_client.models.generate_content.side_effect = [round1, round2]
+        with patch("google.genai.Client", return_value=fake_client):
+            llm_agent._run_gemini_loop(
+                {"model": "gemini-2.0-flash", "project_id": "p", "region": "us-central1"},
+                max_tokens=100, max_rounds=3, user_msg="hi",
+            )
+
+        second_call_contents = fake_client.models.generate_content.call_args_list[1].kwargs[
+            "contents"
+        ]
+        response_part = second_call_contents[-1].parts[0]
+        assert response_part.function_response.response == {"result": "no locks"}
 
 
 class TestCreateWithRetry:
@@ -533,10 +673,10 @@ class TestClaudeLoop:
 
     def _run_with_responses(self, responses, model="claude-x", max_rounds=3):
         """Returns (text, truncated, client). _run_claude_loop's own return
-        contract is (text, truncated) since P1-13."""
+        contract is (text, truncated, tool_calls) since P1-22."""
         fake_client = MagicMock()
         fake_client.messages.create.side_effect = responses
-        text, truncated = llm_agent._run_claude_loop(
+        text, truncated, _tool_calls = llm_agent._run_claude_loop(
             fake_client, model, max_tokens=100, max_rounds=max_rounds, user_msg="hi",
         )
         return text, truncated, fake_client
@@ -591,7 +731,7 @@ class TestClaudeLoop:
             self._resp([self._text_block("Recovered.")]),
         ]
 
-        text, _ = llm_agent._run_claude_loop(
+        text, _, _ = llm_agent._run_claude_loop(
             fake_client, "claude-x", max_tokens=100, max_rounds=3, user_msg="hi",
         )
 
@@ -674,12 +814,13 @@ class TestClaudeLoop:
         fake_client = MagicMock()
         fake_client.messages.create.side_effect = [keeps_calling, keeps_calling, finalize_resp]
 
-        text, truncated = llm_agent._run_claude_loop(
+        text, truncated, tool_calls = llm_agent._run_claude_loop(
             fake_client, "claude-x", max_tokens=100, max_rounds=2, user_msg="hi",
         )
 
         assert text == "Final: locks cleared."
         assert truncated is False
+        assert tool_calls == 2
         assert fake_client.messages.create.call_count == 3
         finalize_kwargs = fake_client.messages.create.call_args_list[2].kwargs
         assert finalize_kwargs["tool_choice"] == {"type": "none"}
@@ -700,11 +841,34 @@ class TestClaudeLoop:
         fake_client = MagicMock()
         fake_client.messages.create.side_effect = [stale_then_calls, empty_finalize]
 
-        text, _ = llm_agent._run_claude_loop(
+        text, _, _ = llm_agent._run_claude_loop(
             fake_client, "claude-x", max_tokens=100, max_rounds=1, user_msg="hi",
         )
 
         assert text == ""
+
+    def test_custom_system_prompt_used_in_system_kwarg(self):
+        """P3-2: a system_prompt passed in must be what's actually sent —
+        not the bare SYSTEM_PROMPT constant."""
+        fake_client = MagicMock()
+        fake_client.messages.create.side_effect = [self._resp([self._text_block("ok")])]
+        llm_agent._run_claude_loop(
+            fake_client, "claude-x", max_tokens=100, max_rounds=3, user_msg="hi",
+            system_prompt="CUSTOM VERSIONED PROMPT",
+        )
+        kwargs = fake_client.messages.create.call_args.kwargs
+        assert kwargs["system"] == "CUSTOM VERSIONED PROMPT"
+
+    def test_default_system_prompt_is_the_bare_constant(self):
+        """Regression guard: omitting system_prompt must still behave like
+        before P3-2 (direct callers/tests don't have to supply one)."""
+        fake_client = MagicMock()
+        fake_client.messages.create.side_effect = [self._resp([self._text_block("ok")])]
+        llm_agent._run_claude_loop(
+            fake_client, "claude-x", max_tokens=100, max_rounds=3, user_msg="hi",
+        )
+        kwargs = fake_client.messages.create.call_args.kwargs
+        assert kwargs["system"] == llm_agent.SYSTEM_PROMPT
 
 
 class TestParseAndStoreEmptyText:
@@ -813,10 +977,13 @@ class TestRunLlmAnalysisEmptyText:
             llm_agent, "_detect_backend",
             lambda config: {"type": "anthropic", "model": "claude-x", "api_key": "sk-x"},
         )
-        # _run_anthropic_loop returns (text, truncated) since P1-13.
+        # _run_anthropic_loop returns (text, truncated, tool_calls) since P1-22,
+        # and now takes a 5th system_prompt arg (P3-2).
         monkeypatch.setattr(
             llm_agent, "_run_anthropic_loop",
-            lambda backend, max_tokens, max_rounds, prompt: (response_text, False),
+            lambda backend, max_tokens, max_rounds, prompt, system_prompt=None: (
+                response_text, False, 1,
+            ),
         )
 
     def test_empty_text_does_not_store_or_link(self, mon_db, test_config, monkeypatch):
@@ -894,6 +1061,13 @@ class TestRunAnalysisHonestErrors:
             llm_agent, "build_state_report",
             lambda server_id=None: self._fake_report(),
         )
+        # build_system_prompt would otherwise hit the real monitoring DB and
+        # real on-disk config (this class doesn't wire up a mon_db fixture) —
+        # stub it out the same way build_state_report is stubbed above (P3-2).
+        monkeypatch.setattr(
+            llm_agent, "build_system_prompt",
+            lambda server_id=None: "stub system prompt",
+        )
         monkeypatch.setattr(
             llm_agent, "_detect_backend",
             lambda config: {"type": "anthropic", "model": "claude-x", "api_key": "sk-x"},
@@ -901,7 +1075,7 @@ class TestRunAnalysisHonestErrors:
         monkeypatch.setattr(llm_agent, "_run_anthropic_loop", loop_fn)
 
     def test_loop_exception_returns_error_shape(self, monkeypatch):
-        def boom(backend, max_tokens, max_rounds, user_msg):
+        def boom(backend, max_tokens, max_rounds, user_msg, system_prompt=None):
             raise Exception("400 bad request: invalid schema")
 
         self._wire_backend(monkeypatch, boom)
@@ -917,7 +1091,7 @@ class TestRunAnalysisHonestErrors:
         still come back as an honest error, not a silent None."""
         monkeypatch.setattr(llm_agent.time, "sleep", lambda s: None)
 
-        def always_overloaded(backend, max_tokens, max_rounds, user_msg):
+        def always_overloaded(backend, max_tokens, max_rounds, user_msg, system_prompt=None):
             raise Exception("529 overloaded")
 
         self._wire_backend(monkeypatch, always_overloaded)
@@ -939,7 +1113,7 @@ class TestRunAnalysisHonestErrors:
     def test_api_route_maps_error_shape_to_502(self, monkeypatch):
         monkeypatch.setattr(
             llm_agent, "run_analysis",
-            lambda analysis_type, server_id=None, incident_id=None: {
+            lambda analysis_type, server_id=None, incident_id=None, trigger_type=None: {
                 "status": "error", "error": "400 bad request: invalid schema",
             },
         )
@@ -957,7 +1131,7 @@ class TestRunAnalysisHonestErrors:
         reported as a 200 'completed' with null severity/findings."""
         monkeypatch.setattr(
             llm_agent, "run_analysis",
-            lambda analysis_type, server_id=None, incident_id=None: {
+            lambda analysis_type, server_id=None, incident_id=None, trigger_type=None: {
                 "stored": False, "id": None, "severity": None,
                 "findings": None, "recommendations": None, "truncated": False,
             },
@@ -973,7 +1147,7 @@ class TestRunAnalysisHonestErrors:
     def test_api_route_quiet_skip_stays_200(self, monkeypatch):
         monkeypatch.setattr(
             llm_agent, "run_analysis",
-            lambda analysis_type, server_id=None, incident_id=None: None,
+            lambda analysis_type, server_id=None, incident_id=None, trigger_type=None: None,
         )
 
         response = agent_routes.trigger_analysis(analysis_type="routine", server="default")
@@ -983,7 +1157,7 @@ class TestRunAnalysisHonestErrors:
     def test_api_route_success_stays_completed(self, monkeypatch):
         monkeypatch.setattr(
             llm_agent, "run_analysis",
-            lambda analysis_type, server_id=None, incident_id=None: {
+            lambda analysis_type, server_id=None, incident_id=None, trigger_type=None: {
                 "severity": "warning", "findings": "[]", "recommendations": "[]",
             },
         )
@@ -992,6 +1166,10 @@ class TestRunAnalysisHonestErrors:
 
         assert response["status"] == "completed"
         assert response["severity"] == "warning"
+        # P1-23: findings/recommendations are decoded, not left as a raw
+        # JSON-encoded string the client would have to json.loads() again.
+        assert response["findings"] == []
+        assert response["recommendations"] == []
 
 
 class TestRunAnalysisContextVarHygiene:
@@ -1048,3 +1226,374 @@ class TestSplitFindingsRecommendations:
         findings, recs = llm_agent._split_findings_recommendations(text)
         assert findings == text
         assert recs == ""
+
+
+# ---------------------------------------------------------------------------
+# P3-2: versioned, per-server system prompt
+# ---------------------------------------------------------------------------
+class TestBuildSystemPrompt:
+    """build_system_prompt() formats SYSTEM_PROMPT with the real MySQL
+    version + hosting platform for a server, instead of the old hardcoded
+    "MySQL 8.0.43 on GCP Cloud SQL" regardless of what's actually running."""
+
+    def test_uses_seeded_mysql_version(self, mon_db, test_config):
+        import config as config_module
+        conn, db_path = mon_db
+        config_module._config = test_config
+        conn.execute(
+            "INSERT INTO global_variable_snapshots "
+            "(snapshot_time, server_id, variable_name, variable_value) "
+            "VALUES ('2026-07-17T00:00:00', 'default', 'version', '8.0.43-google')"
+        )
+        conn.commit()
+
+        prompt = llm_agent.build_system_prompt("default")
+
+        assert "MySQL 8.0.43-google" in prompt
+
+    def test_falls_back_to_8_0_plus_when_no_snapshot(self, mon_db, test_config):
+        import config as config_module
+        conn, db_path = mon_db
+        config_module._config = test_config
+
+        prompt = llm_agent.build_system_prompt("default")
+
+        assert "MySQL 8.0+" in prompt
+
+    def test_uses_latest_version_snapshot_not_oldest(self, mon_db, test_config):
+        import config as config_module
+        conn, db_path = mon_db
+        config_module._config = test_config
+        conn.execute(
+            "INSERT INTO global_variable_snapshots "
+            "(snapshot_time, server_id, variable_name, variable_value) "
+            "VALUES ('2026-07-01T00:00:00', 'default', 'version', '8.0.30')"
+        )
+        conn.execute(
+            "INSERT INTO global_variable_snapshots "
+            "(snapshot_time, server_id, variable_name, variable_value) "
+            "VALUES ('2026-07-17T00:00:00', 'default', 'version', '8.0.43-google')"
+        )
+        conn.commit()
+
+        prompt = llm_agent.build_system_prompt("default")
+
+        assert "8.0.43-google" in prompt
+        assert "8.0.30" not in prompt
+
+    def test_scoped_to_server_id_does_not_leak_other_servers_version(
+        self, mon_db, test_config
+    ):
+        """P1-1-style scoping: a snapshot from a DIFFERENT server_id must
+        never leak into this server's prompt."""
+        import config as config_module
+        conn, db_path = mon_db
+        config_module._config = test_config
+        conn.execute(
+            "INSERT INTO global_variable_snapshots "
+            "(snapshot_time, server_id, variable_name, variable_value) "
+            "VALUES ('2026-07-17T00:00:00', 'other-server', 'version', '5.7.44')"
+        )
+        conn.commit()
+
+        prompt = llm_agent.build_system_prompt("default")
+
+        assert "5.7.44" not in prompt
+        assert "MySQL 8.0+" in prompt
+
+    def test_gcp_project_id_configured_uses_cloud_sql_platform(self, mon_db, test_config):
+        import config as config_module
+        conn, db_path = mon_db
+        config_module._config = {**test_config, "gcp": {"project_id": "real-project"}}
+
+        prompt = llm_agent.build_system_prompt("default")
+
+        assert "a managed Cloud SQL instance" in prompt
+
+    def test_no_gcp_project_id_uses_self_hosted_platform(self, mon_db, test_config):
+        import config as config_module
+        conn, db_path = mon_db
+        config_module._config = {**test_config, "gcp": {}}
+
+        prompt = llm_agent.build_system_prompt("default")
+
+        assert "a MySQL server (managed or self-hosted)" in prompt
+
+    def test_placeholder_gcp_project_id_uses_self_hosted_platform(self, mon_db, test_config):
+        """settings.yaml ships "your-gcp-project-id" as a placeholder — that
+        must not be treated as a real, configured project."""
+        import config as config_module
+        conn, db_path = mon_db
+        config_module._config = {
+            **test_config, "gcp": {"project_id": "your-gcp-project-id"},
+        }
+
+        prompt = llm_agent.build_system_prompt("default")
+
+        assert "a MySQL server (managed or self-hosted)" in prompt
+
+    def test_never_raises_when_monitoring_db_unreachable(self, monkeypatch):
+        """Defensive: a cold start / misconfigured monitoring DB must fall
+        back to safe defaults rather than blocking an analysis."""
+        import config as config_module
+        config_module._config = {
+            "monitoring_db": {"path": "/nonexistent/dir/does/not/exist.db",
+                               "wal_mode": False, "busy_timeout_ms": 100},
+            "gcp": {},
+        }
+
+        prompt = llm_agent.build_system_prompt("default")
+
+        assert "MySQL 8.0+" in prompt
+        assert "a MySQL server (managed or self-hosted)" in prompt
+
+
+class TestRunAnalysisPassesBuiltSystemPrompt:
+    """P3-2: run_analysis must thread the per-server built prompt into the
+    loop function — not the bare SYSTEM_PROMPT constant."""
+
+    def test_loop_receives_built_system_prompt(self, mon_db, test_config, monkeypatch):
+        import config as config_module
+        conn, db_path = mon_db
+        config_module._config = {
+            **test_config, "agent": {"enabled": True, "model": "claude-x"},
+        }
+        conn.execute(
+            "INSERT INTO global_variable_snapshots "
+            "(snapshot_time, server_id, variable_name, variable_value) "
+            "VALUES ('2026-07-17T00:00:00', 'default', 'version', '8.0.43-google')"
+        )
+        conn.commit()
+
+        report = MagicMock()
+        report.to_markdown.return_value = "## state"
+        monkeypatch.setattr(llm_agent, "build_state_report", lambda server_id=None: report)
+        monkeypatch.setattr(
+            llm_agent, "_detect_backend",
+            lambda config: {"type": "anthropic", "model": "claude-x", "api_key": "sk-x"},
+        )
+
+        captured = {}
+
+        def fake_loop(backend, max_tokens, max_rounds, user_msg, system_prompt=None):
+            captured["system_prompt"] = system_prompt
+            return (
+                "### Severity: info\n### Findings\nx\n### Recommendations\ny\n",
+                False, 0,
+            )
+
+        monkeypatch.setattr(llm_agent, "_run_anthropic_loop", fake_loop)
+
+        # analysis_type="incident" sidesteps the routine skip-quiet path so
+        # this test only has to exercise the system-prompt wiring.
+        llm_agent.run_analysis("incident", server_id="default")
+
+        assert "system_prompt" in captured
+        assert "8.0.43-google" in captured["system_prompt"]
+        assert captured["system_prompt"] != llm_agent.SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# P1-27: a brand-new query fingerprint must wake a routine analysis
+# ---------------------------------------------------------------------------
+class TestIsQuietNewQueries:
+    def test_new_queries_present_is_not_quiet(self):
+        report = MagicMock()
+        report.changes = {"new_queries": [{"digest": "0xABC"}]}
+        report.current_state = {}
+        assert llm_agent._is_quiet(report) is False
+
+    def test_no_new_queries_and_nothing_else_is_quiet(self):
+        report = MagicMock()
+        report.changes = {"new_queries": []}
+        report.current_state = {}
+        assert llm_agent._is_quiet(report) is True
+
+
+# ---------------------------------------------------------------------------
+# P1-22: telemetry columns (model / tool_calls / duration_ms)
+# ---------------------------------------------------------------------------
+class TestTelemetryColumns:
+    def test_run_analysis_stores_telemetry(self, mon_db, test_config, monkeypatch):
+        import config as config_module
+        conn, db_path = mon_db
+        config_module._config = {
+            **test_config, "agent": {"enabled": True, "model": "claude-x"},
+        }
+
+        report = MagicMock()
+        report.to_markdown.return_value = "## state"
+        monkeypatch.setattr(llm_agent, "build_state_report", lambda server_id=None: report)
+        monkeypatch.setattr(
+            llm_agent, "_detect_backend",
+            lambda config: {"type": "anthropic", "model": "claude-x", "api_key": "sk-x"},
+        )
+        monkeypatch.setattr(
+            llm_agent, "_run_anthropic_loop",
+            lambda backend, max_tokens, max_rounds, user_msg, system_prompt=None: (
+                "### Severity: info\n### Findings\nx\n### Recommendations\ny\n",
+                False, 4,
+            ),
+        )
+
+        result = llm_agent.run_analysis("incident", server_id="default")
+
+        assert result["stored"] is True
+        row = conn.execute(
+            "SELECT model, tool_calls, duration_ms FROM agent_analyses WHERE id = ?",
+            (result["id"],),
+        ).fetchone()
+        assert row["model"] == "claude-x"
+        assert row["tool_calls"] == 4
+        assert row["duration_ms"] is not None
+        assert row["duration_ms"] >= 0
+
+    def test_run_llm_analysis_stores_telemetry(self, mon_db, test_config, monkeypatch):
+        import config as config_module
+        conn, db_path = mon_db
+        config_module._config = {**test_config, "agent": {}}
+        monkeypatch.setattr(
+            llm_agent, "_detect_backend",
+            lambda config: {"type": "anthropic", "model": "claude-x", "api_key": "sk-x"},
+        )
+        monkeypatch.setattr(
+            llm_agent, "_run_anthropic_loop",
+            lambda backend, max_tokens, max_rounds, prompt, system_prompt=None: (
+                "### Severity: info\n### Findings\nx\n### Recommendations\ny\n",
+                False, 2,
+            ),
+        )
+
+        result = llm_agent.run_llm_analysis(
+            "some prompt", analysis_type="replay", server_id="default",
+        )
+
+        assert result["analysis_id"] is not None
+        row = conn.execute(
+            "SELECT model, tool_calls, duration_ms FROM agent_analyses WHERE id = ?",
+            (result["analysis_id"],),
+        ).fetchone()
+        assert row["model"] == "claude-x"
+        assert row["tool_calls"] == 2
+        assert row["duration_ms"] is not None
+
+
+class TestAgentAnalysesTelemetryMigration:
+    """P1-22: the guarded ALTER TABLE migration must be idempotent — safe
+    against both a fresh (schema.sql-only) DB and an already-migrated one."""
+
+    def test_columns_present_on_fresh_schema(self, mon_db):
+        conn, db_path = mon_db
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(agent_analyses)").fetchall()}
+        assert {"model", "tool_calls", "duration_ms"} <= cols
+
+    def test_migration_running_twice_on_already_migrated_db_is_a_noop(
+        self, mon_db, test_config
+    ):
+        import config as config_module
+        from storage.migrations import migrate_add_agent_telemetry_columns
+        conn, db_path = mon_db
+        config_module._config = test_config
+
+        # mon_db's fixture setup already ran the full migration set once
+        # (and schema.sql already has the columns), so both direct calls
+        # here should find nothing left to add.
+        first = migrate_add_agent_telemetry_columns()
+        second = migrate_add_agent_telemetry_columns()
+
+        assert first == 0
+        assert second == 0
+
+    def test_migration_adds_missing_columns_then_is_idempotent(self, tmp_path):
+        """Simulate a DB created before P1-22: agent_analyses exists but
+        without the 3 telemetry columns. The migration must add them once,
+        then be a no-op on a second run."""
+        import sqlite3
+        import config as config_module
+        from storage.connection import reset_connections
+        from storage.migrations import migrate_add_agent_telemetry_columns
+
+        db_path = tmp_path / "pre_migration.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("""
+            CREATE TABLE agent_analyses (
+                id INTEGER PRIMARY KEY,
+                analyzed_at TEXT NOT NULL,
+                server_id TEXT NOT NULL DEFAULT 'default',
+                analysis_type TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                input_summary TEXT,
+                findings TEXT,
+                recommendations TEXT,
+                applied INTEGER NOT NULL DEFAULT 0,
+                applied_at TEXT,
+                outcome_notes TEXT
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+        config_module._config = {
+            "monitoring_db": {"path": str(db_path), "wal_mode": False, "busy_timeout_ms": 5000},
+        }
+        reset_connections()
+        try:
+            first = migrate_add_agent_telemetry_columns()
+            second = migrate_add_agent_telemetry_columns()
+        finally:
+            reset_connections()
+
+        assert first == 3   # model, tool_calls, duration_ms all newly added
+        assert second == 0  # idempotent: nothing left to add
+
+        conn = sqlite3.connect(str(db_path))
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(agent_analyses)").fetchall()}
+        conn.close()
+        assert {"model", "tool_calls", "duration_ms"} <= cols
+
+
+# ---------------------------------------------------------------------------
+# P1-23: findings/recommendations must not be double-JSON-encoded
+# ---------------------------------------------------------------------------
+class TestListAnalysesDecodesJsonFields:
+    def test_findings_and_recommendations_are_decoded(self, monkeypatch):
+        monkeypatch.setattr(agent_routes, "resolve_server_id", lambda server: "default")
+        monkeypatch.setattr(
+            agent_routes, "query_rows",
+            lambda sql, params: [
+                {
+                    "analyzed_at": "2026-07-17T00:00:00", "analysis_type": "routine",
+                    "severity": "warning", "input_summary": "s",
+                    "findings": json.dumps("Something bad happened."),
+                    "recommendations": json.dumps(["Do X", "Do Y"]),
+                    "applied": 0, "outcome_notes": None,
+                }
+            ],
+        )
+
+        rows = agent_routes.list_analyses(limit=20, server="default")
+
+        assert rows[0]["findings"] == "Something bad happened."
+        assert rows[0]["recommendations"] == ["Do X", "Do Y"]
+
+    def test_non_json_findings_falls_back_to_raw_string(self, monkeypatch):
+        """Defensive: a row that somehow isn't valid JSON (legacy data)
+        should pass through unchanged rather than 500."""
+        monkeypatch.setattr(agent_routes, "resolve_server_id", lambda server: "default")
+        monkeypatch.setattr(
+            agent_routes, "query_rows",
+            lambda sql, params: [
+                {
+                    "analyzed_at": "2026-07-17T00:00:00", "analysis_type": "routine",
+                    "severity": "warning", "input_summary": "s",
+                    "findings": "not valid json {{{",
+                    "recommendations": "",
+                    "applied": 0, "outcome_notes": None,
+                }
+            ],
+        )
+
+        rows = agent_routes.list_analyses(limit=20, server="default")
+
+        assert rows[0]["findings"] == "not valid json {{{"
+        assert rows[0]["recommendations"] == ""

@@ -318,7 +318,10 @@ CREATE TABLE IF NOT EXISTS agent_analyses (
     recommendations     TEXT,      -- JSON string
     applied             INTEGER NOT NULL DEFAULT 0,
     applied_at          TEXT,
-    outcome_notes       TEXT
+    outcome_notes       TEXT,
+    model               TEXT,      -- LLM model id used for this analysis (P1-22)
+    tool_calls          INTEGER,   -- total tool calls made across the loop (P1-22)
+    duration_ms         INTEGER    -- wall-clock time of the LLM analysis (P1-22)
 );
 
 CREATE INDEX IF NOT EXISTS idx_aa_time_type ON agent_analyses(analyzed_at, analysis_type);

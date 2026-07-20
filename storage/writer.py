@@ -245,6 +245,7 @@ def write_agent_analysis(rows: list[dict]) -> int:
     return _batch_insert("agent_analyses", [
         "analyzed_at", "server_id", "analysis_type", "severity", "input_summary",
         "findings", "recommendations", "applied", "outcome_notes",
+        "model", "tool_calls", "duration_ms",
     ], rows)
 
 
@@ -258,6 +259,7 @@ def write_agent_analysis_one(row: dict) -> int:
     cols = [
         "analyzed_at", "server_id", "analysis_type", "severity", "input_summary",
         "findings", "recommendations", "applied", "outcome_notes",
+        "model", "tool_calls", "duration_ms",
     ]
     placeholders = ", ".join(["?"] * len(cols))
     col_names = ", ".join(cols)
@@ -310,6 +312,7 @@ def write_agent_analysis_and_link(
     cols = [
         "analyzed_at", "server_id", "analysis_type", "severity", "input_summary",
         "findings", "recommendations", "applied", "outcome_notes",
+        "model", "tool_calls", "duration_ms",
     ]
     placeholders = ", ".join(["?"] * len(cols))
     col_names = ", ".join(cols)

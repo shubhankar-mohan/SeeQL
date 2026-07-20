@@ -423,11 +423,13 @@ class TestSelfReportGating:
         )
         monkeypatch.setattr(
             la, "_run_anthropic_loop",
-            # _run_anthropic_loop returns (text, truncated) since P1-13.
-            lambda backend, max_tokens, max_rounds, prompt: (
+            # _run_anthropic_loop returns (text, truncated, tool_calls) since
+            # P1-22, and now takes a 5th system_prompt arg (P3-2).
+            lambda backend, max_tokens, max_rounds, prompt, system_prompt=None: (
                 "### Severity: info\n### Findings\nx\n### Recommendations\ny\n"
                 f"### Addresses incident #{iid}\n",
                 False,
+                1,
             ),
         )
 
@@ -451,11 +453,13 @@ class TestSelfReportGating:
         )
         monkeypatch.setattr(
             la, "_run_anthropic_loop",
-            # _run_anthropic_loop returns (text, truncated) since P1-13.
-            lambda backend, max_tokens, max_rounds, prompt: (
+            # _run_anthropic_loop returns (text, truncated, tool_calls) since
+            # P1-22, and now takes a 5th system_prompt arg (P3-2).
+            lambda backend, max_tokens, max_rounds, prompt, system_prompt=None: (
                 "### Severity: info\n### Findings\nx\n### Recommendations\ny\n"
                 f"### Addresses incident #{iid}\n",
                 False,
+                1,
             ),
         )
 
@@ -481,8 +485,11 @@ class TestRunLlmAnalysisLinking:
         )
         monkeypatch.setattr(
             la, "_run_anthropic_loop",
-            # _run_anthropic_loop returns (text, truncated) since P1-13.
-            lambda backend, max_tokens, max_rounds, prompt: (response_text, False),
+            # _run_anthropic_loop returns (text, truncated, tool_calls) since
+            # P1-22, and now takes a 5th system_prompt arg (P3-2).
+            lambda backend, max_tokens, max_rounds, prompt, system_prompt=None: (
+                response_text, False, 1,
+            ),
         )
 
     def test_replay_on_resolved_incident_stores_but_does_not_relink(
@@ -593,3 +600,147 @@ class TestSchedulerIncidentWiring:
 
         row = _incident_row(incident_loop_db, iid)
         assert row["status"] == "detected"
+
+
+# ---------------------------------------------------------------------------
+# P3-3: trigger_type derivation from an incident's dominant anomaly metric
+#
+# The 8 tailored playbooks in agent.prompts.INCIDENT_TRIGGERS were dead code
+# because trigger_type was never passed from the scheduler — every incident
+# got the generic "default" instructions. Fixed by deriving it from
+# anomaly_events.metric_name (most frequent wins) and threading it through
+# _trigger_incident_analyses -> run_analysis.
+# ---------------------------------------------------------------------------
+def _insert_anomaly_event(db_path: Path, incident_id: int, metric_name: str,
+                           server_id: str = "default") -> int:
+    conn = sqlite3.connect(str(db_path))
+    cur = conn.execute(
+        "INSERT INTO anomaly_events (server_id, detected_at, metric_name, "
+        "current_value, baseline_mean, baseline_stddev, z_score, pct_change, "
+        "direction, severity, incident_id) VALUES "
+        "(?, ?, ?, 50, 10, 2, 20, 400, 'high', 'warning', ?)",
+        (server_id, _iso(), metric_name, incident_id),
+    )
+    conn.commit()
+    eid = cur.lastrowid
+    conn.close()
+    return eid
+
+
+class TestGetDominantMetric:
+    def test_picks_most_frequent_metric(self, incident_loop_db):
+        iid = _insert_incident(incident_loop_db, status="detected")
+        _insert_anomaly_event(incident_loop_db, iid, "threads_running")
+        _insert_anomaly_event(incident_loop_db, iid, "threads_running")
+        _insert_anomaly_event(incident_loop_db, iid, "qps")
+
+        assert inc.get_dominant_metric(iid) == "threads_running"
+
+    def test_no_events_returns_none(self, incident_loop_db):
+        iid = _insert_incident(incident_loop_db, status="detected")
+        assert inc.get_dominant_metric(iid) is None
+
+    def test_does_not_count_events_from_other_incidents(self, incident_loop_db):
+        iid = _insert_incident(incident_loop_db, status="detected")
+        other_iid = _insert_incident(incident_loop_db, status="detected")
+        _insert_anomaly_event(incident_loop_db, iid, "lock_frequency")
+        # Three events on a DIFFERENT incident must not sway this one's result.
+        _insert_anomaly_event(incident_loop_db, other_iid, "cpu_utilization")
+        _insert_anomaly_event(incident_loop_db, other_iid, "cpu_utilization")
+        _insert_anomaly_event(incident_loop_db, other_iid, "cpu_utilization")
+
+        assert inc.get_dominant_metric(iid) == "lock_frequency"
+
+
+class TestTriggerTypeDerivation:
+    def test_scheduler_passes_derived_trigger_type_to_run_analysis(
+        self, incident_loop_db, monkeypatch
+    ):
+        config_module._config["agent"] = {"enabled": True}
+        iid = _insert_incident(incident_loop_db, status="detected")
+        _insert_anomaly_event(incident_loop_db, iid, "threads_running")
+
+        calls = []
+
+        def fake_run_analysis(analysis_type, server_id=None, incident_id=None,
+                               trigger_type=None, **kw):
+            calls.append(trigger_type)
+            return None
+
+        monkeypatch.setattr("agent.llm_agent.run_analysis", fake_run_analysis)
+
+        from scheduler import runner
+        runner._trigger_incident_analyses("default", [iid])
+
+        assert calls == ["threads_running_spike"]
+
+    def test_cpu_utilization_maps_to_high_cpu(self, incident_loop_db, monkeypatch):
+        config_module._config["agent"] = {"enabled": True}
+        iid = _insert_incident(incident_loop_db, status="detected")
+        _insert_anomaly_event(incident_loop_db, iid, "cpu_utilization")
+
+        calls = []
+        monkeypatch.setattr(
+            "agent.llm_agent.run_analysis",
+            lambda analysis_type, server_id=None, incident_id=None, trigger_type=None, **kw:
+                calls.append(trigger_type),
+        )
+
+        from scheduler import runner
+        runner._trigger_incident_analyses("default", [iid])
+
+        assert calls == ["high_cpu"]
+
+    def test_lock_frequency_maps_to_lock_cascade(self, incident_loop_db, monkeypatch):
+        config_module._config["agent"] = {"enabled": True}
+        iid = _insert_incident(incident_loop_db, status="detected")
+        _insert_anomaly_event(incident_loop_db, iid, "lock_frequency")
+
+        calls = []
+        monkeypatch.setattr(
+            "agent.llm_agent.run_analysis",
+            lambda analysis_type, server_id=None, incident_id=None, trigger_type=None, **kw:
+                calls.append(trigger_type),
+        )
+
+        from scheduler import runner
+        runner._trigger_incident_analyses("default", [iid])
+
+        assert calls == ["lock_cascade"]
+
+    def test_no_events_defaults_trigger_type(self, incident_loop_db, monkeypatch):
+        """An incident with no linked anomaly_events yet (edge case) must
+        still fire with the generic 'default' playbook, not error out."""
+        config_module._config["agent"] = {"enabled": True}
+        iid = _insert_incident(incident_loop_db, status="detected")
+
+        calls = []
+        monkeypatch.setattr(
+            "agent.llm_agent.run_analysis",
+            lambda analysis_type, server_id=None, incident_id=None, trigger_type=None, **kw:
+                calls.append(trigger_type),
+        )
+
+        from scheduler import runner
+        runner._trigger_incident_analyses("default", [iid])
+
+        assert calls == ["default"]
+
+    def test_unmapped_metric_defaults_trigger_type(self, incident_loop_db, monkeypatch):
+        """A metric with no tailored INCIDENT_TRIGGERS playbook (e.g. qps)
+        falls back to 'default' rather than KeyError-ing."""
+        config_module._config["agent"] = {"enabled": True}
+        iid = _insert_incident(incident_loop_db, status="detected")
+        _insert_anomaly_event(incident_loop_db, iid, "qps")
+
+        calls = []
+        monkeypatch.setattr(
+            "agent.llm_agent.run_analysis",
+            lambda analysis_type, server_id=None, incident_id=None, trigger_type=None, **kw:
+                calls.append(trigger_type),
+        )
+
+        from scheduler import runner
+        runner._trigger_incident_analyses("default", [iid])
+
+        assert calls == ["default"]

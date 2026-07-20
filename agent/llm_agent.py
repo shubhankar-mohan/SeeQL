@@ -17,6 +17,7 @@ from agent.tools import TOOL_DEFINITIONS, execute_tool
 from agent.prompts import SYSTEM_PROMPT, ROUTINE_ANALYSIS_PROMPT, INCIDENT_ANALYSIS_PROMPT, INCIDENT_TRIGGERS
 from config import get_config
 from storage import writer
+from storage.connection import get_mon_reader
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,54 @@ OPENAI_TOOL_DEFINITIONS = [
     }
     for tool in TOOL_DEFINITIONS
 ]
+
+
+def build_system_prompt(server_id: str | None = None) -> str:
+    """Format SYSTEM_PROMPT with the real MySQL version + hosting platform
+    for `server_id` (P3-2).
+
+    The prompt used to hardcode "a production MySQL 8.0.43 database on GCP
+    Cloud SQL" regardless of which server was actually being analyzed —
+    wrong context for a self-hosted server, a different major version, or a
+    non-GCP deployment.
+
+    mysql_version: the latest `global_variable_snapshots` row for
+    variable_name='version', scoped to server_id. Falls back to "8.0+" when
+    no snapshot exists yet (e.g. before the first slow-loop cycle) or the
+    monitoring DB isn't reachable.
+    platform: "a managed Cloud SQL instance" when `gcp.project_id` is
+    configured (and isn't the settings.yaml placeholder "your-..."), else
+    "a MySQL server (managed or self-hosted)".
+
+    Never raises: any lookup failure here (missing table on an old DB,
+    unconfigured monitoring DB, ...) falls back to a safe default so a cold
+    start or a misconfigured server never blocks an analysis.
+    """
+    version = "8.0+"
+    try:
+        with get_mon_reader() as conn:
+            row = conn.execute(
+                "SELECT variable_value FROM global_variable_snapshots "
+                "WHERE variable_name = 'version' AND server_id = ? "
+                "ORDER BY snapshot_time DESC LIMIT 1",
+                (server_id or "default",),
+            ).fetchone()
+            if row and row["variable_value"]:
+                version = row["variable_value"]
+    except Exception as e:
+        logger.debug(f"Could not read MySQL version for system prompt: {e}")
+
+    try:
+        project_id = (get_config().get("gcp", {}).get("project_id") or "").strip()
+    except Exception:
+        project_id = ""
+    platform = (
+        "a managed Cloud SQL instance"
+        if project_id and not project_id.startswith("your-")
+        else "a MySQL server (managed or self-hosted)"
+    )
+
+    return SYSTEM_PROMPT.format(mysql_version=version, platform=platform)
 
 
 def run_analysis(analysis_type: str = "routine", trigger_type: str | None = None,
@@ -115,19 +164,30 @@ def run_analysis(analysis_type: str = "routine", trigger_type: str | None = None
         if backend is None:
             return None
 
+        # Per-server system prompt (P3-2): real MySQL version + platform for
+        # this server_id, instead of the hardcoded constant.
+        system_prompt = build_system_prompt(server_id)
+
         logger.info(f"Running {analysis_type} analysis with {backend['type']} ({backend['model']})")
 
+        start_time = time.time()
         try:
             if backend["type"] == "gemini":
-                result, truncated = _run_gemini_loop(backend, max_tokens, max_tool_rounds, user_msg)
+                result, truncated, tool_calls = _run_gemini_loop(
+                    backend, max_tokens, max_tool_rounds, user_msg, system_prompt
+                )
             elif backend["type"] == "vertex-claude":
-                result, truncated = _run_vertex_claude_loop(
-                    backend, max_tokens, max_tool_rounds, user_msg
+                result, truncated, tool_calls = _run_vertex_claude_loop(
+                    backend, max_tokens, max_tool_rounds, user_msg, system_prompt
                 )
             elif backend["type"] == "openai":
-                result, truncated = _run_openai_loop(backend, max_tokens, max_tool_rounds, user_msg)
+                result, truncated, tool_calls = _run_openai_loop(
+                    backend, max_tokens, max_tool_rounds, user_msg, system_prompt
+                )
             else:
-                result, truncated = _run_anthropic_loop(backend, max_tokens, max_tool_rounds, user_msg)
+                result, truncated, tool_calls = _run_anthropic_loop(
+                    backend, max_tokens, max_tool_rounds, user_msg, system_prompt
+                )
         except Exception as e:
             # Honest failure (P1-6): a loop exception (e.g. a non-retryable LLM
             # API error, or a retryable one that never recovered) used to be
@@ -137,6 +197,7 @@ def run_analysis(analysis_type: str = "routine", trigger_type: str | None = None
             # route can respond honestly (502) instead.
             logger.error(f"Agent analysis failed: {e}")
             return {"status": "error", "error": str(e)}
+        duration_ms = int((time.time() - start_time) * 1000)
     finally:
         # Reset the target-server ContextVar so a pooled worker thread can't
         # leak it into a later call (P1-10). This now covers the WHOLE
@@ -151,7 +212,8 @@ def run_analysis(analysis_type: str = "routine", trigger_type: str | None = None
     # Parse and store the result
     analysis = _parse_and_store(
         result, analysis_type, state_md, server_id, incident_id=incident_id,
-        truncated=truncated,
+        truncated=truncated, model=backend["model"], tool_calls=tool_calls,
+        duration_ms=duration_ms,
     )
     return analysis
 
@@ -233,6 +295,16 @@ def _detect_backend(config: dict) -> dict | None:
     if _looks_like_openai(model) and (openai_key or openai_base_url):
         return _openai()
     if model.startswith("claude"):
+        if anthropic_key and has_gcp_creds:
+            # Both are configured (P1-28): prefer the Anthropic API — an
+            # explicit key is a deliberate choice, whereas GCP credentials
+            # may just be ambiently present (e.g. for the gemini fallback
+            # path or other GCP services) rather than intended for Claude.
+            logger.info(
+                "claude-* model has both GCP credentials and ANTHROPIC_API_KEY "
+                "configured; preferring the Anthropic API (explicit key) over Vertex AI."
+            )
+            return _anthropic()
         if has_gcp_creds:
             return _vertex_claude()
         if anthropic_key:
@@ -318,14 +390,19 @@ _FINALIZE_NUDGE = (
 
 
 def _run_gemini_loop(backend: dict, max_tokens: int, max_rounds: int,
-                      user_msg: str) -> tuple[str, bool]:
+                      user_msg: str, system_prompt: str = SYSTEM_PROMPT) -> tuple[str, bool, int]:
     """Run tool-use loop with Gemini via Vertex AI.
 
-    Returns (final_text, truncated) — `truncated` is True if ANY response
-    during the loop (a tool-calling round or the max-rounds finalize call)
-    was cut off at MAX_TOKENS (P1-13); the flag is monotonic, so a
-    mid-stream truncation stays flagged even if a later round completes
-    cleanly.
+    Returns (final_text, truncated, total_tool_calls) — `truncated` is True
+    if ANY response during the loop (a tool-calling round or the max-rounds
+    finalize call) was cut off at MAX_TOKENS (P1-13); the flag is monotonic,
+    so a mid-stream truncation stays flagged even if a later round completes
+    cleanly. `total_tool_calls` is the count of tool calls executed across
+    the whole loop (P1-22 telemetry).
+
+    `system_prompt` defaults to the bare SYSTEM_PROMPT constant so direct
+    callers/tests don't have to supply one; `run_analysis`/`run_llm_analysis`
+    pass the per-server prompt built by `build_system_prompt` (P3-2).
     """
     from google import genai
     from google.genai import types
@@ -370,7 +447,7 @@ def _run_gemini_loop(backend: dict, max_tokens: int, max_rounds: int,
             model=backend["model"],
             contents=contents,
             config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
+                system_instruction=system_prompt,
                 tools=[tools],
                 max_output_tokens=max_tokens,
                 temperature=0,
@@ -423,6 +500,15 @@ def _run_gemini_loop(backend: dict, max_tokens: int, max_rounds: int,
             logger.info(f"  Tool call [{total_tool_calls + 1}]: {name}({json.dumps(args)[:200]})")
             result = execute_tool(name, args)
             total_tool_calls += 1
+            # execute_tool() returns a JSON string (see agent/tools.py); hand
+            # Gemini the PARSED object instead of a JSON-string-within-a-
+            # string, which forced the model to re-parse a serialized blob
+            # on every tool result (P1-24). Falls back to the raw string for
+            # the rare handler that doesn't return valid JSON.
+            try:
+                parsed_result = json.loads(result)
+            except (TypeError, json.JSONDecodeError):
+                parsed_result = result
             # Key parallel same-turn tool responses by id, not just name, so
             # two calls to the same tool in one turn can't get crossed
             # results (P1-12). `from_function_response()` in the installed
@@ -430,7 +516,7 @@ def _run_gemini_loop(backend: dict, max_tokens: int, max_rounds: int,
             # directly; `id=None` (no id on the call) serializes the same as
             # the classmethod, so this one path covers both cases.
             tool_response_parts.append(types.Part(function_response=types.FunctionResponse(
-                id=getattr(fc, "id", None), name=name, response={"result": result},
+                id=getattr(fc, "id", None), name=name, response={"result": parsed_result},
             )))
 
         contents.append(types.Content(role="user", parts=tool_response_parts))
@@ -447,7 +533,7 @@ def _run_gemini_loop(backend: dict, max_tokens: int, max_rounds: int,
             model=backend["model"],
             contents=contents,
             config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
+                system_instruction=system_prompt,
                 max_output_tokens=max_tokens,
                 temperature=0,
             ),
@@ -457,11 +543,11 @@ def _run_gemini_loop(backend: dict, max_tokens: int, max_rounds: int,
             truncated = True
         final_text = _response_text(finalize_response)
 
-    return final_text, truncated
+    return final_text, truncated, total_tool_calls
 
 
-def _run_vertex_claude_loop(backend: dict, max_tokens: int, max_rounds: int,
-                             user_msg: str) -> tuple[str, bool]:
+def _run_vertex_claude_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: str,
+                             system_prompt: str = SYSTEM_PROMPT) -> tuple[str, bool, int]:
     """Run tool-use loop with Claude via Vertex AI (GCP credentials)."""
     try:
         from anthropic import AnthropicVertex
@@ -478,15 +564,15 @@ def _run_vertex_claude_loop(backend: dict, max_tokens: int, max_rounds: int,
         project_id=backend["project_id"],
         region=backend["region"],
     )
-    return _run_claude_loop(client, backend["model"], max_tokens, max_rounds, user_msg)
+    return _run_claude_loop(client, backend["model"], max_tokens, max_rounds, user_msg, system_prompt)
 
 
-def _run_anthropic_loop(backend: dict, max_tokens: int, max_rounds: int,
-                         user_msg: str) -> tuple[str, bool]:
+def _run_anthropic_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: str,
+                         system_prompt: str = SYSTEM_PROMPT) -> tuple[str, bool, int]:
     """Run tool-use loop with Claude via Anthropic API."""
     import anthropic
     client = anthropic.Anthropic(api_key=backend["api_key"])
-    return _run_claude_loop(client, backend["model"], max_tokens, max_rounds, user_msg)
+    return _run_claude_loop(client, backend["model"], max_tokens, max_rounds, user_msg, system_prompt)
 
 
 def _openai_token_kwargs(model: str, max_tokens: int) -> dict:
@@ -501,13 +587,18 @@ def _openai_token_kwargs(model: str, max_tokens: int) -> dict:
     return {"max_tokens": max_tokens, "temperature": 0}
 
 
-def _run_openai_loop(backend: dict, max_tokens: int, max_rounds: int,
-                      user_msg: str) -> tuple[str, bool]:
+def _run_openai_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: str,
+                      system_prompt: str = SYSTEM_PROMPT) -> tuple[str, bool, int]:
     """Tool-use loop for OpenAI and any OpenAI-compatible endpoint.
 
     A `base_url` in the backend points the OpenAI SDK at a compatible server
     (Azure OpenAI, Ollama, vLLM, Groq, OpenRouter, LM Studio, …), so this single
     loop covers "OpenAI" and "bring your own / any other LLM".
+
+    Returns (final_text, truncated, total_tool_calls) — see _run_gemini_loop
+    for the shared contract (P1-13 truncated, P1-22 total_tool_calls).
+    `system_prompt` defaults to the bare SYSTEM_PROMPT constant; the real
+    callers pass the per-server prompt from `build_system_prompt` (P3-2).
     """
     try:
         from openai import OpenAI
@@ -535,7 +626,7 @@ def _run_openai_loop(backend: dict, max_tokens: int, max_rounds: int,
     token_kwargs = _openai_token_kwargs(model, max_tokens)
 
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_msg},
     ]
     final_text = ""
@@ -613,18 +704,21 @@ def _run_openai_loop(backend: dict, max_tokens: int, max_rounds: int,
         else:
             final_text = ""
 
-    return final_text, truncated
+    return final_text, truncated, total_tool_calls
 
 
-def _run_claude_loop(client, model: str, max_tokens: int, max_rounds: int,
-                      user_msg: str) -> tuple[str, bool]:
+def _run_claude_loop(client, model: str, max_tokens: int, max_rounds: int, user_msg: str,
+                      system_prompt: str = SYSTEM_PROMPT) -> tuple[str, bool, int]:
     """Shared tool-use loop for any Claude client (API or Vertex).
 
-    Returns (final_text, truncated) — `truncated` is True if ANY response
-    during the loop (a tool-calling round or the max-rounds finalize call)
-    ended on stop_reason "max_tokens" (P1-13); the flag is monotonic, so a
-    mid-stream truncation stays flagged even if a later round completes
-    cleanly.
+    Returns (final_text, truncated, total_tool_calls) — `truncated` is True
+    if ANY response during the loop (a tool-calling round or the max-rounds
+    finalize call) ended on stop_reason "max_tokens" (P1-13); the flag is
+    monotonic, so a mid-stream truncation stays flagged even if a later
+    round completes cleanly. `total_tool_calls` is the count of tool calls
+    executed across the whole loop (P1-22 telemetry). `system_prompt`
+    defaults to the bare SYSTEM_PROMPT constant; the real callers pass the
+    per-server prompt from `build_system_prompt` (P3-2).
     """
     messages = [{"role": "user", "content": user_msg}]
     final_text = ""
@@ -636,7 +730,7 @@ def _run_claude_loop(client, model: str, max_tokens: int, max_rounds: int,
         response = _create_with_retry(lambda: client.messages.create(
             model=model,
             max_tokens=max_tokens,
-            system=SYSTEM_PROMPT,
+            system=system_prompt,
             tools=TOOL_DEFINITIONS,
             messages=messages,
             temperature=0,
@@ -691,7 +785,7 @@ def _run_claude_loop(client, model: str, max_tokens: int, max_rounds: int,
         finalize_response = _create_with_retry(lambda: client.messages.create(
             model=model,
             max_tokens=max_tokens,
-            system=SYSTEM_PROMPT,
+            system=system_prompt,
             tools=TOOL_DEFINITIONS,
             tool_choice={"type": "none"},
             messages=messages,
@@ -704,7 +798,7 @@ def _run_claude_loop(client, model: str, max_tokens: int, max_rounds: int,
             block.text for block in finalize_response.content if block.type == "text"
         )
 
-    return final_text, truncated
+    return final_text, truncated, total_tool_calls
 
 
 def _is_quiet(report) -> bool:
@@ -714,6 +808,12 @@ def _is_quiet(report) -> bool:
 
     # Not quiet if there are regressions, DDL changes, deadlocks, or locks
     if changes.get("regressions"):
+        return False
+    if changes.get("new_queries"):
+        # A brand-new (never-before-seen) heavy query fingerprint deserves a
+        # look even if nothing else in the state report looks alarming yet —
+        # skipping it here meant a new query could run unreviewed for a full
+        # skip-quiet cycle before anything noticed it (P1-27).
         return False
     if changes.get("ddl_changes"):
         return False
@@ -779,7 +879,9 @@ def _build_outcome_notes(confidence: float | None, truncated: bool) -> str | Non
 
 def _parse_and_store(text: str, analysis_type: str, input_summary: str,
                      server_id: str = "default", incident_id: int | None = None,
-                     truncated: bool = False) -> dict:
+                     truncated: bool = False, model: str | None = None,
+                     tool_calls: int | None = None,
+                     duration_ms: int | None = None) -> dict:
     """Parse agent response and store in agent_analyses table.
 
     If `incident_id` is given (or the response self-reports one via
@@ -835,6 +937,9 @@ def _parse_and_store(text: str, analysis_type: str, input_summary: str,
         "recommendations": json.dumps(recommendations),
         "applied": 0,
         "outcome_notes": _build_outcome_notes(confidence, truncated),
+        "model": model,
+        "tool_calls": tool_calls,
+        "duration_ms": duration_ms,
     }
 
     analysis_id = None
@@ -1040,6 +1145,10 @@ def run_llm_analysis(
         from config.server_registry import get_server_registry
         server_id = get_server_registry().get_default_server_id()
 
+    # Per-server system prompt (P3-2): real MySQL version + platform for
+    # this server_id, instead of the hardcoded constant.
+    system_prompt = build_system_prompt(server_id)
+
     from agent.tools import set_current_server, set_current_budget
     try:
         set_current_server(server_id)
@@ -1054,15 +1163,25 @@ def run_llm_analysis(
         else config.get("max_tool_rounds", 10)
     )
 
+    start_time = time.time()
     try:
         if backend["type"] == "gemini":
-            text, truncated = _run_gemini_loop(backend, max_tokens, max_tool_rounds, prompt)
+            text, truncated, tool_calls = _run_gemini_loop(
+                backend, max_tokens, max_tool_rounds, prompt, system_prompt
+            )
         elif backend["type"] == "vertex-claude":
-            text, truncated = _run_vertex_claude_loop(backend, max_tokens, max_tool_rounds, prompt)
+            text, truncated, tool_calls = _run_vertex_claude_loop(
+                backend, max_tokens, max_tool_rounds, prompt, system_prompt
+            )
         elif backend["type"] == "openai":
-            text, truncated = _run_openai_loop(backend, max_tokens, max_tool_rounds, prompt)
+            text, truncated, tool_calls = _run_openai_loop(
+                backend, max_tokens, max_tool_rounds, prompt, system_prompt
+            )
         else:
-            text, truncated = _run_anthropic_loop(backend, max_tokens, max_tool_rounds, prompt)
+            text, truncated, tool_calls = _run_anthropic_loop(
+                backend, max_tokens, max_tool_rounds, prompt, system_prompt
+            )
+        duration_ms = int((time.time() - start_time) * 1000)
     finally:
         # Clear the per-investigation context so later calls on this (possibly
         # pooled) thread don't inherit a stale budget or target server.
@@ -1113,6 +1232,9 @@ def run_llm_analysis(
                 "recommendations": json.dumps(recommendations),
                 "applied": 0,
                 "outcome_notes": _build_outcome_notes(confidence, truncated),
+                "model": backend["model"],
+                "tool_calls": tool_calls,
+                "duration_ms": duration_ms,
             },
             addressed_incident,
             server_id,
@@ -1129,4 +1251,5 @@ def run_llm_analysis(
     return {
         "text": text, "analysis_id": analysis_id, "severity": severity,
         "confidence": confidence, "truncated": truncated,
+        "model": backend["model"], "tool_calls": tool_calls, "duration_ms": duration_ms,
     }

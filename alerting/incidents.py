@@ -29,7 +29,7 @@ import logging
 from typing import Any
 
 from config import get_config
-from storage.connection import get_mon_connection
+from storage.connection import get_mon_connection, get_mon_reader
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +196,33 @@ def _attach_or_create(
     )
 
     return incident_id, created
+
+
+def get_dominant_metric(incident_id: int) -> str | None:
+    """Return the most-frequent `anomaly_events.metric_name` for this incident
+    window (P3-3), or None if the incident has no linked events yet.
+
+    Used by the scheduler to pick a trigger-specific INCIDENT_TRIGGERS
+    playbook (see agent/prompts.py) instead of always falling through to
+    "default" — those tailored playbooks were dead code until trigger_type
+    was wired all the way from here through to `run_analysis`.
+
+    Ties (equal counts) break alphabetically on metric_name for a
+    deterministic result.
+    """
+    with get_mon_reader() as conn:
+        row = conn.execute(
+            """
+            SELECT metric_name, COUNT(*) as cnt
+            FROM anomaly_events
+            WHERE incident_id = ?
+            GROUP BY metric_name
+            ORDER BY cnt DESC, metric_name ASC
+            LIMIT 1
+            """,
+            (incident_id,),
+        ).fetchone()
+        return row["metric_name"] if row else None
 
 
 # ---------------------------------------------------------------------------

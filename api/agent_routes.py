@@ -1,5 +1,6 @@
 """API routes for the LLM Agent and Alerting systems."""
 
+import json
 import logging
 from fastapi import APIRouter, Query as QueryParam
 from fastapi.responses import JSONResponse
@@ -9,6 +10,23 @@ from api.query_helpers import query_rows, resolve_server_id
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["agent"])
+
+
+def _decode_json_field(raw):
+    """Decode an agent_analyses findings/recommendations column.
+
+    Both columns are stored as `json.dumps(<parsed markdown text>)` (see
+    agent.llm_agent._parse_and_store / run_llm_analysis), so handing the raw
+    column value straight back to a JSON API response double-encodes it —
+    the client sees an escaped JSON string instead of the plain text (P1-23).
+    Falls back to the raw value unchanged if it isn't valid JSON.
+    """
+    if not raw:
+        return ""
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
 
 
 # ---------------------------------------------------------------------------
@@ -36,11 +54,17 @@ def state_report(server: str = QueryParam(default=None)):
 def trigger_analysis(
     analysis_type: str = QueryParam(default="routine"),
     server: str = QueryParam(default=None),
+    trigger_type: str = QueryParam(default=None),
 ):
-    """Trigger an on-demand LLM analysis."""
+    """Trigger an on-demand LLM analysis.
+
+    trigger_type (P3-3): for analysis_type="incident", selects a tailored
+    INCIDENT_TRIGGERS playbook (e.g. "lock_cascade", "high_cpu") instead of
+    the generic "default" instructions. Ignored for "routine" analyses.
+    """
     server = resolve_server_id(server)
     from agent.llm_agent import run_analysis
-    result = run_analysis(analysis_type, server_id=server)
+    result = run_analysis(analysis_type, server_id=server, trigger_type=trigger_type)
     if result is None:
         return {"status": "skipped", "reason": "Agent disabled or state is quiet"}
     if isinstance(result, dict) and result.get("status") == "error":
@@ -73,8 +97,8 @@ def trigger_analysis(
         "status": "completed",
         "server_id": server,
         "severity": result.get("severity"),
-        "findings": result.get("findings"),
-        "recommendations": result.get("recommendations"),
+        "findings": _decode_json_field(result.get("findings")),
+        "recommendations": _decode_json_field(result.get("recommendations")),
     }
 
 
@@ -93,7 +117,11 @@ def list_analyses(
         ORDER BY analyzed_at DESC
         LIMIT ?
     """
-    return query_rows(sql, (server, limit))
+    rows = query_rows(sql, (server, limit))
+    for row in rows:
+        row["findings"] = _decode_json_field(row.get("findings"))
+        row["recommendations"] = _decode_json_field(row.get("recommendations"))
+    return rows
 
 
 # ---------------------------------------------------------------------------
