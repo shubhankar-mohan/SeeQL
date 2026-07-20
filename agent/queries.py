@@ -236,12 +236,16 @@ LIMIT 1
 """
 
 QUERY_HISTORY = """
-SELECT snapshot_time, avg_time_sec, exec_count, total_time_sec,
-       rows_examined, rows_sent
-FROM query_digest_snapshots
-WHERE digest = ?
-  AND server_id = ?
-  AND snapshot_time >= datetime('now', ?)
+SELECT * FROM (
+    SELECT snapshot_time, avg_time_sec, exec_count, total_time_sec,
+           rows_examined, rows_sent
+    FROM query_digest_snapshots
+    WHERE digest = ?
+      AND server_id = ?
+      AND snapshot_time >= datetime('now', ?)
+    ORDER BY snapshot_time DESC
+    LIMIT 2000
+)
 ORDER BY snapshot_time ASC
 """
 

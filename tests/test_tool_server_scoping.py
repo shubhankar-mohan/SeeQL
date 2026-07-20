@@ -24,6 +24,8 @@ import json
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 import config as config_module
 import agent.tools as tools
 from storage.connection import reset_connections
@@ -49,7 +51,7 @@ def _config_for(db_path):
 
 
 def _seed_digest(conn, digest, server_id, snapshot_time, avg_time_sec, query_sample_text,
-                  exec_count=10, rows_examined=100, rows_sent=10):
+                  exec_count=10, rows_examined=100, rows_sent=10, schema_name="db"):
     conn.execute(
         """INSERT INTO query_digest_snapshots
            (snapshot_time, server_id, digest, digest_text, query_sample_text, schema_name,
@@ -57,7 +59,7 @@ def _seed_digest(conn, digest, server_id, snapshot_time, avg_time_sec, query_sam
             rows_examined, rows_sent, rows_affected)
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (snapshot_time, server_id, digest, "SELECT * FROM members WHERE x=?",
-         query_sample_text, "db",
+         query_sample_text, schema_name,
          exec_count, avg_time_sec * exec_count, avg_time_sec, avg_time_sec, avg_time_sec,
          rows_examined, rows_sent, 0),
     )
@@ -225,6 +227,33 @@ class TestRunExplainServerScoping:
         assert "server_a_marker" in captured["sql"]
         assert "server_b_marker" not in captured["sql"]
 
+    def test_run_explain_rejects_bad_schema_name(self, mon_db, monkeypatch):
+        """P2-5: schema (query_digest_snapshots.schema_name) is interpolated
+        into `USE `...`` on run_explain's live path -- an invalid identifier
+        must be rejected before opening a prod connection."""
+        conn, db_path = mon_db
+        now = _iso()
+        _seed_digest(conn, "0xBADSCHEMA", "server_a", now, 0.02,
+                     "SELECT * FROM members WHERE id = 5", schema_name="bad`schema")
+        conn.commit()
+
+        called = {"flag": False}
+
+        def _sentinel(*a, **k):
+            called["flag"] = True
+            raise AssertionError("must NOT hit prod for an invalid schema identifier")
+
+        with _config_for(db_path):
+            monkeypatch.setattr(tools, "get_prod_connection", _sentinel)
+            tools.set_current_server("server_a")
+            try:
+                result = tools._tool_run_explain({"digest": "0xBADSCHEMA"})
+            finally:
+                tools.set_current_server(None)
+
+        assert "error" in result
+        assert called["flag"] is False
+
 
 class TestGetTableSchemaServerScoping:
     def test_get_table_schema_excludes_other_server(self, mon_db):
@@ -324,3 +353,68 @@ class TestRecentAnalysesServerScoping:
 
         assert result["count"] == 1
         assert result["analyses"][0]["findings"] == ["server_a finding"]
+
+
+class TestContextVarResetOnException:
+    """P1-10: every caller that does set_current_server(sid) before a tool
+    call must reset it to None even when the call raises -- otherwise a
+    pooled/reused thread (investigation ThreadPoolExecutor worker, MCP
+    session, scheduler job) leaks the target server into whatever runs on
+    it next. Each test here monkeypatches the DOWNSTREAM handler to raise,
+    calls the real (unmocked) wrapper, and checks the ContextVar afterward
+    -- not just that an error was returned, which a broad except could
+    produce even without the fix."""
+
+    def test_mcp_live_tool_wrapper_resets_on_handler_exception(self, monkeypatch):
+        import mcp_server.tools.live as live_mod
+
+        def _boom(input_data):
+            raise RuntimeError("live tool exploded")
+
+        monkeypatch.setattr(tools, "_tool_get_live_processlist", _boom)
+
+        with pytest.raises(RuntimeError):
+            live_mod._with_server_and_args("get_live_processlist", "server_x", {})
+
+        assert tools.get_current_server() is None
+
+    def test_mcp_schema_tool_resets_on_handler_exception(self, monkeypatch):
+        import mcp_server.tools.schema as schema_mod
+
+        def _boom(input_data):
+            raise RuntimeError("schema tool exploded")
+
+        monkeypatch.setattr(tools, "_tool_get_table_schema", _boom)
+
+        with pytest.raises(RuntimeError):
+            schema_mod._get_table_schema_impl("db", "t", "server_x")
+
+        assert tools.get_current_server() is None
+
+    def test_mcp_action_explain_resets_on_handler_exception(self, monkeypatch):
+        import mcp_server.tools.action as action_mod
+
+        def _boom(input_data):
+            raise RuntimeError("explain tool exploded")
+
+        monkeypatch.setattr(tools, "_tool_explain_query", _boom)
+
+        with pytest.raises(RuntimeError):
+            action_mod._explain_query_impl("SELECT 1", None, "server_x")
+
+        assert tools.get_current_server() is None
+
+    def test_missing_index_fallback_resets_on_handler_exception(self, monkeypatch):
+        from alerting.correlators import missing_index as mi
+
+        def _boom(input_data):
+            raise RuntimeError("run_explain exploded")
+
+        monkeypatch.setattr(tools, "_tool_run_explain", _boom)
+
+        result = mi._run_explain_fallback("server_x", "0xDEAD")
+
+        # _run_explain_fallback catches everything and degrades to (None,
+        # None) -- assert on the ContextVar directly rather than propagation.
+        assert result == (None, None)
+        assert tools.get_current_server() is None

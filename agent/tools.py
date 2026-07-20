@@ -16,6 +16,13 @@ import re as _re_ident
 import time
 
 from agent import queries as Q
+# MySQL error codes that are transient and worth retrying. Reuse the single
+# source of truth in collectors/base.py rather than duplicating the set (they
+# had drifted before; P1-18 spirit). Used by _run_live_query (P1-16): a
+# deterministic error (syntax error, permission denied, a MAX_EXECUTION_TIME
+# kill) is NOT in this set and must fail on the first attempt instead of
+# tripling load on an already-struggling server for a guaranteed failure.
+from collectors.base import TRANSIENT_ERRORS as _TRANSIENT_MYSQL_ERRNOS
 from storage.connection import get_mon_reader, get_prod_connection
 
 logger = logging.getLogger(__name__)
@@ -30,6 +37,27 @@ _IDENT_RE = _re_ident.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
 def _valid_identifier(name: str) -> bool:
     """True if `name` is a safe bare MySQL identifier (no backticks/spaces/;)."""
     return bool(name) and bool(_IDENT_RE.match(name))
+
+
+def _reject_non_runnable_sql(sql_text: str) -> dict | None:
+    """Shared guard for explain_query and run_explain's live fallback.
+
+    Rejects text that looks like a normalized digest fingerprint (has `?`
+    placeholders) or a truncated sample (ellipsis) before it reaches
+    production -- both are guaranteed to fail there. run_explain's live
+    path falls back to `digest_text` when there's no captured
+    `query_sample_text`, and used to send that fingerprint straight to prod
+    (P1-15). Returns an error dict, or None if `sql_text` passes.
+    """
+    if "?" in sql_text:
+        return {"error": "Query contains `?` placeholders — this looks like a "
+                         "digest_text, which is not runnable. Use run_explain(digest) "
+                         "or search_slow_log for a real statement."}
+    if "…" in sql_text or sql_text.rstrip().endswith("...") or "..." in sql_text:
+        return {"error": "Query contains an ellipsis (truncated) — not runnable. "
+                         "Use run_explain(digest) or search_slow_log."}
+    return None
+
 
 # Timeout for live production queries (seconds)
 _LIVE_QUERY_TIMEOUT = 10
@@ -415,17 +443,33 @@ def execute_tool(name: str, input_data: dict) -> str:
         logger.info(f"Tool {name} rejected by budget: {msg}")
         return json.dumps({"error": msg, "budget_rejected": True})
 
+    # Charge the budget BEFORE calling the handler, not after a successful
+    # return (P1-9). A live tool that times out (3 prod attempts under
+    # _run_live_query's retry) used to charge 0 -- exactly during the
+    # incidents the budget exists to bound, letting the LLM retry the same
+    # doomed call until max_tool_rounds ran out. Cache-first tools are still
+    # excluded here: they self-gate + self-charge their own live
+    # fall-through inside the handler (unchanged).
+    if budget is not None and not cache_first:
+        try:
+            budget.record(name)
+        except Exception:
+            logger.debug(f"budget.record({name}) failed; continuing")
+
     try:
         result = handler(input_data)
-        if budget is not None and not cache_first:
-            try:
-                budget.record(name)
-            except Exception:
-                logger.debug(f"budget.record({name}) failed; continuing")
-        return json.dumps(result, default=str)
+        out = json.dumps(result, default=str)
     except Exception as e:
         logger.error(f"Tool {name} failed: {e}")
-        return json.dumps({"error": str(e)})
+        out = json.dumps({"error": str(e)})
+
+    # Cap the serialized result so a single tool call can't flood the LLM's
+    # context window (P1-14). This is advisory context the model reasons
+    # over, not something it parses strictly, so a truncated JSON blob plus
+    # a trailing note is an acceptable trade for staying bounded.
+    if len(out) > 16384:
+        out = out[:16384] + '\n{"note":"[truncated — result exceeded 16KB]"}'
+    return out
 
 
 # --- Snapshot tool implementations ---
@@ -465,6 +509,20 @@ def _tool_run_explain(input_data: dict) -> dict:
     if not sql_text.strip().upper().startswith(("SELECT", "WITH")):
         return {"error": f"Cannot EXPLAIN non-SELECT query: {sql_text[:50]}"}
 
+    # Safety: when there's no captured query_sample_text, sql_text falls
+    # back to digest_text -- a normalized fingerprint with `?` placeholders
+    # and possibly an ellipsis for truncated text. That is NOT runnable SQL;
+    # sending it to EXPLAIN FORMAT=JSON on production would just fail there
+    # instead of here (P1-15). Same guard explain_query uses (P2-5 sibling).
+    non_runnable = _reject_non_runnable_sql(sql_text)
+    if non_runnable:
+        return {**non_runnable, "source": "live"}
+
+    # Safety: schema is interpolated into `USE `...`` below -- validate
+    # before opening a prod connection (P2-5).
+    if schema and not _valid_identifier(schema):
+        return {"error": f"Invalid schema identifier: {schema}", "source": "live"}
+
     # About to hit production. Gate + charge the investigator budget HERE (not
     # at dispatch) so the cache hit above stays free and an erroring live
     # EXPLAIN still counts against the cap. (No-op when no budget is set.)
@@ -477,6 +535,7 @@ def _tool_run_explain(input_data: dict) -> dict:
     try:
         with get_prod_connection(sid) as conn:
             cursor = conn.cursor(dictionary=True)
+            cursor.execute(f"SET SESSION MAX_EXECUTION_TIME = {_LIVE_QUERY_TIMEOUT * 1000}")
             if schema:
                 cursor.execute(f"USE `{schema}`")
             cursor.execute(f"EXPLAIN FORMAT=JSON {sql_text}")
@@ -539,7 +598,10 @@ def _tool_get_table_schema(input_data: dict) -> dict:
 
 def _tool_get_query_history(input_data: dict) -> dict:
     digest = input_data["digest"]
-    days = input_data.get("days", 7)
+    # Clamp LLM-supplied days to [1, 90] -- an unclamped value (e.g. a
+    # hallucinated days=3650) would otherwise pull years of history into
+    # context on every call (P1-14).
+    days = max(1, min(int(input_data.get("days", 7)), 90))
     sid = _resolve_server_id()
 
     with get_mon_reader() as conn:
@@ -577,7 +639,16 @@ def _tool_get_lock_graph(input_data: dict) -> dict:
 # --- Live tool implementations (query production MySQL directly) ---
 
 def _run_live_query(query: str, params: tuple = (), dictionary: bool = True) -> list[dict]:
-    """Execute a read-only query against production MySQL with timeout and retry."""
+    """Execute a read-only query against production MySQL with timeout and retry.
+
+    Retries ONLY on the transient connection errnos collectors also retry on
+    (2003/2006/2013/2055/1205). A deterministic error (syntax error, a
+    MAX_EXECUTION_TIME kill, permission denied) is NOT retried -- it will
+    fail identically on every attempt, so retrying it just triples load on
+    an already-struggling server for a guaranteed failure (P1-16). An
+    exception with no `errno` at all (e.g. a bug rather than a MySQL error)
+    is treated as non-retryable too -- fail closed, not open.
+    """
     last_err = None
     for attempt in range(_LIVE_TOOL_MAX_RETRIES + 1):
         try:
@@ -589,6 +660,8 @@ def _run_live_query(query: str, params: tuple = (), dictionary: bool = True) -> 
                 return [dict(r) if dictionary else r for r in rows]
         except Exception as e:
             last_err = e
+            if getattr(e, "errno", None) not in _TRANSIENT_MYSQL_ERRNOS:
+                raise
             if attempt < _LIVE_TOOL_MAX_RETRIES:
                 time.sleep(_LIVE_TOOL_RETRY_DELAY * (attempt + 1))
     raise last_err
@@ -637,6 +710,8 @@ def _tool_get_live_locks(input_data: dict) -> dict:
         FROM performance_schema.data_lock_waits w
         JOIN information_schema.innodb_trx r ON r.trx_id = w.REQUESTING_ENGINE_TRANSACTION_ID
         JOIN information_schema.innodb_trx b ON b.trx_id = w.BLOCKING_ENGINE_TRANSACTION_ID
+        ORDER BY wait_seconds DESC
+        LIMIT 100
     """
     rows = _run_live_query(query)
     return {
@@ -686,6 +761,7 @@ def _tool_get_live_transactions(input_data: dict) -> dict:
             trx_isolation_level AS isolation_level
         FROM information_schema.innodb_trx
         ORDER BY trx_started ASC
+        LIMIT 100
     """
     rows = _run_live_query(query)
     return {
@@ -814,16 +890,19 @@ def _tool_explain_query(input_data: dict) -> dict:
 
     # Safety: digest_text is a normalized fingerprint with `?` and `…` markers
     # and may be truncated — it is NOT runnable SQL. Never send it to prod.
-    if "?" in query:
-        return {"error": "Query contains `?` placeholders — this looks like a "
-                         "digest_text, which is not runnable. Use run_explain(digest) "
-                         "or search_slow_log for a real statement."}
-    if "…" in query or query.rstrip().endswith("...") or "..." in query:
-        return {"error": "Query contains an ellipsis (truncated) — not runnable. "
-                         "Use run_explain(digest) or search_slow_log."}
+    non_runnable = _reject_non_runnable_sql(query)
+    if non_runnable:
+        return non_runnable
     if query.count("(") != query.count(")"):
         return {"error": "Query has unbalanced parentheses — likely truncated. "
                          "Use run_explain(digest) or search_slow_log."}
+
+    # Safety: schema_name is interpolated into `USE `...`` below -- validate
+    # before opening a prod connection (P2-5), same as get_index_stats /
+    # get_table_schema / run_explain.
+    if schema_name and not _valid_identifier(schema_name):
+        return {"error": f"Invalid schema identifier: {schema_name}"}
+
     logger.debug("explain_query accepted: %s", query[:200])
 
     try:
@@ -851,7 +930,9 @@ def _tool_explain_query(input_data: dict) -> dict:
 
 def _tool_search_slow_log(input_data: dict) -> dict:
     keyword = input_data["keyword"]
-    limit = input_data.get("limit", 10)
+    # Clamp to [1, 50] -- an unclamped LLM-supplied limit (P1-14) would
+    # otherwise pull an unbounded number of full slow-log rows into context.
+    limit = max(1, min(int(input_data.get("limit", 10)), 50))
     sid = _resolve_server_id()
 
     with get_mon_reader() as conn:
@@ -883,7 +964,8 @@ def _tool_search_slow_log(input_data: dict) -> dict:
 
 def _tool_get_recent_analyses(input_data: dict) -> dict:
     hours = input_data.get("hours", 24)
-    limit = input_data.get("limit", 5)
+    # Clamp to [1, 50] -- same context-flood concern as search_slow_log (P1-14).
+    limit = max(1, min(int(input_data.get("limit", 5)), 50))
     sid = _resolve_server_id()
 
     with get_mon_reader() as conn:

@@ -66,7 +66,14 @@ def test_explain_for_digest_default_does_not_call_fallback(monkeypatch):
 
 
 def test_run_explain_fallback_calls_tool_and_summarizes(monkeypatch):
-    """Exercise the real _run_explain_fallback body against a mocked tool call."""
+    """Exercise the real _run_explain_fallback body against a mocked tool call.
+
+    P1-10: _run_explain_fallback now wraps the tool call in try/finally so
+    the ContextVar always resets, so set_current_server is called TWICE --
+    "srv1" before the tool call, then None in the finally. Track every call
+    in a list instead of overwriting a single key, which would only ever
+    show the LAST call and silently hide a missing reset.
+    """
     fake_result = {
         "source": "live",
         "explain": {
@@ -79,14 +86,14 @@ def test_run_explain_fallback_calls_tool_and_summarizes(monkeypatch):
             }
         },
     }
-    called = {}
+    called = {"server_id_calls": []}
 
     def fake_tool_run_explain(input_data):
         called["digest"] = input_data["digest"]
         return fake_result
 
     def fake_set_current_server(server_id):
-        called["server_id"] = server_id
+        called["server_id_calls"].append(server_id)
 
     import agent.tools as agent_tools
     monkeypatch.setattr(agent_tools, "_tool_run_explain", fake_tool_run_explain)
@@ -94,7 +101,10 @@ def test_run_explain_fallback_calls_tool_and_summarizes(monkeypatch):
 
     summary, table = mi._run_explain_fallback("srv1", "7107e33a")
 
-    assert called == {"digest": "7107e33a", "server_id": "srv1"}
+    assert called["digest"] == "7107e33a"
+    assert called["server_id_calls"] == ["srv1", None], (
+        "expected set then reset (P1-10): srv1 before the tool call, None in the finally"
+    )
     assert summary is not None and "ALL" in summary
     assert table == "pirates"
 

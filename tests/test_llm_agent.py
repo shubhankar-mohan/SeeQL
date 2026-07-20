@@ -994,6 +994,34 @@ class TestRunAnalysisHonestErrors:
         assert response["severity"] == "warning"
 
 
+class TestRunAnalysisContextVarHygiene:
+    """P1-10: the target-server ContextVar must reset even when an
+    exception is raised while building the state report. Before this fix,
+    only the LLM-loop dispatch was wrapped in try/finally -- a
+    build_state_report() failure (a bad snapshot query, a locked SQLite
+    file, ...) skipped the reset entirely and left this worker thread's
+    ContextVar pointed at server_id for whatever job APScheduler runs next
+    on that (reused) thread."""
+
+    def test_context_reset_when_state_report_build_raises(self, monkeypatch):
+        monkeypatch.setattr(
+            llm_agent, "get_config",
+            lambda: {"agent": {"enabled": True, "model": "claude-x"}},
+        )
+
+        def _boom(server_id=None):
+            raise RuntimeError("state report build exploded")
+
+        monkeypatch.setattr(llm_agent, "build_state_report", _boom)
+
+        from agent.tools import get_current_server
+
+        with pytest.raises(RuntimeError):
+            llm_agent.run_analysis("routine", server_id="server_x")
+
+        assert get_current_server() is None
+
+
 class TestSplitFindingsRecommendations:
     """The replay/investigator prompt uses a singular `### Recommendation`
     header with no `### Findings`; parsing must still populate both columns."""

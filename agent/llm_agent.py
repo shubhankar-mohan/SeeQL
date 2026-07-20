@@ -85,63 +85,67 @@ def run_analysis(analysis_type: str = "routine", trigger_type: str | None = None
     # Set the current server for live tools
     from agent.tools import set_current_server
     set_current_server(server_id)
-
-    max_tokens = config.get("max_tokens", 8192)
-    max_tool_rounds = config.get("max_tool_rounds", 15)
-
-    # Build the state report for this server
-    report = build_state_report(server_id=server_id)
-    state_md = report.to_markdown()
-
-    # Skip quiet periods if configured (only for routine, never for incidents)
-    if analysis_type == "routine" and config.get("skip_quiet", True) and _is_quiet(report):
-        logger.info("State is quiet, skipping analysis")
-        set_current_server(None)
-        return None
-
-    # Select prompt template
-    if analysis_type == "incident":
-        tt = trigger_type or "default"
-        instructions = INCIDENT_TRIGGERS.get(tt, INCIDENT_TRIGGERS["default"])
-        user_msg = INCIDENT_ANALYSIS_PROMPT.format(
-            trigger_type=tt.replace("_", " ").title(),
-            trigger_instructions=instructions,
-            state_report=state_md,
-        )
-    else:
-        user_msg = ROUTINE_ANALYSIS_PROMPT.format(state_report=state_md)
-
-    # Determine backend: Gemini (Vertex AI) or Claude (Anthropic)
-    backend = _detect_backend(config)
-    if backend is None:
-        set_current_server(None)
-        return None
-
-    logger.info(f"Running {analysis_type} analysis with {backend['type']} ({backend['model']})")
-
     try:
-        if backend["type"] == "gemini":
-            result, truncated = _run_gemini_loop(backend, max_tokens, max_tool_rounds, user_msg)
-        elif backend["type"] == "vertex-claude":
-            result, truncated = _run_vertex_claude_loop(
-                backend, max_tokens, max_tool_rounds, user_msg
+        max_tokens = config.get("max_tokens", 8192)
+        max_tool_rounds = config.get("max_tool_rounds", 15)
+
+        # Build the state report for this server
+        report = build_state_report(server_id=server_id)
+        state_md = report.to_markdown()
+
+        # Skip quiet periods if configured (only for routine, never for incidents)
+        if analysis_type == "routine" and config.get("skip_quiet", True) and _is_quiet(report):
+            logger.info("State is quiet, skipping analysis")
+            return None
+
+        # Select prompt template
+        if analysis_type == "incident":
+            tt = trigger_type or "default"
+            instructions = INCIDENT_TRIGGERS.get(tt, INCIDENT_TRIGGERS["default"])
+            user_msg = INCIDENT_ANALYSIS_PROMPT.format(
+                trigger_type=tt.replace("_", " ").title(),
+                trigger_instructions=instructions,
+                state_report=state_md,
             )
-        elif backend["type"] == "openai":
-            result, truncated = _run_openai_loop(backend, max_tokens, max_tool_rounds, user_msg)
         else:
-            result, truncated = _run_anthropic_loop(backend, max_tokens, max_tool_rounds, user_msg)
-    except Exception as e:
-        # Honest failure (P1-6): a loop exception (e.g. a non-retryable LLM
-        # API error, or a retryable one that never recovered) used to be
-        # swallowed into the same `None` a caller also gets for "agent
-        # disabled" / "quiet state" — the API route then reported a real
-        # failure as "skipped". Return a distinguishable error shape so the
-        # route can respond honestly (502) instead.
-        logger.error(f"Agent analysis failed: {e}")
-        return {"status": "error", "error": str(e)}
+            user_msg = ROUTINE_ANALYSIS_PROMPT.format(state_report=state_md)
+
+        # Determine backend: Gemini (Vertex AI) or Claude (Anthropic)
+        backend = _detect_backend(config)
+        if backend is None:
+            return None
+
+        logger.info(f"Running {analysis_type} analysis with {backend['type']} ({backend['model']})")
+
+        try:
+            if backend["type"] == "gemini":
+                result, truncated = _run_gemini_loop(backend, max_tokens, max_tool_rounds, user_msg)
+            elif backend["type"] == "vertex-claude":
+                result, truncated = _run_vertex_claude_loop(
+                    backend, max_tokens, max_tool_rounds, user_msg
+                )
+            elif backend["type"] == "openai":
+                result, truncated = _run_openai_loop(backend, max_tokens, max_tool_rounds, user_msg)
+            else:
+                result, truncated = _run_anthropic_loop(backend, max_tokens, max_tool_rounds, user_msg)
+        except Exception as e:
+            # Honest failure (P1-6): a loop exception (e.g. a non-retryable LLM
+            # API error, or a retryable one that never recovered) used to be
+            # swallowed into the same `None` a caller also gets for "agent
+            # disabled" / "quiet state" — the API route then reported a real
+            # failure as "skipped". Return a distinguishable error shape so the
+            # route can respond honestly (502) instead.
+            logger.error(f"Agent analysis failed: {e}")
+            return {"status": "error", "error": str(e)}
     finally:
-        # Symmetric with run_llm_analysis: reset the target-server ContextVar so
-        # a pooled worker thread can't leak it into a later call.
+        # Reset the target-server ContextVar so a pooled worker thread can't
+        # leak it into a later call (P1-10). This now covers the WHOLE
+        # region from state-report building through backend detection and
+        # the LLM loop -- previously the finally only wrapped the loop
+        # itself, so an exception raised while building the state report
+        # (e.g. a bad snapshot query) skipped the reset entirely and left
+        # this worker thread's ContextVar pointed at `server_id` for
+        # whatever job APScheduler runs next on it.
         set_current_server(None)
 
     # Parse and store the result
