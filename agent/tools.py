@@ -16,6 +16,8 @@ import re as _re_ident
 import time
 
 from agent import queries as Q
+from agent.redact import maybe_redact
+from config import get_config
 from storage.connection import get_mon_reader, get_prod_connection
 
 logger = logging.getLogger(__name__)
@@ -449,7 +451,7 @@ def _tool_run_explain(input_data: dict) -> dict:
 
     # Only EXPLAIN SELECT queries
     if not sql_text.strip().upper().startswith(("SELECT", "WITH")):
-        return {"error": f"Cannot EXPLAIN non-SELECT query: {sql_text[:50]}"}
+        return {"error": f"Cannot EXPLAIN non-SELECT query: {maybe_redact(sql_text)[:50]}"}
 
     # About to hit production. Gate + charge the investigator budget HERE (not
     # at dispatch) so the cache hit above stays free and an erroring live
@@ -550,9 +552,17 @@ def _tool_get_lock_graph(input_data: dict) -> dict:
         lock_rows = conn.execute(Q.LOCK_GRAPH).fetchall()
         txn_rows = conn.execute(Q.ACTIVE_TRANSACTIONS).fetchall()
 
+    lock_waits = [dict(r) for r in lock_rows]
+    for row in lock_waits:
+        row["waiting_query"] = maybe_redact(row.get("waiting_query"))
+        row["blocking_query"] = maybe_redact(row.get("blocking_query"))
+    active_transactions = [dict(r) for r in txn_rows]
+    for row in active_transactions:
+        row["trx_query"] = maybe_redact(row.get("trx_query"))
+
     return {
-        "lock_waits": [dict(r) for r in lock_rows],
-        "active_transactions": [dict(r) for r in txn_rows],
+        "lock_waits": lock_waits,
+        "active_transactions": active_transactions,
     }
 
 
@@ -595,6 +605,8 @@ def _tool_get_live_processlist(input_data: dict) -> dict:
         LIMIT 50
     """
     rows = _run_live_query(query)
+    for row in rows:
+        row["query"] = maybe_redact(row.get("query"))
     return {
         "source": "live",
         "timestamp": _now_iso(),
@@ -621,6 +633,9 @@ def _tool_get_live_locks(input_data: dict) -> dict:
         JOIN information_schema.innodb_trx b ON b.trx_id = w.BLOCKING_ENGINE_TRANSACTION_ID
     """
     rows = _run_live_query(query)
+    for row in rows:
+        row["waiting_query"] = maybe_redact(row.get("waiting_query"))
+        row["blocking_query"] = maybe_redact(row.get("blocking_query"))
     return {
         "source": "live",
         "timestamp": _now_iso(),
@@ -643,6 +658,17 @@ def _tool_get_live_innodb_status(input_data: dict) -> dict:
 
     # Parse key sections for easier consumption
     sections = _parse_innodb_sections(status_text)
+
+    # The TRANSACTIONS and LATEST DETECTED DEADLOCK sections embed literal
+    # query SQL (the exact statements each transaction was running) — that's
+    # workload data. Redact each section's free-form text before it reaches
+    # the model. Tradeoff: this is a blunt pass over prose, so it also masks
+    # some non-sensitive numbers (transaction ids, LSNs, counts). That's the
+    # privacy-first default — the agent still sees section names + query
+    # structure, which is what it reasons over; operators who want the raw
+    # numbers can set agent.redact_sql_literals: false. The section KEYS
+    # (names) are never redacted, so the report structure is intact.
+    sections = {name: maybe_redact(text) for name, text in sections.items()}
 
     return {
         "source": "live",
@@ -670,6 +696,8 @@ def _tool_get_live_transactions(input_data: dict) -> dict:
         ORDER BY trx_started ASC
     """
     rows = _run_live_query(query)
+    for row in rows:
+        row["trx_query"] = maybe_redact(row.get("trx_query"))
     return {
         "source": "live",
         "timestamp": _now_iso(),
@@ -820,7 +848,7 @@ def _tool_explain_query(input_data: dict) -> dict:
                 explain_json = result.get("EXPLAIN", "")
                 return {
                     "source": "live",
-                    "query": query[:200],
+                    "query": maybe_redact(query)[:200],
                     "explain": json.loads(explain_json),
                 }
     except Exception as e:
@@ -832,6 +860,16 @@ def _tool_explain_query(input_data: dict) -> dict:
 # --- Slow log tool implementation ---
 
 def _tool_search_slow_log(input_data: dict) -> dict:
+    if not get_config().get("agent", {}).get("slow_log_tool_enabled", True):
+        return {
+            "error": (
+                "search_slow_log is disabled (agent.slow_log_tool_enabled: false). "
+                "Slow log entries contain real SQL text plus the user and host that "
+                "ran it. Set agent.slow_log_tool_enabled: true in settings.yaml to "
+                "re-enable this tool."
+            ),
+        }
+
     keyword = input_data["keyword"]
     limit = input_data.get("limit", 10)
 
@@ -858,7 +896,7 @@ def _tool_search_slow_log(input_data: dict) -> dict:
                 "lock_time_sec": r["lock_time_sec"],
                 "rows_sent": r["rows_sent"],
                 "rows_examined": r["rows_examined"],
-                "sql": r["sql_text"][:1000] if r["sql_text"] else None,
+                "sql": maybe_redact(r["sql_text"])[:1000] if r["sql_text"] else None,
             }
             for r in rows
         ],

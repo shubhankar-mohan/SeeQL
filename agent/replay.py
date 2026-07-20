@@ -19,6 +19,7 @@ from typing import Any
 
 from storage.connection import get_mon_reader
 from agent.prompts import INCIDENT_INVESTIGATOR_PROMPT
+from agent.redact import maybe_redact
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +151,7 @@ def _build_timeline(server_id: str, from_ts: str, to_ts: str) -> tuple[str, dict
             counts["anomalies"] += 1
 
         for row in conn.execute(_TIMELINE_LOCK_WAITS, (server_id, from_ts, to_ts)):
-            wq = (row["waiting_query"] or "")[:80]
+            wq = (maybe_redact(row["waiting_query"]) or "")[:80]
             events.append((
                 row["ts"],
                 f"**LOCK** pid={row['waiting_pid']} waiting {row['wait_seconds']}s "

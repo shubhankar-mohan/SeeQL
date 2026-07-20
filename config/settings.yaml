@@ -79,6 +79,17 @@ agent:
   max_tool_rounds: 10
   schedule_seconds: 900             # 15 minutes
   skip_quiet: true                  # Skip analysis when nothing interesting is happening
+  # --- Privacy: what reaches the LLM ---
+  # Live statement text (processlist, transactions, lock waits) and slow-log
+  # samples can contain literal values from your workload (emails, ids, ...).
+  # On by default: string/number/hex literals are masked with `?` before
+  # that text reaches the model, while structure (keywords, identifiers)
+  # stays intact. See the README FAQ ("Is my data ever sent to the LLM?").
+  redact_sql_literals: true
+  # search_slow_log returns REAL SQL plus the user/host that ran it (not
+  # normalized like query digests). On by default; set false to disable the
+  # tool entirely if that's more exposure than you want the agent to have.
+  slow_log_tool_enabled: true
   anthropic_api_key: "${ANTHROPIC_API_KEY}"
   openai_api_key: "${OPENAI_API_KEY}"
   # Point at any OpenAI-compatible server (Azure OpenAI, Ollama, vLLM, Groq,

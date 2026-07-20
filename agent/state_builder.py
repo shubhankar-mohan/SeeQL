@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from agent import queries as Q
+from agent.redact import maybe_redact
 from config import get_config
 from storage.connection import get_mon_reader
 
@@ -378,7 +379,7 @@ def _render_markdown(report: StateReport) -> str:
             lines.append(
                 f"- trx={t.get('trx_id')}, pid={t.get('pid', '?')}, age={t.get('age_sec')}s, "
                 f"rows_locked={t.get('rows_locked', 0)}, rows_modified={t.get('rows_modified', 0)}, "
-                f"query=`{(t.get('trx_query') or '?')[:60]}`"
+                f"query=`{(maybe_redact(t.get('trx_query')) or '?')[:60]}`"
             )
         lines.append("")
 

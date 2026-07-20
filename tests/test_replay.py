@@ -173,3 +173,37 @@ class TestReplay:
         )
         md = result.to_markdown()
         assert f"incident #{incident_id}" in md
+
+
+class TestReplayRedaction:
+    """agent/replay.py — timeline lock-wait `wq` (waiting-query) field (P0-9)."""
+
+    @staticmethod
+    def _seed_lock_wait(db_path: Path, waiting_query: str, server_id: str = "default"):
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            """INSERT INTO lock_wait_snapshots
+               (snapshot_time, server_id, waiting_pid, blocking_pid, wait_seconds,
+                waiting_query, blocking_query)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (_iso(5), server_id, 501, 502, 9, waiting_query,
+             "UPDATE loyalty_members SET points = 5 WHERE id = 1"),
+        )
+        conn.commit()
+        conn.close()
+
+    def test_waiting_query_masked_by_default(self, replay_db):
+        self._seed_lock_wait(
+            replay_db, "SELECT * FROM loyalty_members WHERE phone = '9998887777'"
+        )
+        result = run_replay(from_ts=_iso(10), to_ts=_iso(1))
+        assert "9998887777" not in result.timeline_md
+        assert "'?'" in result.timeline_md
+
+    def test_waiting_query_raw_when_disabled(self, replay_db):
+        config_module._config["agent"]["redact_sql_literals"] = False
+        self._seed_lock_wait(
+            replay_db, "SELECT * FROM loyalty_members WHERE phone = '9998887777'"
+        )
+        result = run_replay(from_ts=_iso(10), to_ts=_iso(1))
+        assert "9998887777" in result.timeline_md
