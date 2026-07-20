@@ -562,9 +562,53 @@ def _fetch_redundant_indexes(
 
 
 _PREDICATE_RE = re.compile(
-    r"`?(\w+)`?\s*(?:=|>=|<=|<|>|\bIN\b|\bLIKE\b|\bBETWEEN\b)", re.IGNORECASE
+    r"`?(\w+)`?\s*(=|>=|<=|<|>|\bIN\b|\bLIKE\b|\bBETWEEN\b)", re.IGNORECASE
 )
 _STOPWORDS = {"and", "or", "on", "where", "select", "from", "limit", "group", "order", "by"}
+# Equality predicates (`=`, `IN`) let MySQL seek directly on that column, and a
+# composite index can still be used for the *next* column after an equality
+# match. Range predicates (`>`, `<`, `>=`, `<=`, `BETWEEN`, `LIKE 'x%'`) only
+# narrow a scan, and once a range column is hit the index can't be used for
+# any column after it. So equality columns must sort before range columns in
+# `ADD INDEX (...)` (P3-6) -- a range column ahead of an equality column makes
+# the equality column unusable for a seek.
+_EQUALITY_OPS = {"=", "IN"}
+_ORDER_BY_RE = re.compile(r"\border\s+by\s+(.+?)(?:\blimit\b|$)", re.IGNORECASE | re.DOTALL)
+# A bare, unqualified column identifier: starts with a letter/underscore, then
+# word chars. Deliberately rejects a *leading digit* so positional references
+# (`ORDER BY 2`, which names the 2nd select-list column, not a column called
+# "2") are skipped, and rejects anything with parens/dots/operators so function
+# calls (`DATE(...)`) and expressions never reach the index recommendation.
+_BARE_IDENT_RE = re.compile(r"[A-Za-z_]\w*")
+
+
+def _extract_order_by_columns(text: str) -> list[str]:
+    """Best-effort `ORDER BY` column extraction: table-qualifier stripped
+    (`t`.`created_at` -> `created_at`) and sort direction (ASC/DESC) dropped.
+    Used only to place sort columns last in a composite index recommendation
+    (P3-6) -- never a primary signal on its own.
+
+    Only genuine bare column names are returned. Non-identifier sort terms --
+    function calls (`DATE(`created_at`)`), positional references (`ORDER BY 2`)
+    and other expressions -- are skipped rather than fabricated into invalid
+    `ADD INDEX` DDL (nested backticks, or an index on a column literally named
+    "2").
+    """
+    m = _ORDER_BY_RE.search(text)
+    if not m:
+        return []
+    cols: list[str] = []
+    for part in m.group(1).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        first_token = part.split()[0]  # drop a trailing ASC/DESC
+        col = first_token.split(".")[-1].strip("`")
+        if col.lower() in {"asc", "desc"}:
+            continue
+        if _BARE_IDENT_RE.fullmatch(col):
+            cols.append(col)
+    return cols
 
 
 def _recommend_index(
@@ -601,11 +645,29 @@ def _recommend_index(
         if pos != -1
     ]
     scope = text[min(marker_positions):] if marker_positions else text
-    cols: list[str] = []
+    equality_cols: list[str] = []
+    range_cols: list[str] = []
+    seen: set[str] = set()
     for m in _PREDICATE_RE.finditer(scope):
-        c = m.group(1)
-        if c.lower() not in _STOPWORDS and c not in cols:
-            cols.append(c)
+        c, op = m.group(1), m.group(2)
+        if c.lower() in _STOPWORDS or c in seen:
+            continue
+        seen.add(c)
+        if op.upper() in _EQUALITY_OPS:
+            equality_cols.append(c)
+        else:
+            range_cols.append(c)
+    sort_cols: list[str] = []
+    for c in _extract_order_by_columns(text):
+        if c.lower() in _STOPWORDS or c in seen:
+            continue
+        seen.add(c)
+        sort_cols.append(c)
+    # Equality-first ordering (P3-6): see the comment on `_EQUALITY_OPS`.
+    # `seen` already deduped across all three buckets above, so this
+    # concatenation preserves per-bucket source order without re-checking
+    # membership.
+    cols = equality_cols + range_cols + sort_cols
     if not cols:
         return None
     cols = cols[:3]  # composite index, keep it short
