@@ -25,7 +25,7 @@ def _decode_json_field(raw):
         return ""
     try:
         return json.loads(raw)
-    except json.JSONDecodeError:
+    except (TypeError, json.JSONDecodeError):
         return raw
 
 

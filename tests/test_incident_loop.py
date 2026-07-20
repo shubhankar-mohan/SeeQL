@@ -67,13 +67,22 @@ def _iso(minutes_ago: int = 0) -> str:
 
 def _insert_incident(
     db_path: Path, status: str = "detected", end_minutes_ago: int = 0,
-    server_id: str = "default",
+    server_id: str = "default", incident_id: int | None = None,
 ) -> int:
     conn = sqlite3.connect(str(db_path))
+    columns = "server_id, start_time, end_time, severity, involved_metrics, status"
+    values = "?, ?, ?, 'critical', '[\"x\"]', ?"
+    params = [server_id, _iso(end_minutes_ago + 5), _iso(end_minutes_ago), status]
+    if incident_id is not None:
+        # Explicit id (allowed since `id` is an INTEGER PRIMARY KEY rowid
+        # alias) — used by digit-prefix-collision tests that need a specific
+        # multi-digit id regardless of insert order.
+        columns = "id, " + columns
+        values = "?, " + values
+        params = [incident_id] + params
     cur = conn.execute(
-        "INSERT INTO incident_windows (server_id, start_time, end_time, severity, "
-        "involved_metrics, status) VALUES (?, ?, ?, 'critical', '[\"x\"]', ?)",
-        (server_id, _iso(end_minutes_ago + 5), _iso(end_minutes_ago), status),
+        f"INSERT INTO incident_windows ({columns}) VALUES ({values})",
+        params,
     )
     conn.commit()
     iid = cur.lastrowid
@@ -471,6 +480,58 @@ class TestSelfReportGating:
         row = _incident_row(incident_loop_db, iid)
         assert row["status"] == "analyzed"
         assert row["analysis_id"] == result["analysis_id"]
+
+    def test_routine_self_report_digit_prefix_collision_does_not_link(
+        self, incident_loop_db, caplog
+    ):
+        """PR-4 review: a raw substring check (`f"#{n}" in text`) treats a
+        self-reported '#1' as "present in the state report" whenever the
+        report merely contains a longer id like '#10' or '#12' — '#1' is a
+        substring of '#10'. That falsely validates the self-report and links
+        the analysis to the WRONG open incident (#1), even though incident
+        #1 never actually appeared in the text the model was shown. The gate
+        must require a word boundary after the digits, not just substring
+        containment."""
+        iid = _insert_incident(incident_loop_db, status="detected")
+        text = (
+            "### Severity: info\n### Findings\nx\n### Recommendations\ny\n"
+            f"### Addresses incident #{iid}\n"
+        )
+        # Decoy ids that have `iid` as a strict digit-prefix (e.g. iid=1 ->
+        # "#10", "#12") but never mention `#{iid}` as its own token.
+        state_report = (
+            "### Recent Incidents (last 24h, unresolved): 2\n"
+            f"- #{iid}0 [warning] 2026-07-17T00:00:00 -> 2026-07-17T00:05:00 (1 events) [detected]\n"
+            f"- #{iid}2 [critical] 2026-07-17T00:00:00 -> 2026-07-17T00:05:00 (1 events) [detected]\n"
+        )
+
+        with caplog.at_level(logging.WARNING):
+            analysis = la._parse_and_store(text, "routine", state_report, "default")
+
+        assert analysis["id"] is not None  # analysis is still stored
+        row = _incident_row(incident_loop_db, iid)
+        assert row["status"] == "detected"
+        assert row["analysis_id"] is None
+        assert any("Ignoring self-reported" in r.message for r in caplog.records)
+
+    def test_routine_self_report_multidigit_id_present_links(self, incident_loop_db):
+        """Sibling of the digit-prefix test above: a genuine standalone
+        multi-digit id in the state report must still link — the
+        word-boundary fix must not become overly strict and break the
+        legitimate multi-digit case."""
+        iid = _insert_incident(incident_loop_db, status="detected", incident_id=10)
+        text = (
+            "### Severity: info\n### Findings\nx\n### Recommendations\ny\n"
+            f"### Addresses incident #{iid}\n"
+        )
+
+        analysis = la._parse_and_store(
+            text, "routine", f"...incident #{iid} is still ongoing...", "default"
+        )
+
+        row = _incident_row(incident_loop_db, iid)
+        assert row["status"] == "analyzed"
+        assert row["analysis_id"] == analysis["id"]
 
 
 # ---------------------------------------------------------------------------

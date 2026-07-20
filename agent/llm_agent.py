@@ -343,7 +343,13 @@ def _missing(what: str) -> None:
 # (529 / "overloaded"), general rate-limit wording, upstream unavailability,
 # and request timeouts. Anything else (auth, bad request, schema errors) is
 # not retried.
-_RETRYABLE_ERROR_MARKERS = ("429", "529", "overloaded", "rate", "unavailable", "timeout")
+# "rate" alone used to be a marker here, but it false-matched non-retryable
+# errors mentioning "temperature", "generate", "moderate", "separate", etc.,
+# wasting a ~10s backoff sleep on an error that was never going to succeed on
+# retry (PR-4 review) — narrowed to the actual rate-limit phrasings.
+_RETRYABLE_ERROR_MARKERS = (
+    "429", "529", "overloaded", "rate limit", "rate_limit", "unavailable", "timeout",
+)
 
 # Backoff between attempts: 2s after the 1st failure, 8s after the 2nd, ...
 # (the last configured delay repeats if `attempts` is raised beyond this).
@@ -850,7 +856,7 @@ def _resolve_addressed_incident(
         return incident_id
     if self_reported is None:
         return None
-    if analysis_type != "routine" or f"#{self_reported}" in (source_text or ""):
+    if analysis_type != "routine" or re.search(rf"#{self_reported}\b", source_text or ""):
         return self_reported
     logger.warning(
         f"Ignoring self-reported '### Addresses incident #{self_reported}' from a "
