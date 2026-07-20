@@ -896,6 +896,21 @@ def partial_query_detail(request: Request, digest: str):
 
 
 # ---------------------------------------------------------------------------
+# Anomaly API endpoint
+# ---------------------------------------------------------------------------
+
+@router.get("/api/v1/anomalies")
+def api_anomalies():
+    anomalies = _get_anomalies()
+    return [
+        {"metric": a.metric, "current": a.current, "baseline_mean": a.baseline_mean,
+         "baseline_stddev": a.baseline_stddev, "z_score": a.z_score,
+         "pct_change": a.pct_change, "direction": a.direction, "severity": a.severity}
+        for a in anomalies
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
