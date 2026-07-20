@@ -91,38 +91,101 @@ def _mock_prod_cursor(rows):
 
 
 class TestStateBuilderTrxQueryRedaction:
-    """agent/state_builder.py — trx_query render in the long-transactions block."""
+    """agent/state_builder.py — trx_query is redacted at CONSTRUCTION time
+    (_build_current_state), not at render time, so BOTH to_markdown() and
+    to_dict() inherit the mask (P0-9: to_dict() previously returned the raw
+    statement text verbatim even though to_markdown() was already masked —
+    mcp_server/tools/state.py::seeql_get_state_report and
+    GET /api/v1/state-report both return to_dict() to external callers).
+
+    These tests seed transaction_snapshots and call the real
+    _build_current_state() (not a hand-built StateReport) precisely because
+    the bug/fix lives at that construction site, not in the renderer.
+    """
 
     @staticmethod
-    def _report_with_trx_query(trx_query):
-        from agent.state_builder import StateReport
-        return StateReport(
-            current_state={
-                "long_transactions": [
-                    {"trx_id": "1", "pid": 99, "age_sec": 40, "rows_locked": 3,
-                     "rows_modified": 1, "trx_query": trx_query},
-                ],
-            },
-            changes={},
-            historical={},
+    def _seed_long_transaction(conn, trx_query):
+        conn.execute(
+            "INSERT INTO transaction_snapshots "
+            "(snapshot_time, server_id, trx_id, trx_state, age_sec, pid, "
+            " trx_query, rows_locked, rows_modified, isolation_level) "
+            "VALUES ('2026-07-20T00:00:00', 'default', '1', 'RUNNING', 40, 99, "
+            " ?, 3, 1, 'REPEATABLE-READ')",
+            (trx_query,),
         )
+        conn.commit()
 
-    def test_masked_by_default(self):
-        config_module._config = {"agent": {}}
-        report = self._report_with_trx_query(
-            "SELECT * FROM users WHERE email = 'leak@example.com'"
+    def test_masked_by_default_in_dict_and_markdown(self, mon_db):
+        conn, db_path = mon_db
+        self._seed_long_transaction(
+            conn, "SELECT * FROM users WHERE email = 'leak@example.com'"
         )
+        config_module._config = {
+            "monitoring_db": {"path": str(db_path), "wal_mode": False, "busy_timeout_ms": 5000},
+            "agent": {},
+        }
+        from agent.state_builder import StateReport, _build_current_state
+        current_state = _build_current_state(conn, long_txn_sec=10, server_id="default")
+
+        # Construction-time redaction: the dict itself is already masked,
+        # before it's ever wrapped in a StateReport.
+        trx_query = current_state["long_transactions"][0]["trx_query"]
+        assert "leak@example.com" not in trx_query
+        assert "'?'" in trx_query
+
+        report = StateReport(current_state=current_state, changes={}, historical={})
+
+        # Both representations inherit the same masked value.
         md = report.to_markdown()
         assert "leak@example.com" not in md
         assert "'?'" in md
 
-    def test_raw_when_disabled(self):
-        config_module._config = {"agent": {"redact_sql_literals": False}}
-        report = self._report_with_trx_query(
-            "SELECT * FROM users WHERE email = 'leak@example.com'"
+        dict_trx_query = report.to_dict()["current_state"]["long_transactions"][0]["trx_query"]
+        assert "leak@example.com" not in dict_trx_query
+        assert "'?'" in dict_trx_query
+
+    def test_raw_when_disabled(self, mon_db):
+        conn, db_path = mon_db
+        self._seed_long_transaction(
+            conn, "SELECT * FROM users WHERE email = 'leak@example.com'"
         )
-        md = report.to_markdown()
-        assert "leak@example.com" in md
+        config_module._config = {
+            "monitoring_db": {"path": str(db_path), "wal_mode": False, "busy_timeout_ms": 5000},
+            "agent": {"redact_sql_literals": False},
+        }
+        from agent.state_builder import StateReport, _build_current_state
+        current_state = _build_current_state(conn, long_txn_sec=10, server_id="default")
+        assert "leak@example.com" in current_state["long_transactions"][0]["trx_query"]
+
+        report = StateReport(current_state=current_state, changes={}, historical={})
+        assert "leak@example.com" in report.to_markdown()
+        assert "leak@example.com" in \
+            report.to_dict()["current_state"]["long_transactions"][0]["trx_query"]
+
+    def test_digest_text_not_redacted(self, mon_db):
+        """digest_text (performance_schema DIGEST_TEXT) is an already-
+        parameterized fingerprint (`?` placeholders), not raw statement
+        text with literals — construction-time redaction must leave it
+        alone, or the LLM loses the query-shape structure it needs for
+        RCA (acceptance-grounding: masking literals must not strip
+        structure)."""
+        conn, db_path = mon_db
+        conn.execute(
+            "INSERT INTO query_digest_snapshots "
+            "(snapshot_time, server_id, digest, digest_text, schema_name, "
+            " exec_count, total_time_sec, avg_time_sec, rows_examined, rows_sent) "
+            "VALUES ('2026-07-20T00:00:00', 'default', 'abc123', "
+            " 'SELECT * FROM users WHERE id = ?', 'shop', 10, 1.0, 0.1, 100, 10)"
+        )
+        conn.commit()
+        config_module._config = {
+            "monitoring_db": {"path": str(db_path), "wal_mode": False, "busy_timeout_ms": 5000},
+            "agent": {},
+        }
+        from agent.state_builder import _build_current_state
+        current_state = _build_current_state(conn, long_txn_sec=10, server_id="default")
+        assert current_state["top_queries"][0]["digest_text"] == "SELECT * FROM users WHERE id = ?"
+        assert current_state["top_queries"][0]["digest"] == "abc123"
 
 
 class TestLiveToolRedaction:

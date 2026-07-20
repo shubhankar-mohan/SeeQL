@@ -12,6 +12,7 @@ Markdown string (for the LLM prompt).
 
 import json
 import logging
+import re as _re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -144,9 +145,17 @@ def _build_current_state(conn, long_txn_sec: int, server_id: str) -> dict:
     row = conn.execute(Q.CURRENT_QPS, (sid,)).fetchone()
     state["qps"] = row["per_second"] if row and row["per_second"] else 0
 
-    # Long transactions
+    # Long transactions — trx_query carries raw statement text, which can
+    # contain literal customer data (emails, IDs, ...) from a WHERE/SET
+    # clause. Redact at CONSTRUCTION time (not render time) so both
+    # to_markdown() and to_dict() inherit the mask — to_dict() is what
+    # mcp_server/tools/state.py and api/agent_routes.py hand to callers
+    # verbatim (P0-9).
     rows = conn.execute(Q.LONG_TRANSACTIONS, (sid, sid, long_txn_sec)).fetchall()
-    state["long_transactions"] = [dict(r) for r in rows]
+    long_txns = [dict(r) for r in rows]
+    for t in long_txns:
+        t["trx_query"] = maybe_redact(t.get("trx_query"))
+    state["long_transactions"] = long_txns
 
     # GCP metrics
     rows = conn.execute(Q.CURRENT_GCP_METRICS, (sid, sid)).fetchall()
@@ -376,10 +385,13 @@ def _render_markdown(report: StateReport) -> str:
     if long_txns:
         lines.append(f"### Long Transactions: {len(long_txns)} active")
         for t in long_txns[:5]:
+            # trx_query is already redacted at construction time
+            # (_build_current_state), so no maybe_redact() call here — it
+            # would just be a redundant (if idempotent) re-application.
             lines.append(
                 f"- trx={t.get('trx_id')}, pid={t.get('pid', '?')}, age={t.get('age_sec')}s, "
                 f"rows_locked={t.get('rows_locked', 0)}, rows_modified={t.get('rows_modified', 0)}, "
-                f"query=`{(maybe_redact(t.get('trx_query')) or '?')[:60]}`"
+                f"query=`{(t.get('trx_query') or '?')[:60]}`"
             )
         lines.append("")
 
@@ -557,7 +569,6 @@ def _pct(val) -> str:
     return f"{val * 100:.1f}%"
 
 
-import re as _re
 _TABLE_RE = _re.compile(
     r'(?:FROM|JOIN|UPDATE|INTO)\s+`?(?:\w+`?\.`?)?(\w+)`?', _re.IGNORECASE)
 

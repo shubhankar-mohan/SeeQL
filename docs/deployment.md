@@ -98,11 +98,11 @@ MySQL), `POST /api/v1/agent/analyze` (spends LLM budget), and
    Callers then need `Authorization: Bearer <token>` on every `POST` (plus
    `GET /api/v1/*` if `protect_reads: true`). `GET /health` and
    `GET /metrics` always stay open, so liveness probes and Prometheus
-   scrapers keep working unauthenticated. `POST /webhooks/*` also stays
-   open to the bearer gate: inbound alerts authenticate via per-provider
-   HMAC signatures (the `webhooks.providers.*.secret` values), not the API
-   token — external providers (GCP/PagerDuty/Grafana) never send a bearer
-   header, so gating them here would only reject legitimate signed alerts.
+   scrapers keep working unauthenticated. `POST /webhooks/*` is exempt
+   from the bearer gate: it authenticates via per-provider HMAC signatures
+   (the `webhooks.providers.*.secret` values) instead of the API token —
+   external providers (GCP/PagerDuty/Grafana) never send a bearer header,
+   so gating them here would only reject legitimate signed alerts.
 
 2. **Bind to loopback + reverse proxy (recommended for production).** Set
    `api.bind: "127.0.0.1"` and drop `-p 8080:8080` entirely — front the API
