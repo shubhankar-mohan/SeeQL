@@ -166,6 +166,9 @@ def check_db_size() -> bool:
         with get_mon_connection() as conn:
             deleted = _delete_older_than(conn, retention_days)
             if deleted > 0:
+                # COMMIT the deletes before VACUUM — see run_retention_cleanup()
+                # for why running VACUUM inside this transaction is unsafe.
+                conn.commit()
                 conn.execute("VACUUM")
                 logger.info(f"VACUUM complete after aggressive cleanup ({deleted} rows deleted)")
 
@@ -219,8 +222,11 @@ def run_retention_cleanup() -> dict[str, int]:
                 logger.warning(f"  {table}: cleanup failed: {e}")
                 results[table] = -1
 
-        # VACUUM if significant rows were deleted to reclaim disk space
+        # COMMIT the deletes before VACUUM — VACUUM cannot run inside the
+        # transaction the DELETEs opened, and failing here used to roll
+        # back the entire cleanup.
         if total_deleted > 1000:
+            conn.commit()
             logger.info(f"Running VACUUM after deleting {total_deleted} rows...")
             conn.execute("VACUUM")
             logger.info("VACUUM complete.")

@@ -23,6 +23,7 @@ from tests.fixtures.mysql_mock_data import (
     MOCK_SCHEMA_FINGERPRINT,
     MOCK_INDEX_FINGERPRINT,
     MOCK_TABLE_SIZES,
+    MOCK_TABLE_DISCOVERY,
 )
 
 
@@ -182,8 +183,12 @@ class TestFullCycleIntegration:
         # get_connection is consumed (in order) by the MySQL collectors:
         # query_digests, wait_events, table_io, innodb_metrics, buffer_pool,
         # global_status, innodb_status, execution_stages, explain_capture.
-        # The GCP collectors run but DO NOT call get_connection (they will fail
-        # harmlessly with no GCP creds — not asserted).
+        # Keep this hermetic: clear gcp.project_id so the medium loop skips the
+        # GCP collectors (per its own gating) instead of attempting real Cloud
+        # Monitoring/Logging calls — those hang on any machine that happens to
+        # have gcloud ADC configured (creds are now honored), which is not what
+        # this MySQL-cycle test means to exercise.
+        config_module._config["gcp"]["project_id"] = ""
         ctx = self._make_ctx([
             self._conn(MOCK_QUERY_DIGESTS),
             self._conn(MOCK_WAIT_EVENTS),
@@ -226,10 +231,11 @@ class TestFullCycleIntegration:
         reader_cm.__exit__.return_value = False
         mock_get_mon_reader.return_value = reader_cm
 
-        # schema_snapshot makes 3 fetchall calls on one cursor (fingerprints,
-        # indexes, table sizes). With no previous hashes, no SHOW CREATE TABLE.
+        # schema_snapshot makes 4 fetchall calls on one cursor (P1b-7 table
+        # discovery, then fingerprints, indexes, table sizes). With no
+        # previous hashes, no SHOW CREATE TABLE.
         schema_conn = self._multi_fetchall_conn([
-            MOCK_SCHEMA_FINGERPRINT, MOCK_INDEX_FINGERPRINT, MOCK_TABLE_SIZES,
+            MOCK_TABLE_DISCOVERY, MOCK_SCHEMA_FINGERPRINT, MOCK_INDEX_FINGERPRINT, MOCK_TABLE_SIZES,
         ])
 
         # Collector order: schema_snapshot, unused_indexes, redundant_indexes,

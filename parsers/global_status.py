@@ -50,6 +50,24 @@ TRACKED_VARIABLES = {
     "Select_full_join", "Select_scan", "Select_range",
 }
 
+# Point-in-time gauges: unlike the counters above, these rise AND fall
+# during normal operation, so a decrease is not a "possible server restart"
+# and a per-second rate would be meaningless. Stored as raw_value only
+# (delta_value/per_second always None).
+#
+# Audited against TRACKED_VARIABLES (P1b-5): only Threads_connected,
+# Threads_running, and Max_used_connections are in TRACKED_VARIABLES today;
+# the rest are included for forward-compatibility if they're ever added
+# there (harmless no-ops until then — the process() loop only ever sees
+# names already filtered through TRACKED_VARIABLES). Every other entry in
+# TRACKED_VARIABLES is a monotonic cumulative counter that only resets on
+# an actual server restart, so none of them belong here.
+GAUGE_VARIABLES = {
+    "Threads_connected", "Threads_running", "Threads_cached",
+    "Max_used_connections", "Open_tables", "Open_files",
+    "Innodb_row_lock_current_waits",
+}
+
 
 class GlobalStatusDeltaCalculator:
     """
@@ -58,6 +76,9 @@ class GlobalStatusDeltaCalculator:
     First call returns delta_value=None (no previous data).
     Subsequent calls compute delta and per_second rate.
     If a counter decreases (server restart), delta is skipped.
+    Gauges (see GAUGE_VARIABLES) are point-in-time values rather than
+    cumulative counters: only raw_value is stored, and a decrease is
+    normal, not a restart signal.
     """
 
     def __init__(self):
@@ -101,6 +122,13 @@ class GlobalStatusDeltaCalculator:
                 "delta_value": None,
                 "per_second": None,
             }
+
+            if name in GAUGE_VARIABLES:
+                # Gauges are stored as raw_value only. A drop is normal
+                # operation, not a restart, so the decrease check below is
+                # intentionally skipped for these variables.
+                output.append(row)
+                continue
 
             if self._last_snapshot is not None and name in self._last_snapshot:
                 prev = self._last_snapshot[name]

@@ -187,6 +187,76 @@ def write_ddl_changes(rows: list[dict]) -> int:
     ], rows)
 
 
+def write_schema_and_changes(snapshots: list[dict], changes: list[dict]) -> int:
+    """
+    Write schema_snapshots and ddl_changes in a single transaction.
+
+    P1b-6: SchemaSnapshotCollector must not advance its in-memory hash
+    cache until the corresponding rows are durably on disk. Writing the two
+    tables via separate write_schema_snapshots()/write_ddl_changes() calls
+    (each its own get_mon_connection() block/commit) leaves a window where
+    the snapshot commits but the DDL change doesn't (or vice versa) if the
+    process dies mid-write. Combining both executemany()s under one
+    get_mon_connection() block gives one commit for both — either both
+    land or (on exception) neither does, via that context manager's
+    rollback-on-exception behavior. The collector's store() only advances
+    its cache after this call returns successfully.
+
+    Column lists are copied verbatim from write_schema_snapshots() and
+    write_ddl_changes() above — keep them in sync if either table's schema
+    changes.
+    """
+    snapshot_columns = [
+        "server_id", "snapshot_time", "table_schema", "table_name",
+        "schema_hash", "index_hash", "create_stmt",
+        "table_rows", "data_mb", "index_mb",
+    ]
+    change_columns = [
+        "detected_at", "server_id", "table_schema", "table_name", "change_type",
+        "old_schema_hash", "new_schema_hash",
+        "old_index_hash", "new_index_hash",
+        "old_ddl", "new_ddl",
+    ]
+
+    if not snapshots and not changes:
+        return 0
+
+    def _get(row: dict, col: str):
+        val = row.get(col)
+        if val is None and col == "server_id":
+            return "default"
+        return _serialize_value(val)
+
+    snapshot_sql = "INSERT INTO schema_snapshots ({}) VALUES ({})".format(
+        ", ".join(snapshot_columns), ", ".join(["?"] * len(snapshot_columns))
+    )
+    change_sql = "INSERT INTO ddl_changes ({}) VALUES ({})".format(
+        ", ".join(change_columns), ", ".join(["?"] * len(change_columns))
+    )
+
+    snapshot_values = [
+        tuple(_get(row, col) for col in snapshot_columns) for row in snapshots
+    ]
+    change_values = [
+        tuple(_get(row, col) for col in change_columns) for row in changes
+    ]
+
+    try:
+        with get_mon_connection() as conn:
+            if snapshot_values:
+                conn.executemany(snapshot_sql, snapshot_values)
+            if change_values:
+                conn.executemany(change_sql, change_values)
+            logger.debug(
+                f"Inserted {len(snapshot_values)} schema_snapshots + "
+                f"{len(change_values)} ddl_changes rows (single transaction)"
+            )
+        return len(snapshot_values) + len(change_values)
+    except Exception as e:
+        logger.error(f"Failed to write schema snapshot + DDL changes: {e}")
+        raise
+
+
 def write_gcp_metrics(rows: list[dict]) -> int:
     return _batch_insert("gcp_metric_snapshots", [
         "server_id", "snapshot_time", "metric_name", "metric_type", "value", "unit",

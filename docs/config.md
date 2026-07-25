@@ -100,6 +100,25 @@ intervals:
   retention_loop: 86400   # daily cleanup
 ```
 
+Env: `SEEQL_FAST_INTERVAL`, `SEEQL_MEDIUM_INTERVAL`, `SEEQL_SLOW_INTERVAL`.
+
+## Scheduler / fleet resilience
+
+```yaml
+scheduler:
+  circuit_reset_cycles: 10            # See below
+```
+
+Each loop runs its servers concurrently (up to 4 at once) so one slow or
+unreachable server can't delay the others within a cycle. On top of that, a
+server that fails **every** collector for 3 consecutive cycles trips a
+per-server circuit breaker and is skipped entirely — no connection attempts
+at all — for `circuit_reset_cycles` further cycles, instead of being
+retried (and re-timing-out) every single time. "Cycles" are shared across
+the fast/medium/slow loops (whichever runs next advances the counter), not
+counted separately per loop. A successful cycle for a server resets its
+failure streak immediately.
+
 ## Collection limits
 
 ```yaml
@@ -110,6 +129,26 @@ limits:
   digest_text_max_len: 1024
   max_batch_size: 500                 # Rows per SQLite batch insert
 ```
+
+## Slow-loop guardrails
+
+```yaml
+slow_loop:
+  max_tables_per_cycle: 2000          # Large-schema guardrail, see below
+```
+
+The schema-snapshot collector (DDL fingerprinting) orders every table it
+finds by `UPDATE_TIME` descending (tables with no `UPDATE_TIME` sort last)
+and fingerprints/sizes at most `max_tables_per_cycle` of them per cycle.
+This bounds the per-cycle cost of the fingerprint queries on schemas with
+many thousands of tables. Deferred tables are **logged** (a `WARNING` with
+the deferred count) rather than silently dropped, and are picked up on a
+later cycle as more-recently-changed tables clear the front of the queue.
+Only above the cap: the hash cache only retains tables actually processed
+that cycle, so a DDL change on a table while it sits deferred may be
+recorded as a fresh snapshot rather than an old→new `ddl_changes` diff the
+next time that table is processed. Schemas at or under the cap are
+completely unaffected — same queries as always.
 
 ## Retention
 

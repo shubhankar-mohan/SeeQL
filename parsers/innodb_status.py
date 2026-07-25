@@ -20,9 +20,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Section headers in INNODB STATUS output
-SECTION_PATTERN = re.compile(r"^-+\n(.+?)\n-+$", re.MULTILINE)
-
 # Known section names
 KNOWN_SECTIONS = [
     "BACKGROUND THREAD",
@@ -151,6 +148,16 @@ def _parse_semaphores(text: str) -> dict:
 def _parse_deadlock(text: str) -> dict:
     """Extract basic deadlock info."""
     result = {"has_deadlock": bool(text.strip())}
+
+    # InnoDB reprints this entire section verbatim on every SHOW ENGINE
+    # INNODB STATUS call until the server restarts, so `has_deadlock` /
+    # snapshot freshness alone cannot tell a brand-new deadlock apart from
+    # one that fired weeks ago (P1b-3). The section's own header line
+    # ("2026-07-17 01:42:33 0x16f887000\n*** (1) TRANSACTION: ...") is the
+    # only timestamp that actually changes when a new deadlock occurs, so
+    # alerting keys off this instead of snapshot_time.
+    m = re.search(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", text, re.M)
+    result["deadlock_at"] = m.group(1) if m else None
 
     # Count transactions involved
     trx_matches = re.findall(r"TRANSACTION\s+(\d+)", text)
