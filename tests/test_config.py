@@ -184,3 +184,15 @@ class TestUserConfigFile:
         p.write_text("servers: {}\n")
         monkeypatch.setenv("SEEQL_CONFIG", str(p))
         assert _resolve_user_config_path() == p
+
+
+class TestOperationalEnvOverrides:
+    """SEEQL_AGENT_ENABLED is a real kill-switch, analogous to the other
+    operational env vars (SEEQL_LOG_LEVEL, SEEQL_RETENTION_DAYS, ...)."""
+
+    def test_agent_enabled_env_override(self, monkeypatch):
+        monkeypatch.setenv("SEEQL_AGENT_ENABLED", "false")
+        from config import _apply_operational_env_overrides
+        cfg = {"agent": {"enabled": True}}
+        _apply_operational_env_overrides(cfg)
+        assert cfg["agent"]["enabled"] is False

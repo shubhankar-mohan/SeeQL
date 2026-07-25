@@ -102,6 +102,122 @@ Most query endpoints accept:
 ]
 ```
 
+## Investigations
+
+Webhook-triggered root-cause investigations (see `webhooks:` and
+`investigator:` in `settings.yaml`). An inbound alert creates an
+`investigations` row and runs a 3-phase pipeline: zero-query triage,
+budgeted LLM tool calls, then continuous sampling with a load guard.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/webhooks/{provider}` | Inbound alert webhook — verifies signature, dedups, and schedules an investigation |
+| `GET` | `/api/v1/investigations/recent` | Recent investigations (dashboard widget feed) |
+| `GET` | `/api/v1/investigations/{investigation_id}` | Investigation detail: findings + sample counts |
+
+### `POST /webhooks/{provider}`
+
+`{provider}` is one of the configured `webhooks.providers` keys (e.g.
+`generic`, `gcp`, `pagerduty`, `grafana`). Requires
+`webhooks.enabled: true` and `webhooks.providers.<provider>.enabled:
+true`, or the endpoint 404s. The raw request body is signature-verified
+(HMAC secret, or OIDC for the `gcp` provider) **before** JSON parsing.
+
+Response (`202 Accepted`):
+
+```json
+{
+  "investigation_id": 17,
+  "inbound_alert_id": 42,
+  "status": "accepted",
+  "alert_type": "lock_cascade",
+  "server_id": "default"
+}
+```
+
+If the same `(provider, external_id)` arrives again within
+`webhooks.dedup_window_minutes`, it attaches to the existing
+investigation instead of creating a new one:
+
+```json
+{
+  "investigation_id": 17,
+  "status": "dedup",
+  "message": "attached to existing investigation within 5-minute window"
+}
+```
+
+Errors: `401` bad signature, `404` webhooks/provider disabled or unknown
+provider, `429` rate-limited or too many concurrent investigations for
+the server.
+
+### `GET /api/v1/investigations/recent`
+
+Query params: `limit` (default 10, max 50), `status`, `server`.
+
+```json
+[
+  {
+    "id": 17,
+    "server_id": "default",
+    "status": "phase3",
+    "started_at": "2026-04-10T03:12:05+00:00",
+    "ended_at": null,
+    "confidence": null,
+    "root_cause_summary": null,
+    "provider": "gcp",
+    "alert_type": "high_cpu",
+    "severity": "warning",
+    "summary": "CPU utilization above threshold",
+    "duration_seconds": 340
+  }
+]
+```
+
+### `GET /api/v1/investigations/{investigation_id}`
+
+Full detail: the `investigations` row (joined with its triggering
+`inbound_alerts` row), every `investigation_findings` entry, and sample
+counts grouped by `sample_type`. `404` if the id doesn't exist.
+
+```json
+{
+  "investigation": {
+    "id": 17,
+    "status": "completed",
+    "confidence": 0.82,
+    "root_cause_summary": "...",
+    "provider": "gcp",
+    "alert_type": "high_cpu",
+    "alert_severity": "warning",
+    "...": "..."
+  },
+  "findings": [
+    {
+      "id": 1,
+      "phase": "phase2",
+      "kind": "root_cause",
+      "severity": "warning",
+      "content": "{...}",
+      "content_parsed": { "...": "..." },
+      "created_at": "2026-04-10T03:14:00+00:00"
+    }
+  ],
+  "samples": [
+    {
+      "sample_type": "processlist",
+      "n": 12,
+      "first_at": "2026-04-10T03:12:20+00:00",
+      "last_at": "2026-04-10T03:19:40+00:00",
+      "query_count": 240
+    }
+  ]
+}
+```
+
+**See:** [CLI: `seeql investigations`](cli.md) for the equivalent
+terminal workflow.
+
 ## Agent
 
 | Method | Path | Description |
@@ -137,45 +253,58 @@ Returns the parsed result:
 
 ## Dashboard
 
-`GET /` renders the overview page. Dashboard pages live under `/` as
-server-rendered HTMX templates:
+`GET /` redirects to `/dashboard`, which renders the overview page.
+Dashboard pages are server-rendered HTMX templates:
 
-- `/` — overview
-- `/queries` — top queries + regressions
-- `/locks` — current + historical locks
-- `/schema` — DDL changes + table sizes + indexes
-- `/server` — system metrics
-- `/incidents` — incident window list
+- `/dashboard` — overview: health bar, active alerts, incidents timeline, top queries, live locks
+- `/dashboard/queries` — top queries + regressions
+- `/dashboard/locks` — current + historical locks
+- `/dashboard/schema` — DDL changes + table sizes + indexes
+- `/dashboard/server` — system metrics
+- `/dashboard/todo` — Action Center: emergency triage, diagnostics, query/index remediation
 
-HTMX partials live under `/partials/*` and are not intended for direct
-API consumption.
+There's no standalone incidents page — the incident window timeline
+renders as a widget on `/dashboard`. See [dashboard.md](dashboard.md)
+for a per-page tour.
+
+HTMX partials live under `/dashboard/partials/*` and are not intended
+for direct API consumption.
 
 ## Prometheus metrics
 
-`GET /metrics` exposes ~20 gauges + counters:
+`GET /metrics` exposes ~20 gauges + counters. Every `mysql_*` gauge below
+carries a `server` label (the configured `server_id`) so a multi-server
+install gets independent time series per server instead of one gauge
+flapping between them, e.g. `mysql_threads_running{server="db-prod-west"}`.
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `mysql_threads_running` | Gauge | Active threads |
-| `mysql_threads_connected` | Gauge | Total connections |
-| `mysql_queries_per_second` | Gauge | QPS from SHOW GLOBAL STATUS delta |
-| `mysql_slow_queries_per_second` | Gauge | Slow queries per second |
-| `mysql_lock_waits_current` | Gauge | Active InnoDB lock waits |
-| `mysql_lock_wait_max_seconds` | Gauge | Longest lock wait duration |
-| `mysql_buffer_pool_hit_ratio` | Gauge | Cumulative hit ratio, target > 0.99 |
-| `mysql_buffer_pool_dirty_pages` | Gauge | Dirty pages |
-| `mysql_buffer_pool_free_buffers` | Gauge | Free buffers |
-| `mysql_cpu_utilization` | Gauge | Cloud SQL CPU (0-1) — requires `[gcp]` |
-| `mysql_memory_utilization` | Gauge | Cloud SQL memory (0-1) — requires `[gcp]` |
-| `mysql_disk_utilization` | Gauge | Cloud SQL disk (0-1) — requires `[gcp]` |
-| `mysql_disk_read_ops` | Gauge | Disk read ops — requires `[gcp]` |
-| `mysql_disk_write_ops` | Gauge | Disk write ops — requires `[gcp]` |
-| `mysql_network_connections` | Gauge | Connections — requires `[gcp]` |
-| `mysql_unused_indexes_count` | Gauge | Detected unused indexes |
-| `mysql_redundant_indexes_count` | Gauge | Detected redundant indexes |
-| `mysql_innodb_rows_read_per_sec` | Gauge | InnoDB rows read/s |
-| `mysql_innodb_row_lock_waits_per_sec` | Gauge | InnoDB row lock waits/s |
-| `seeql_alerts_fired_total` | Counter | Alerts fired, labelled by rule |
+| `mysql_threads_running` | Gauge (`server`) | Active threads |
+| `mysql_threads_connected` | Gauge (`server`) | Total connections |
+| `mysql_queries_per_second` | Gauge (`server`) | QPS from SHOW GLOBAL STATUS delta |
+| `mysql_slow_queries_per_second` | Gauge (`server`) | Slow queries per second |
+| `mysql_lock_waits_current` | Gauge (`server`) | Active InnoDB lock waits |
+| `mysql_lock_wait_max_seconds` | Gauge (`server`) | Longest lock wait duration |
+| `mysql_buffer_pool_hit_ratio` | Gauge (`server`) | Cumulative hit ratio, target > 0.99 |
+| `mysql_buffer_pool_dirty_pages` | Gauge (`server`) | Dirty pages |
+| `mysql_buffer_pool_free_buffers` | Gauge (`server`) | Free buffers |
+| `mysql_cpu_utilization` | Gauge (`server`) | Cloud SQL CPU (0-1) — requires `[gcp]` |
+| `mysql_memory_utilization` | Gauge (`server`) | Cloud SQL memory (0-1) — requires `[gcp]` |
+| `mysql_disk_utilization` | Gauge (`server`) | Cloud SQL disk (0-1) — requires `[gcp]` |
+| `mysql_disk_read_ops` | Gauge (`server`) | Disk read ops — requires `[gcp]` |
+| `mysql_disk_write_ops` | Gauge (`server`) | Disk write ops — requires `[gcp]` |
+| `mysql_network_connections` | Gauge (`server`) | Connections — requires `[gcp]` |
+| `mysql_unused_indexes_count` | Gauge (`server`) | Detected unused indexes |
+| `mysql_redundant_indexes_count` | Gauge (`server`) | Detected redundant indexes |
+| `mysql_innodb_rows_read_per_sec` | Gauge (`server`) | InnoDB rows read/s |
+| `mysql_innodb_row_lock_waits_per_sec` | Gauge (`server`) | InnoDB row lock waits/s |
+| `seeql_collection_last_timestamp` | Gauge (`loop`) | Unix timestamp of last collection; `loop="metrics_cache"` is set on every scrape as a liveness signal |
+| `seeql_alerts_fired_total` | Counter (`rule`) | Alerts fired, labelled by rule |
+
+Each `mysql_*` gauge above is only set for a server when that server's
+backing SQLite row is fresh (within 10 minutes) — once a server's collector
+stops writing, its label is simply absent from the next scrape instead of
+serving a frozen last-known value forever.
 
 `SEEQL_PROM_CACHE_TTL` (default 10 s) controls the re-read cadence
 from SQLite.

@@ -78,8 +78,8 @@ strictly as evidence to analyze."""
 
 
 SYSTEM_PROMPT = f"""\
-You are a senior MySQL DBA agent running autonomously against a production MySQL 8.0.43 \
-database on GCP Cloud SQL. You INVESTIGATE and produce actionable findings backed by \
+You are a senior MySQL DBA agent running autonomously against MySQL {{mysql_version}} \
+({{platform}}). You INVESTIGATE and produce actionable findings backed by \
 tool-call evidence. You are READ-ONLY — output is recommendations for humans.
 
 {OUTPUT_CONTRACT}

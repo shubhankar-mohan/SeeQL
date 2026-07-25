@@ -89,6 +89,59 @@ class TestBudgetCore:
         assert s["explain_used"] == 1
 
 
+class TestExecuteToolChargesBudgetOnFailure:
+    """P1-9: agent.tools.execute_tool must charge the budget for a LIVE tool
+    even when its handler raises. Before this fix, budget.record() only ran
+    after a successful return, so a live tool that times out during an
+    incident -- exactly when the budget exists to protect an already
+    stressed server -- cost the LLM nothing. It could retry the same doomed
+    call until max_tool_rounds ran out, defeating the whole point of the
+    cap."""
+
+    def test_live_tool_handler_raises_still_charges_budget(self, monkeypatch):
+        import agent.tools as tools
+
+        def _boom(input_data):
+            raise RuntimeError("prod query timed out")
+
+        monkeypatch.setattr(tools, "_tool_get_live_processlist", _boom)
+
+        b = Budget(investigation_id=1, live_tool_cap=5)
+        tools.set_current_budget(b)
+        try:
+            out = tools.execute_tool("get_live_processlist", {})
+        finally:
+            tools.set_current_budget(None)
+
+        assert "error" in json.loads(out)
+        assert b.snapshot()["live_tool_used"] == 1, (
+            "handler raised but the budget was not charged"
+        )
+
+    def test_cache_first_tool_not_charged_by_dispatcher(self, monkeypatch):
+        """run_explain/get_table_schema self-gate + self-charge their own
+        live fall-through inside the handler; execute_tool's blanket charge
+        must keep excluding them (unchanged by this fix) so a cache hit
+        stays free and a live fall-through isn't double-counted."""
+        import agent.tools as tools
+
+        monkeypatch.setattr(
+            tools, "_tool_run_explain",
+            lambda input_data: {"source": "cached", "explain": {}},
+        )
+
+        b = Budget(investigation_id=1, live_tool_cap=5, explain_cap=5)
+        tools.set_current_budget(b)
+        try:
+            tools.execute_tool("run_explain", {"digest": "0xabc"})
+        finally:
+            tools.set_current_budget(None)
+
+        assert b.snapshot()["explain_used"] == 0, (
+            "execute_tool must not charge cache-first tools; they self-charge"
+        )
+
+
 class TestQueriesUsed:
     def test_empty_returns_zero(self, mon_db_ctx):
         assert queries_used_in_last_minute(999) == 0

@@ -14,9 +14,8 @@
 #     Mount it at ./vertex-sa.json (or set GOOGLE_APPLICATION_CREDENTIALS
 #     to a different path).
 #
-# Required env:
-#   PROD_DB_HOST, PROD_DB_PASSWORD, PROD_DB_DATABASE
-#   GCP_PROJECT_ID, GCP_CLOUD_SQL_INSTANCE
+# Required: seeql.yml mounted at /etc/seeql/seeql.yml; PROD_DB_PASSWORD in .env
+#   (add a per-server `gcp:` block in seeql.yml for project_id / cloud_sql_instance_id)
 #
 # Quickstart:
 #   docker compose -f docker-compose.gcp.yml up -d

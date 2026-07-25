@@ -419,7 +419,13 @@ def _run_explain_fallback(server_id: str, digest: str) -> tuple[str | None, str 
         from agent.tools import _tool_run_explain, set_current_server
 
         set_current_server(server_id)
-        result = _tool_run_explain({"digest": digest})
+        try:
+            result = _tool_run_explain({"digest": digest})
+        finally:
+            # Reset even if _tool_run_explain raises (P1-10) so a
+            # pooled/reused thread can't leak `server_id` into whatever
+            # correlator call runs on it next.
+            set_current_server(None)
         if not isinstance(result, dict) or result.get("error") or not result.get("explain"):
             return (None, None)
         return _summarize_explain({"explain_json": json.dumps(result["explain"])})

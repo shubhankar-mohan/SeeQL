@@ -197,6 +197,19 @@ MOCK_INDEX_FINGERPRINT = [
     },
 ]
 
+MOCK_TABLE_DISCOVERY = [
+    {
+        "table_schema": "mydb",
+        "table_name": "loyalty_members",
+        "update_time": "2025-01-01 12:00:00",
+    },
+    {
+        "table_schema": "mydb",
+        "table_name": "users",
+        "update_time": "2025-01-01 12:00:00",
+    },
+]
+
 MOCK_TABLE_SIZES = [
     {
         "table_schema": "mydb",

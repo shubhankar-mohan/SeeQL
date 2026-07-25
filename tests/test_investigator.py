@@ -428,7 +428,7 @@ class TestRoutineBudget:
 
         captured = {}
 
-        def fake_loop(backend, max_tokens, max_rounds, user_msg):
+        def fake_loop(backend, max_tokens, max_rounds, user_msg, system_prompt=None):
             # The budget must already be live on the ContextVar by the time
             # the provider loop runs — same contract run_llm_analysis
             # upholds for the webhook investigator's tool_budget.
@@ -436,7 +436,9 @@ class TestRoutineBudget:
             return (
                 "### Severity: info\n### Findings\nNo significant issues detected.\n"
                 "### Recommendations\nNone at this time.\n"
-                "### Confidence: 1.0 — quiet\n### Addresses incident #none\n"
+                "### Confidence: 1.0 — quiet\n### Addresses incident #none\n",
+                False,
+                0,
             )
 
         fake_backend = {"type": "anthropic", "model": "claude-x", "api_key": "x"}
@@ -460,9 +462,13 @@ class TestRoutineBudget:
 
         captured = {}
 
-        def fake_loop(backend, max_tokens, max_rounds, user_msg):
+        def fake_loop(backend, max_tokens, max_rounds, user_msg, system_prompt=None):
             captured["budget"] = get_current_budget()
-            return "### Severity: info\n### Findings\nNo significant issues detected.\n"
+            return (
+                "### Severity: info\n### Findings\nNo significant issues detected.\n",
+                False,
+                0,
+            )
 
         fake_backend = {"type": "anthropic", "model": "claude-x", "api_key": "x"}
         with patch.object(la, "_detect_backend", return_value=fake_backend), \

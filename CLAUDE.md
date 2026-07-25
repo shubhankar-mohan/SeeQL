@@ -182,7 +182,7 @@ Key packages and files beyond the original collector scaffolding:
 - **Config via YAML** with env var substitution for secrets
 - **Logging:** structured format with collector name, timing
 - **Error handling:** fail independently, log, continue
-- **LLM provider:** configurable across Gemini (Vertex AI), Claude (Anthropic API or Vertex AI), and OpenAI — plus any OpenAI-compatible endpoint (Azure OpenAI, Ollama, vLLM, Groq, OpenRouter, LM Studio, …) via `agent.openai_base_url`. Backend is chosen from the model name (`gemini-*`/`claude-*`/`gpt-*`/`o*`) or forced with `agent.provider`. Default (shipped in `settings.yaml`): `gemini-2.0-flash`. Selection + each provider loop live in `agent/llm_agent.py` (`_detect_backend`, `_run_gemini_loop`/`_run_claude_loop`/`_run_openai_loop`).
+- **LLM provider:** configurable across Gemini (Vertex AI), Claude (Anthropic API or Vertex AI), and OpenAI — plus any OpenAI-compatible endpoint (Azure OpenAI, Ollama, vLLM, Groq, OpenRouter, LM Studio, …) via `agent.openai_base_url`. Backend is chosen from the model name (`gemini-*`/`claude-*`/`gpt-*`/`o*`) or forced with `agent.provider`. Default (shipped in `settings.yaml`): `gemini-2.5-flash`. Selection + each provider loop live in `agent/llm_agent.py` (`_detect_backend`, `_run_gemini_loop`/`_run_claude_loop`/`_run_openai_loop`).
 
 ## Current State
 
@@ -204,7 +204,7 @@ Key packages and files beyond the original collector scaffolding:
 - [x] EXPLAIN plan auto-capture for top-N expensive queries
 - [x] Data retention cleanup (runs daily via scheduler, with per-table overrides)
 - [x] Structured State Builder (pre-processor for LLM input)
-- [x] LLM Agent layer with tool-use (Gemini via Vertex AI, Claude via Anthropic API / Vertex AI, OpenAI + any OpenAI-compatible endpoint; default model: gemini-2.0-flash)
+- [x] LLM Agent layer with tool-use (Gemini via Vertex AI, Claude via Anthropic API / Vertex AI, OpenAI + any OpenAI-compatible endpoint; default model: gemini-2.5-flash)
 - [x] Alerting with 6 built-in rules and 3 channels (Slack, webhook, log)
 - [x] **Anomaly detection layer** (`alerting/anomaly.py`, 615 lines): z-score, same-hour-same-weekday baselines over 28 days with 24h + all-data fallbacks, 7 active metrics (query-latency per-digest planned), zero-stddev guard, cold-start handling, integrated with alerting engine and state builder
 - [x] Prometheus endpoint at `/metrics` (~20 gauges/counters)

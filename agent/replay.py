@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from typing import Any
 
 from storage.connection import get_mon_reader
 from agent.prompts import INCIDENT_INVESTIGATOR_PROMPT, REPLAY_SYSTEM_PROMPT
@@ -127,6 +129,25 @@ ORDER BY snapshot_time ASC
 """
 
 
+def _pad_window(from_ts: str, to_ts: str, minutes: int = 5) -> tuple[str, str]:
+    """Widen [from_ts, to_ts] by `minutes` on each side for the timeline
+    queries below (P3-11). An exact BETWEEN was silently dropping boundary
+    events -- e.g. the very anomaly that triggered the incident window,
+    landing at/just before `from_ts`. The ORIGINAL from_ts/to_ts are still
+    what the caller (run_replay) shows in the replay header; only the local
+    copies used to query are padded.
+
+    Falls back to the unpadded strings on any parse failure -- padding is a
+    nice-to-have, not a correctness requirement.
+    """
+    try:
+        start = datetime.fromisoformat(from_ts) - timedelta(minutes=minutes)
+        end = datetime.fromisoformat(to_ts) + timedelta(minutes=minutes)
+        return start.isoformat(), end.isoformat()
+    except (ValueError, TypeError):
+        return from_ts, to_ts
+
+
 def _build_timeline(server_id: str, from_ts: str, to_ts: str) -> tuple[str, dict]:
     """Run all timeline queries, interleave by timestamp, return markdown + counts."""
     events: list[tuple[str, str]] = []
@@ -138,34 +159,50 @@ def _build_timeline(server_id: str, from_ts: str, to_ts: str) -> tuple[str, dict
         "threads_samples": 0,
     }
 
+    q_from, q_to = _pad_window(from_ts, to_ts)
+
     with get_mon_reader() as conn:
-        for row in conn.execute(_TIMELINE_ANOMALIES, (server_id, from_ts, to_ts)):
+        for row in conn.execute(_TIMELINE_ANOMALIES, (server_id, q_from, q_to)):
+            # current_value/baseline_mean/z_score are NOT NULL in schema.sql
+            # today, but guard the format specs anyway (`or 0`) -- a NULL
+            # here used to raise TypeError and take down the WHOLE timeline
+            # via run_replay's broad except, not just this one line (P1-17).
             events.append((
                 row["ts"],
                 f"**ANOMALY** [{row['severity']}] `{row['metric_name']}` "
-                f"= {row['current_value']:.2f} "
-                f"(baseline {row['baseline_mean']:.2f}, z={row['z_score']:.1f}, "
+                f"= {row['current_value'] or 0:.2f} "
+                f"(baseline {row['baseline_mean'] or 0:.2f}, "
+                f"z={row['z_score'] or 0:.1f}, "
                 f"{row['direction']})",
             ))
             counts["anomalies"] += 1
 
-        for row in conn.execute(_TIMELINE_LOCK_WAITS, (server_id, from_ts, to_ts)):
-            wq = (maybe_redact(row["waiting_query"]) or "")[:80]
-            events.append((
-                row["ts"],
-                f"**LOCK** pid={row['waiting_pid']} waiting {row['wait_seconds']}s "
-                f"for pid={row['blocking_pid']} — `{wq}`",
-            ))
-            counts["lock_waits"] += 1
+        # Lock waits: downsample like threads_running below (P1-14) -- a real
+        # lock cascade (the exact incident type replay exists to explain)
+        # can produce thousands of rows, one per polling cycle. Redact the
+        # waiting query text (P0-9) as it goes into the timeline.
+        lock_rows = list(
+            conn.execute(_TIMELINE_LOCK_WAITS, (server_id, q_from, q_to))
+        )
+        counts["lock_waits"] = len(lock_rows)
+        lock_step = max(1, len(lock_rows) // 50)
+        for i, row in enumerate(lock_rows):
+            if i % lock_step == 0:
+                wq = (maybe_redact(row["waiting_query"]) or "")[:80]
+                events.append((
+                    row["ts"],
+                    f"**LOCK** pid={row['waiting_pid']} waiting {row['wait_seconds']}s "
+                    f"for pid={row['blocking_pid']} — `{wq}`",
+                ))
 
-        for row in conn.execute(_TIMELINE_DDL, (server_id, from_ts, to_ts)):
+        for row in conn.execute(_TIMELINE_DDL, (server_id, q_from, q_to)):
             events.append((
                 row["ts"],
                 f"**DDL** {row['change_type']} on `{row['table_schema']}.{row['table_name']}`",
             ))
             counts["ddl_changes"] += 1
 
-        for row in conn.execute(_TIMELINE_DEADLOCKS, (server_id, from_ts, to_ts)):
+        for row in conn.execute(_TIMELINE_DEADLOCKS, (server_id, q_from, q_to)):
             events.append((
                 row["ts"],
                 "**DEADLOCK** — see innodb_status_snapshots for full graph",
@@ -174,7 +211,7 @@ def _build_timeline(server_id: str, from_ts: str, to_ts: str) -> tuple[str, dict
 
         # Threads: only emit every Nth sample to avoid drowning the LLM
         threads_rows = list(
-            conn.execute(_TIMELINE_THREADS, (server_id, from_ts, to_ts))
+            conn.execute(_TIMELINE_THREADS, (server_id, q_from, q_to))
         )
         counts["threads_samples"] = len(threads_rows)
         step = max(1, len(threads_rows) // 10)

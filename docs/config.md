@@ -18,8 +18,9 @@ Connections and the server list live **only** in the config file — there are n
 `${VAR}` (e.g. `password: ${PROD_DB_PASSWORD}`).
 
 A few **operational** knobs stay as env vars (like Prometheus's `--storage.*` /
-`--log.level` flags): `SEEQL_CONFIG`, `SEEQL_MON_DB_PATH`, `SEEQL_DB_MAX_SIZE_MB`,
-`SEEQL_LOG_MAX_SIZE_MB`, `SEEQL_RETENTION_DAYS`, `SEEQL_LOG_LEVEL`, `SEEQL_ENV`.
+`--log.level` flags): `SEEQL_CONFIG`, `SEEQL_AGENT_ENABLED`, `SEEQL_API_PORT`,
+`SEEQL_MON_DB_PATH`, `SEEQL_DB_MAX_SIZE_MB`, `SEEQL_LOG_MAX_SIZE_MB`,
+`SEEQL_RETENTION_DAYS`, `SEEQL_LOG_LEVEL`, `SEEQL_PROM_CACHE_TTL`, `SEEQL_ENV`.
 
 ## Production database (required)
 
@@ -101,6 +102,23 @@ intervals:
 
 Env: `SEEQL_FAST_INTERVAL`, `SEEQL_MEDIUM_INTERVAL`, `SEEQL_SLOW_INTERVAL`.
 
+## Scheduler / fleet resilience
+
+```yaml
+scheduler:
+  circuit_reset_cycles: 10            # See below
+```
+
+Each loop runs its servers concurrently (up to 4 at once) so one slow or
+unreachable server can't delay the others within a cycle. On top of that, a
+server that fails **every** collector for 3 consecutive cycles trips a
+per-server circuit breaker and is skipped entirely — no connection attempts
+at all — for `circuit_reset_cycles` further cycles, instead of being
+retried (and re-timing-out) every single time. "Cycles" are shared across
+the fast/medium/slow loops (whichever runs next advances the counter), not
+counted separately per loop. A successful cycle for a server resets its
+failure streak immediately.
+
 ## Collection limits
 
 ```yaml
@@ -111,6 +129,26 @@ limits:
   digest_text_max_len: 1024
   max_batch_size: 500                 # Rows per SQLite batch insert
 ```
+
+## Slow-loop guardrails
+
+```yaml
+slow_loop:
+  max_tables_per_cycle: 2000          # Large-schema guardrail, see below
+```
+
+The schema-snapshot collector (DDL fingerprinting) orders every table it
+finds by `UPDATE_TIME` descending (tables with no `UPDATE_TIME` sort last)
+and fingerprints/sizes at most `max_tables_per_cycle` of them per cycle.
+This bounds the per-cycle cost of the fingerprint queries on schemas with
+many thousands of tables. Deferred tables are **logged** (a `WARNING` with
+the deferred count) rather than silently dropped, and are picked up on a
+later cycle as more-recently-changed tables clear the front of the queue.
+Only above the cap: the hash cache only retains tables actually processed
+that cycle, so a DDL change on a table while it sits deferred may be
+recorded as a fresh snapshot rather than an old→new `ddl_changes` diff the
+next time that table is processed. Schemas at or under the cap are
+completely unaffected — same queries as always.
 
 ## Retention
 
@@ -154,15 +192,16 @@ gcp:
   monitoring_credentials_file: "${MONITORING_APPLICATION_CREDENTIALS}"
 ```
 
-Env:
+`project_id`, `region`, `cloud_sql_instance_id`, and `vertex_region` are
+**file-only** — set them in the `gcp:` block above (or a per-server `gcp:`
+block under `servers:`). There are no `GCP_*` env overrides.
 
-| Variable | YAML key |
-|----------|----------|
-| `GCP_PROJECT_ID` | `gcp.project_id` |
-| `GCP_REGION` | `gcp.region` |
-| `GCP_CLOUD_SQL_INSTANCE` | `gcp.cloud_sql_instance_id` |
-| `GOOGLE_APPLICATION_CREDENTIALS` | (SDK-native) |
-| `MONITORING_APPLICATION_CREDENTIALS` | dedicated SA for Monitoring/Logging only |
+Credentials, however, come from the environment:
+
+| Variable | What |
+|----------|------|
+| `GOOGLE_APPLICATION_CREDENTIALS` | Service-account key path — read natively by the Google client libraries (Cloud Monitoring, Cloud Logging, Vertex AI) |
+| `MONITORING_APPLICATION_CREDENTIALS` (via `${…}`) | Optional dedicated SA for Monitoring/Logging only, referenced from `monitoring_credentials_file` above |
 
 When `gcp.project_id` is empty or left as the default placeholder
 (`your-gcp-project-id`), GCP collectors register as no-ops.
@@ -172,7 +211,7 @@ When `gcp.project_id` is empty or left as the default placeholder
 ```yaml
 agent:
   enabled: false                      # Set true after configuring a backend
-  model: "claude-sonnet-4-6"          # or "gemini-2.0-flash", "claude-opus-4-6", etc.
+  model: "gemini-2.5-flash"           # shipped default; or a claude-* id like "claude-opus-4-6"
   max_tokens: 8192
   max_tool_rounds: 10
   schedule_seconds: 900               # How often the routine analysis runs
@@ -184,8 +223,6 @@ agent:
     long_transaction_sec: 30
     lookback_minutes: 5
 ```
-
-Env: `SEEQL_AGENT_ENABLED`, `SEEQL_AGENT_MODEL`, `ANTHROPIC_API_KEY`.
 
 Backend selection is model-name-driven — see [agent.md](agent.md) for
 the matrix.
@@ -220,8 +257,6 @@ alerting:
     # ... 6 more rules, see alerting.md
 ```
 
-Env: `SEEQL_ALERTING_ENABLED`, `SLACK_WEBHOOK_URL`.
-
 Full rule-by-rule tuning in [alerting.md](alerting.md).
 
 ## Prometheus
@@ -249,13 +284,21 @@ Env: `SEEQL_LOG_LEVEL`, `SEEQL_LOG_MAX_SIZE_MB`.
 
 ## Precedence examples
 
-```bash
-# 1. YAML default in config/settings.yaml: host: "10.0.0.1"
-# 2. Local override in settings.local.yaml: host: "10.0.5.5"
-# 3. Env var at runtime: PROD_DB_HOST=10.0.9.9
+There is no env var for connection or interval settings — change them by
+editing your config file and restarting:
 
-docker run -e PROD_DB_HOST=10.0.9.9 ...   # → SeeQL uses 10.0.9.9
+```bash
+# 1. Built-in default in config/settings.yaml: intervals.medium_loop: 300
+# 2. Your seeql.yml overrides it:
+$EDITOR seeql.yml        # intervals: { medium_loop: 600 }
+docker restart seeql     # re-reads seeql.yml on startup → 600 wins
 ```
 
-Env wins. Local YAML wins over the stock config. The stock config is
-the last-resort fallback.
+`${VAR}` substitution only fills placeholders you actually wrote into the
+YAML (e.g. `password: "${PROD_DB_PASSWORD}"`). Setting an env var that isn't
+referenced anywhere in your config file does nothing — SeeQL never reads
+connection settings from the environment directly.
+
+Your `seeql.yml` always wins over the built-in `config/settings.yaml`
+defaults (deep-merged, key by key). The stock config is the last-resort
+fallback.

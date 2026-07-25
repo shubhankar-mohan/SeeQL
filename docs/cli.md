@@ -1,6 +1,6 @@
 # CLI reference
 
-SeeQL ships a single `seeql` command with seven subcommands. Install
+SeeQL ships a single `seeql` command with nine subcommands. Install
 via `pip install -e ".[api]"` or the Docker image — both expose the
 `seeql` console script.
 
@@ -10,13 +10,15 @@ via `pip install -e ".[api]"` or the Docker image — both expose the
 seeql <command> [options]
 
 Commands:
-  check         Run health checks and exit
-  doctor        Diagnose the local environment (7 checks)
-  init-db       Initialize the monitoring SQLite schema
-  run           Continuous collector loop (add --once for a single cycle)
-  serve         API + dashboard + scheduler
-  replay        Reconstruct + narrate a past incident
-  incidents     Browse detected incidents
+  check           Run health checks and exit
+  doctor          Diagnose the local environment (9 checks)
+  init-db         Initialize the monitoring SQLite schema
+  run             Continuous collector loop (add --once for a single cycle)
+  serve           API + dashboard + scheduler
+  replay          Reconstruct + narrate a past incident
+  incidents       Browse detected incidents
+  investigations  Manage webhook-triggered investigations
+  mcp             Run the SeeQL MCP server (stdio by default, HTTP with --http)
 ```
 
 Exit codes: `0` on success. On a `SeeQLError`, the exit code is the
@@ -46,7 +48,7 @@ Fast preflight. Exits 0 if SeeQL can:
 
 ## `seeql doctor`
 
-Deeper diagnostic — runs 7 checks and prints a coloured pass/fail
+Deeper diagnostic — runs 9 checks and prints a coloured pass/fail
 table:
 
 1. Python version (≥3.12)
@@ -68,7 +70,7 @@ broke.
 ## `seeql init-db`
 
 Creates `data/mysql_monitor.db` and runs
-[`storage/schema.sql`](../storage/schema.sql) to create all 26 tables.
+[`storage/schema.sql`](../storage/schema.sql) to create all 30 tables.
 Idempotent — safe to re-run on an existing DB.
 
 **Use when:** first-time setup, or after wiping `data/` for a clean
@@ -156,6 +158,62 @@ seeql incidents list --server db-prod-west
 
 Output columns: id, start, end, duration, severity, involved metrics,
 status.
+
+---
+
+## `seeql investigations list|show|trigger|abort`
+
+Manages webhook-triggered root-cause investigations (see
+[docs/api.md](api.md) and the `webhooks:` / `investigator:` sections in
+`settings.yaml`). An investigation is created when `POST
+/webhooks/{provider}` receives an alert, and runs a 3-phase pipeline:
+zero-query triage, budgeted LLM tool calls, then continuous sampling
+with a load guard.
+
+```bash
+# List recent investigations (20 most recent by default)
+seeql investigations list
+seeql investigations list --status phase2 --limit 50
+seeql investigations list --server db-prod-west
+
+# Show one investigation in full — findings + sample counts
+seeql investigations show 17
+
+# Manually trigger one — testing / incident drills
+seeql investigations trigger --type lock_cascade --severity critical \
+    --server db-prod-west --summary "drill: simulated lock cascade"
+
+# Abort a running investigation
+seeql investigations abort 17 --reason "false alarm"
+```
+
+`list --status` filters on `queued`, `phase1`, `phase2`, `phase3`,
+`completed`, `aborted`, or `load_guard_paused`. `trigger --severity`
+accepts `critical`, `warning`, or `info` (default `warning`); `--type`
+defaults to `default` and `--server` defaults to the primary server.
+`abort --reason` defaults to `cli_abort`.
+
+---
+
+## `seeql mcp`
+
+Runs the SeeQL [Model Context Protocol](https://modelcontextprotocol.io/)
+server so external MCP clients (Claude Desktop, Claude Code, custom HTTP
+clients) can use SeeQL as a root-cause-analysis surface. Requires the
+`mcp` extra: `pip install 'seeql[mcp]'` (or `pip install 'mcp>=1.2'`).
+
+```bash
+seeql mcp                          # stdio transport (default)
+seeql mcp --http                   # streamable HTTP/SSE transport
+seeql mcp --http --port 9000 --bind 0.0.0.0
+```
+
+- `--http` — use streamable HTTP/SSE instead of stdio
+- `--port` — HTTP port (default: `mcp.http.port` in `settings.yaml`, or `8765`)
+- `--bind` — HTTP bind address (default: `mcp.http.bind`, or `127.0.0.1`)
+
+**See:** [docs/mcp.md](mcp.md) for the full tool/resource/prompt catalog,
+safety-rail config, and the Claude Desktop config snippet.
 
 ---
 

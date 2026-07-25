@@ -191,7 +191,7 @@ def _run_startup_migrations():
 
 
 def cmd_doctor():
-    """Run the seeql diagnostic — 7 checks against the local env."""
+    """Run the seeql diagnostic — 9 checks against the local env."""
     from seeql import doctor
     failures = doctor.run()
     sys.exit(failures)
@@ -648,7 +648,7 @@ def _main_inner():
     serve_p.add_argument("--no-scheduler", action="store_true",
                          help="Serve API only — don't start the collector")
 
-    sub.add_parser("doctor", help="Diagnose the local environment (7 checks)")
+    sub.add_parser("doctor", help="Diagnose the local environment (9 checks)")
 
     replay_p = sub.add_parser("replay", help="Replay a past incident")
     replay_p.add_argument("--from", dest="from_ts",

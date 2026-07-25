@@ -23,7 +23,14 @@ _initialized = False
 
 
 def _init_cooldowns():
-    """Load last fire times from alert_history on first run."""
+    """Load last fire times from alert_history on first run.
+
+    Only seeds from rows where delivered=1. Without this filter, a restart
+    during a channel outage (delivered=0 stored, no live cooldown -- see the
+    `delivered` gate in evaluate()) would re-suppress the rule for a full
+    cooldown window on the very next process start, silently defeating the
+    live-path fix the moment the process bounces (P1c-6 across restart).
+    """
     global _initialized
     if _initialized:
         return
@@ -34,6 +41,7 @@ def _init_cooldowns():
             rows = conn.execute("""
                 SELECT rule_name, MAX(fired_at) as last_fired
                 FROM alert_history
+                WHERE delivered = 1
                 GROUP BY rule_name
             """).fetchall()
             for row in rows:
@@ -133,18 +141,42 @@ def evaluate(loop_name: str = "fast") -> list[Alert]:
             # Set channels from config
             alert.channels = rule_cfg.get("channels", ["log"])
 
-            # Dispatch to channels
+            # Dispatch to channels. `delivered` gates the cooldown and must
+            # reflect ONLY real notification channels -- never "log". The log
+            # channel always succeeds and is a *record*, not a delivery; the
+            # shipped config uses `channels: [slack, log]`, so if "log"
+            # counted as delivery the cooldown would be set even when Slack is
+            # down, suppressing every retry for the whole cooldown window
+            # (the exact P1c-6 bug).
             delivered = False
             for ch_name in alert.channels:
                 channel = channels.get(ch_name)
-                if channel:
-                    if channel.send(alert):
+                if channel and channel.send(alert):
+                    if ch_name != "log":
                         delivered = True
 
-            alert.delivered = delivered
-            _cooldowns[scoped_key] = alert.fired_at
+            # If no real channel delivered and "log" wasn't already in the
+            # rule's channel list, still log the alert as a visibility
+            # fallback (LogChannel never fails). This does NOT count towards
+            # `delivered` -- the cooldown stays unset so the real channels get
+            # retried next cycle instead of going quiet.
+            if not delivered and "log" not in alert.channels:
+                log_channel = channels.get("log")
+                if log_channel:
+                    log_channel.send(alert)
 
-            # Store in alert_history
+            alert.delivered = delivered
+
+            # Only start the cooldown once a real (non-log) channel actually
+            # delivered the alert. If delivery failed everywhere (e.g. Slack
+            # is down), leave the cooldown unset so the next evaluation cycle
+            # retries immediately instead of waiting out the full cooldown
+            # while the outage continues.
+            if delivered:
+                _cooldowns[scoped_key] = alert.fired_at
+
+            # Store in alert_history either way -- delivered=0 is recorded
+            # when no real channel succeeded, so the failure stays visible.
             _store_alert(alert)
             fired.append(alert)
 
@@ -193,5 +225,13 @@ def _store_alert(alert: Alert):
                     1 if alert.delivered else 0,
                 ),
             )
+
+        # Prometheus counter (P1c-4). Guarded so the engine still works
+        # without the `api` extra installed (prometheus_client/FastAPI absent).
+        try:
+            from api.prometheus import seeql_alerts_fired
+            seeql_alerts_fired.labels(rule=alert.rule_name).inc()
+        except Exception:
+            pass
     except Exception as e:
         logger.error(f"Failed to store alert: {e}")

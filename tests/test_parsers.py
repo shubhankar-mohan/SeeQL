@@ -1,10 +1,10 @@
 """Tests for parsers module."""
 
+import logging
 from datetime import datetime, timedelta
 
-import pytest
-
 from parsers.global_status import GlobalStatusDeltaCalculator, TRACKED_VARIABLES
+from parsers.innodb_status import _parse_deadlock
 from tests.fixtures.mysql_mock_data import MOCK_GLOBAL_STATUS, MOCK_GLOBAL_STATUS_SECOND
 
 
@@ -82,3 +82,77 @@ class TestGlobalStatusDeltaCalculator:
 
         for row in result:
             assert row["per_second"] is None
+
+    def test_gauge_decrease_no_delta_no_restart_warning(self, caplog):
+        """P1b-5: Threads_running is a gauge — it naturally rises and falls,
+        so a drop is normal operation, not a server restart, and must not
+        be treated as one."""
+        calc = GlobalStatusDeltaCalculator()
+        t1 = datetime(2025, 1, 1, 10, 0, 0)
+        t2 = t1 + timedelta(seconds=300)
+
+        higher = [{"Variable_name": "Threads_running", "Value": "5"}]
+        lower = [{"Variable_name": "Threads_running", "Value": "3"}]
+
+        calc.process(higher, t1)
+        with caplog.at_level(logging.WARNING):
+            result = calc.process(lower, t2)
+
+        row = next(r for r in result if r["variable_name"] == "Threads_running")
+        assert row["delta_value"] is None
+        assert row["per_second"] is None
+        assert not any("possible server restart" in r.message for r in caplog.records)
+
+    def test_gauge_increase_no_fake_rate(self):
+        """P1b-5: a gauge rising is a point-in-time value, not throughput —
+        it must not be stored as if it were a per-second rate."""
+        calc = GlobalStatusDeltaCalculator()
+        t1 = datetime(2025, 1, 1, 10, 0, 0)
+        t2 = t1 + timedelta(seconds=300)
+
+        lower = [{"Variable_name": "Threads_running", "Value": "3"}]
+        higher = [{"Variable_name": "Threads_running", "Value": "5"}]
+
+        calc.process(lower, t1)
+        result = calc.process(higher, t2)
+
+        row = next(r for r in result if r["variable_name"] == "Threads_running")
+        assert row["raw_value"] == 5
+        assert row["delta_value"] is None
+        assert row["per_second"] is None
+
+    def test_counter_decrease_still_logs_restart_warning(self, caplog):
+        """P1b-5: a genuine monotonic counter (Questions) decreasing is
+        still a possible server restart — the warning must still fire."""
+        calc = GlobalStatusDeltaCalculator()
+        t1 = datetime(2025, 1, 1, 10, 0, 0)
+        t2 = t1 + timedelta(seconds=300)
+
+        higher = [{"Variable_name": "Questions", "Value": "100"}]
+        lower = [{"Variable_name": "Questions", "Value": "50"}]
+
+        calc.process(higher, t1)
+        with caplog.at_level(logging.WARNING):
+            result = calc.process(lower, t2)
+
+        row = next(r for r in result if r["variable_name"] == "Questions")
+        assert row["delta_value"] is None
+        assert row["per_second"] is None
+        assert any("possible server restart" in r.message for r in caplog.records)
+
+
+def test_deadlock_timestamp_parsed():
+    """P1b-3: InnoDB reprints the same LATEST DETECTED DEADLOCK section on
+    every SHOW ENGINE INNODB STATUS call until the server restarts, so the
+    section's own header timestamp — not snapshot freshness — is the only
+    reliable signal for "is this a NEW deadlock"."""
+    text = "2026-07-17 01:42:33 0x16f887000\n*** (1) TRANSACTION:\nTRANSACTION 48119 ..."
+    parsed = _parse_deadlock(text)
+    assert parsed["deadlock_at"] == "2026-07-17 01:42:33"
+
+
+def test_deadlock_timestamp_missing_is_none():
+    """No leading timestamp line (e.g. malformed/empty section) => None, not
+    a crash — evaluate_deadlock treats a missing deadlock_at as un-fireable."""
+    parsed = _parse_deadlock("*** (1) TRANSACTION:\nTRANSACTION 48119 ...")
+    assert parsed["deadlock_at"] is None

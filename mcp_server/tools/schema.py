@@ -111,7 +111,12 @@ def _get_table_schema_impl(schema: str, table: str, server: str | None) -> dict:
     from agent.tools import _tool_get_table_schema, set_current_server
     sid = server or _default_server()
     set_current_server(sid)
-    return _tool_get_table_schema({"schema_name": schema, "table_name": table})
+    try:
+        return _tool_get_table_schema({"schema_name": schema, "table_name": table})
+    finally:
+        # Reset even on failure (P1-10) so a pooled/reused thread can't
+        # leak `sid` into whatever MCP call runs on it next.
+        set_current_server(None)
 
 
 def _list_unused_indexes_impl(server: str | None, limit: int) -> list[dict]:
@@ -159,7 +164,7 @@ def _recent_ddl_impl(
                old_schema_hash, new_schema_hash, old_ddl, new_ddl
         FROM ddl_changes
         WHERE server_id = ?
-          AND detected_at >= datetime('now', ?)
+          AND datetime(REPLACE(detected_at,'T',' ')) >= datetime('now', ?)
         ORDER BY detected_at DESC
         LIMIT ?
     """

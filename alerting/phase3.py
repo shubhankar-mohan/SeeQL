@@ -404,7 +404,7 @@ def _cleared_threads(current_threads: int | None, server_id: str) -> bool:
                 FROM global_status_snapshots
                 WHERE server_id = ?
                   AND variable_name = 'Threads_running'
-                  AND snapshot_time >= datetime('now', '-7 days')
+                  AND datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-7 days')
                 """,
                 (server_id,),
             ).fetchone()
