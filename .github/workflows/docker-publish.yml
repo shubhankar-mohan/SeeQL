@@ -140,7 +140,7 @@ jobs:
 
       - name: Upload Trivy results
         if: ${{ always() && startsWith(github.ref, 'refs/tags/v') }}
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-${{ matrix.variant }}.sarif
           category: trivy-${{ matrix.variant }}
