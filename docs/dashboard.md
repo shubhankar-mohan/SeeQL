@@ -8,12 +8,16 @@ no JavaScript framework — templates live in
 
 | Path | Purpose |
 |------|---------|
-| `/` | Overview — health bar, active alerts, recent incidents, top queries, live locks |
-| `/queries` | Top queries + recent regressions, per-query detail pane |
-| `/locks` | Current lock waits + historical contention patterns |
-| `/schema` | DDL change feed + table sizes + index usage |
-| `/server` | Threads, buffer pool, QPS, GCP infrastructure metrics |
-| `/incidents` | Incident window list (pre-formatted for `seeql replay`) |
+| `/dashboard` | Overview — health bar, active alerts, incidents timeline, top queries, live locks |
+| `/dashboard/queries` | Top queries + recent regressions, per-query detail pane |
+| `/dashboard/locks` | Current lock waits + historical contention patterns |
+| `/dashboard/schema` | DDL change feed + table sizes + index usage |
+| `/dashboard/server` | Threads, buffer pool, QPS, GCP infrastructure metrics |
+| `/dashboard/todo` | Action Center — emergency triage, diagnostics, query/index remediation |
+
+`GET /` redirects to `/dashboard`. There's no standalone incidents page —
+the incident window timeline renders as a widget on Overview; for the
+pre-formatted `seeql replay` list, use `seeql incidents list` on the CLI.
 
 ## Auto-refresh
 

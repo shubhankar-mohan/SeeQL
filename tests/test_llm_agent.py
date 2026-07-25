@@ -12,6 +12,15 @@ from unittest.mock import MagicMock, patch
 from agent import llm_agent
 
 
+def test_shipped_defaults_are_current():
+    """The config we ship must match what the README promises (agent is
+    opt-in) and what's actually deployable on Vertex AI today."""
+    import yaml
+    cfg = yaml.safe_load(open("config/settings.yaml"))
+    assert cfg["agent"]["enabled"] is False          # opt-in, as README promises
+    assert cfg["agent"]["model"] == "gemini-2.5-flash"  # 2.0-flash is retired on Vertex
+
+
 class TestDetectBackend:
     """Provider selection is model-name-driven; SeeQL supports only Claude
     (API + Vertex) and Gemini (Vertex)."""
@@ -37,10 +46,20 @@ class TestDetectBackend:
     def test_gemini_with_gcp_uses_vertex_gemini(self, monkeypatch):
         monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/tmp/fake.json")
         monkeypatch.setattr(llm_agent, "get_config", lambda: {"gcp": {"project_id": "p"}})
-        b = llm_agent._detect_backend({"model": "gemini-2.0-flash"})
+        b = llm_agent._detect_backend({"model": "gemini-2.5-flash"})
         assert b is not None
         assert b["type"] == "gemini"
-        assert b["model"] == "gemini-2.0-flash"
+        assert b["model"] == "gemini-2.5-flash"
+
+    def test_gcp_creds_via_adc(self, monkeypatch):
+        """Plain `gcloud auth application-default login` machines (no
+        GOOGLE_APPLICATION_CREDENTIALS env var) must still select a Vertex
+        backend when google-auth can resolve ADC."""
+        monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+        monkeypatch.setattr(llm_agent, "get_config", lambda: {"gcp": {"project_id": "x"}})
+        monkeypatch.setattr(llm_agent, "_adc_available", lambda: True)
+        b = llm_agent._detect_backend({"model": "gemini-2.5-flash"})
+        assert b is not None and b["type"] == "gemini"
 
     def test_unsupported_model_is_coerced_and_warns(self, monkeypatch, caplog):
         """An unsupported model (e.g. gpt-4o) is silently runnable today; make
@@ -63,7 +82,7 @@ class TestDetectBackend:
             b = llm_agent._detect_backend({"model": "gpt-4o"})
         assert b is not None
         assert b["type"] == "gemini"
-        assert b["model"] == "gemini-2.0-flash"
+        assert b["model"] == "gemini-2.5-flash"
         assert any("no matching backend" in r.message for r in caplog.records)
 
     def test_no_creds_returns_none(self, monkeypatch):
@@ -74,6 +93,25 @@ class TestDetectBackend:
             {"model": "claude-x", "anthropic_api_key": "${ANTHROPIC_API_KEY}"}
         )
         assert b is None
+
+    def test_placeholder_project_id_does_not_hijack_anthropic_via_adc(self, monkeypatch):
+        """The shipped `gcp.project_id: your-gcp-project-id` placeholder must not
+        count as a real project id. A user who opts into a claude-* model with
+        ANTHROPIC_API_KEY, leaves gcp.project_id untouched, and happens to run
+        on a machine with ambient gcloud ADC must still get the Anthropic API
+        backend — not vertex-claude with a bogus project id that fails at
+        runtime."""
+        monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+        monkeypatch.setattr(
+            llm_agent, "get_config",
+            lambda: {"gcp": {"project_id": "your-gcp-project-id"}},
+        )
+        monkeypatch.setattr(llm_agent, "_adc_available", lambda: True)
+        b = llm_agent._detect_backend(
+            {"model": "claude-opus-4-6", "anthropic_api_key": "sk-test"}
+        )
+        assert b is not None
+        assert b["type"] == "anthropic"
 
 
 class TestOpenAIBackend:
@@ -190,7 +228,7 @@ class TestGeminiResponseShapes:
         fake_client.models.generate_content.return_value = fake_response
         with patch("google.genai.Client", return_value=fake_client):
             return llm_agent._run_gemini_loop(
-                {"model": "gemini-2.0-flash", "project_id": "p", "region": "us-central1"},
+                {"model": "gemini-2.5-flash", "project_id": "p", "region": "us-central1"},
                 max_tokens=100,
                 max_rounds=3,
                 user_msg="hi",

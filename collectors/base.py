@@ -55,8 +55,13 @@ class BaseCollector(ABC):
         Collect metrics from a specific production database server.
 
         Args:
-            now: Current timestamp. Use this for snapshot_time so all
-                 metrics in one cycle share the same timestamp.
+            now: Timestamp captured at the start of this collector's own
+                 run() call; used for snapshot_time. Each collector stamps
+                 its own `now` independently — collectors in the same loop
+                 iteration do NOT share a single cycle timestamp. Do not
+                 rely on cross-collector snapshot_time equality to join
+                 rows from different snapshot tables; join on a time
+                 window instead.
             ctx: Server context identifying which MySQL server to query.
 
         Returns:

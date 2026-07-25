@@ -49,7 +49,7 @@ servers:
 # The backend is chosen from the model name, or force it with `provider`.
 # agent:
 #   enabled: true
-#   model: gemini-2.0-flash          # gemini-* | claude-* | gpt-*/o*
+#   model: gemini-2.5-flash          # gemini-* | claude-* | gpt-*/o*
 #   # provider: openai               # force: openai | anthropic | vertex-claude | gemini
 #
 #   # Claude via the Anthropic API:

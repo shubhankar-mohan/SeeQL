@@ -159,7 +159,7 @@ def _recent_ddl_impl(
                old_schema_hash, new_schema_hash, old_ddl, new_ddl
         FROM ddl_changes
         WHERE server_id = ?
-          AND detected_at >= datetime('now', ?)
+          AND datetime(REPLACE(detected_at,'T',' ')) >= datetime('now', ?)
         ORDER BY detected_at DESC
         LIMIT ?
     """

@@ -42,10 +42,8 @@ pytest tests/test_replay.py::TestReplay::test_timeline_only_when_no_llm -v
 pytest --cov=. --cov-report=term-missing
 ```
 
-The expected baseline is **79 passed, 11 skipped**. The 11 skipped are stale
-tests that target a pre-`ServerContext` collector API — see the skip reasons
-in `tests/test_collectors.py` and `tests/test_integration.py`. Rewriting those
-against the new interface is a standing follow-up.
+All tests are expected to pass — **394+ passed, 0 skipped** (as of
+0.2.0). Run `pytest -q` and check the summary line.
 
 ## Linting
 
@@ -79,8 +77,8 @@ ruff check .
 - `scheduler/runner.py` — APScheduler orchestration, graceful shutdown.
 - `main.py` — CLI entry point (argparse subparsers).
 
-For the full context read `CLAUDE.md`. For the execution plan read `PLAN.md`
-and `IMPLEMENTATION.md`.
+For more detail — diagrams and design rationale — read
+[`docs/architecture.md`](docs/architecture.md).
 
 ## Opening a PR
 
@@ -97,6 +95,8 @@ and `IMPLEMENTATION.md`.
 2. Move entries from `## [Unreleased]` into a new release section in
    `CHANGELOG.md`.
 3. Commit, tag `vX.Y.Z`, push tag.
-4. The `release.yml` GitHub Action will build the Docker image and publish
-   to `seeql/seeql:latest` and `seeql/seeql:X.Y.Z`. Required secrets:
-   `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`.
+4. The `docker-publish.yml` GitHub Action will build the Docker image and
+   publish to `shubhankarmohan/seeql:latest` and
+   `shubhankarmohan/seeql:X.Y.Z` (plus GHCR). Required secret:
+   `DOCKERHUB_TOKEN` (the Docker Hub username is hardcoded in the
+   workflow; GHCR publishing uses the built-in `GITHUB_TOKEN`).
