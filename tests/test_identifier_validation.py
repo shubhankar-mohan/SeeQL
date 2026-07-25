@@ -62,3 +62,24 @@ def test_get_table_schema_rejects_bad_name(monkeypatch):
 
     assert "error" in r
     assert called["flag"] is False
+
+
+def test_explain_query_rejects_bad_schema_name(monkeypatch):
+    # P2-5: explain_query.schema_name is LLM-supplied and gets interpolated
+    # into `USE `...`` -- must be validated before opening a prod connection,
+    # same as get_index_stats / get_table_schema / run_explain.
+    called = {"flag": False}
+
+    def _sentinel_get_prod_connection(*a, **k):
+        called["flag"] = True
+        raise AssertionError("must NOT hit prod for an invalid schema identifier")
+
+    monkeypatch.setattr(tools, "get_prod_connection", _sentinel_get_prod_connection)
+
+    r = tools._tool_explain_query({
+        "query": "SELECT 1",
+        "schema_name": "bad`name",
+    })
+
+    assert "error" in r
+    assert called["flag"] is False

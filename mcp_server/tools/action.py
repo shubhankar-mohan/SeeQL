@@ -161,10 +161,15 @@ def _explain_query_impl(
     from agent import tools as agent_tools
     sid = server or _default_server()
     agent_tools.set_current_server(sid)
-    payload = {"query": sql}
-    if schema:
-        payload["schema_name"] = schema
-    return agent_tools._tool_explain_query(payload)
+    try:
+        payload = {"query": sql}
+        if schema:
+            payload["schema_name"] = schema
+        return agent_tools._tool_explain_query(payload)
+    finally:
+        # Reset even on failure (P1-10) so a pooled/reused thread can't
+        # leak `sid` into whatever MCP call runs on it next.
+        agent_tools.set_current_server(None)
 
 
 def _enqueue(investigation_id: int) -> None:

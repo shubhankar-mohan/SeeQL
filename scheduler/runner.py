@@ -330,6 +330,36 @@ def _run_anomaly_pipeline(server_id: str):
         logger.debug(f"Incident baseline-resolution sweep failed for {server_id}: {e}")
 
 
+# Maps an incident's dominant anomaly metric (alerting.anomaly.METRIC_CONFIGS
+# key) to a tailored INCIDENT_TRIGGERS playbook (agent/prompts.py). A metric
+# with no tailored playbook here falls back to "default" (P3-3).
+_METRIC_TO_TRIGGER_TYPE = {
+    "threads_running": "threads_running_spike",
+    "cpu_utilization": "high_cpu",
+    "lock_frequency": "lock_cascade",
+}
+
+
+def _derive_trigger_type(incident_id: int) -> str:
+    """Pick the INCIDENT_TRIGGERS playbook for an incident from its dominant
+    (most-frequent) anomaly_events.metric_name (P3-3).
+
+    The 8 tailored playbooks in INCIDENT_TRIGGERS were dead code before this
+    — trigger_type was never passed from the scheduler, so every incident
+    analysis got the generic "default" instructions regardless of what
+    actually triggered it. Falls back to "default" when the metric has no
+    tailored playbook, the incident has no events yet, or the lookup itself
+    fails for any reason (never blocks the analysis from running).
+    """
+    try:
+        from alerting.incidents import get_dominant_metric
+        metric = get_dominant_metric(incident_id)
+    except Exception as e:
+        logger.debug(f"Could not derive trigger_type for incident {incident_id}: {e}")
+        return "default"
+    return _METRIC_TO_TRIGGER_TYPE.get(metric, "default")
+
+
 def _trigger_incident_analyses(server_id: str, incident_ids: list[int]):
     """Fire an LLM "incident" analysis for each newly-created incident window.
 
@@ -348,7 +378,11 @@ def _trigger_incident_analyses(server_id: str, incident_ids: list[int]):
     for incident_id in incident_ids:
         try:
             from agent.llm_agent import run_analysis
-            run_analysis("incident", server_id=server_id, incident_id=incident_id)
+            trigger_type = _derive_trigger_type(incident_id)
+            run_analysis(
+                "incident", trigger_type=trigger_type,
+                server_id=server_id, incident_id=incident_id,
+            )
         except Exception as e:
             logger.warning(
                 f"Incident analysis failed for incident {incident_id} on {server_id}: {e}"

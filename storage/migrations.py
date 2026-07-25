@@ -76,6 +76,41 @@ def migrate_add_server_id() -> int:
     return altered
 
 
+# agent_analyses telemetry columns added in P1-22 (model / tool_calls /
+# duration_ms). Column name -> SQLite type, guarded the same way as
+# migrate_add_server_id() above so re-running on an already-migrated DB is a
+# no-op (idempotent).
+_AGENT_ANALYSES_TELEMETRY_COLUMNS = {
+    "model": "TEXT",
+    "tool_calls": "INTEGER",
+    "duration_ms": "INTEGER",
+}
+
+
+def migrate_add_agent_telemetry_columns() -> int:
+    """Add model/tool_calls/duration_ms columns to agent_analyses (P1-22).
+
+    Returns the number of columns actually added (0 on a DB that already has
+    them, or that has no agent_analyses table yet — a fresh DB gets them
+    straight from schema.sql instead).
+    """
+    added = 0
+    with get_mon_connection() as conn:
+        if not _table_exists(conn, "agent_analyses"):
+            return 0
+        cols = _get_columns(conn, "agent_analyses")
+        for col, sqlite_type in _AGENT_ANALYSES_TELEMETRY_COLUMNS.items():
+            if col in cols:
+                continue
+            logger.info(f"Migration: adding {col} to agent_analyses")
+            conn.execute(f"ALTER TABLE agent_analyses ADD COLUMN {col} {sqlite_type}")
+            added += 1
+
+    if added:
+        logger.info(f"Migration complete: added {added} telemetry column(s) to agent_analyses")
+    return added
+
+
 def migrate_create_servers_table() -> bool:
     """Create the servers registry table if it doesn't exist."""
     with get_mon_connection() as conn:
@@ -116,4 +151,5 @@ def run_all_migrations():
     logger.info("Checking for pending migrations...")
     migrate_create_servers_table()
     migrate_add_server_id()
+    migrate_add_agent_telemetry_columns()
     logger.info("All migrations complete.")

@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import datetime, timezone
 
 from agent.state_builder import build_state_report
@@ -16,6 +17,7 @@ from agent.tools import TOOL_DEFINITIONS, execute_tool
 from agent.prompts import SYSTEM_PROMPT, ROUTINE_ANALYSIS_PROMPT, INCIDENT_ANALYSIS_PROMPT, INCIDENT_TRIGGERS
 from config import get_config
 from storage import writer
+from storage.connection import get_mon_reader
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +53,54 @@ OPENAI_TOOL_DEFINITIONS = [
 ]
 
 
+def build_system_prompt(server_id: str | None = None) -> str:
+    """Format SYSTEM_PROMPT with the real MySQL version + hosting platform
+    for `server_id` (P3-2).
+
+    The prompt used to hardcode "a production MySQL 8.0.43 database on GCP
+    Cloud SQL" regardless of which server was actually being analyzed —
+    wrong context for a self-hosted server, a different major version, or a
+    non-GCP deployment.
+
+    mysql_version: the latest `global_variable_snapshots` row for
+    variable_name='version', scoped to server_id. Falls back to "8.0+" when
+    no snapshot exists yet (e.g. before the first slow-loop cycle) or the
+    monitoring DB isn't reachable.
+    platform: "a managed Cloud SQL instance" when `gcp.project_id` is
+    configured (and isn't the settings.yaml placeholder "your-..."), else
+    "a MySQL server (managed or self-hosted)".
+
+    Never raises: any lookup failure here (missing table on an old DB,
+    unconfigured monitoring DB, ...) falls back to a safe default so a cold
+    start or a misconfigured server never blocks an analysis.
+    """
+    version = "8.0+"
+    try:
+        with get_mon_reader() as conn:
+            row = conn.execute(
+                "SELECT variable_value FROM global_variable_snapshots "
+                "WHERE variable_name = 'version' AND server_id = ? "
+                "ORDER BY snapshot_time DESC LIMIT 1",
+                (server_id or "default",),
+            ).fetchone()
+            if row and row["variable_value"]:
+                version = row["variable_value"]
+    except Exception as e:
+        logger.debug(f"Could not read MySQL version for system prompt: {e}")
+
+    try:
+        project_id = (get_config().get("gcp", {}).get("project_id") or "").strip()
+    except Exception:
+        project_id = ""
+    platform = (
+        "a managed Cloud SQL instance"
+        if project_id and not project_id.startswith("your-")
+        else "a MySQL server (managed or self-hosted)"
+    )
+
+    return SYSTEM_PROMPT.format(mysql_version=version, platform=platform)
+
+
 def run_analysis(analysis_type: str = "routine", trigger_type: str | None = None,
                   server_id: str | None = None, incident_id: int | None = None) -> dict | None:
     """
@@ -66,7 +116,10 @@ def run_analysis(analysis_type: str = "routine", trigger_type: str | None = None
                       Used by the scheduler to close the incident -> analysis loop.
 
     Returns:
-        Analysis result dict, or None if skipped.
+        - Analysis result dict on success (includes `"stored"`/`"truncated"`).
+        - None if skipped (agent disabled, no backend configured, or quiet state).
+        - `{"status": "error", "error": <str>}` if the LLM loop raised (P1-6) —
+          distinguishable from a quiet skip so the API route can 502 honestly.
     """
     config = get_config().get("agent", {})
     if not config.get("enabled", False):
@@ -81,59 +134,87 @@ def run_analysis(analysis_type: str = "routine", trigger_type: str | None = None
     # Set the current server for live tools
     from agent.tools import set_current_server
     set_current_server(server_id)
-
-    max_tokens = config.get("max_tokens", 8192)
-    max_tool_rounds = config.get("max_tool_rounds", 15)
-
-    # Build the state report for this server
-    report = build_state_report(server_id=server_id)
-    state_md = report.to_markdown()
-
-    # Skip quiet periods if configured (only for routine, never for incidents)
-    if analysis_type == "routine" and config.get("skip_quiet", True) and _is_quiet(report):
-        logger.info("State is quiet, skipping analysis")
-        set_current_server(None)
-        return None
-
-    # Select prompt template
-    if analysis_type == "incident":
-        tt = trigger_type or "default"
-        instructions = INCIDENT_TRIGGERS.get(tt, INCIDENT_TRIGGERS["default"])
-        user_msg = INCIDENT_ANALYSIS_PROMPT.format(
-            trigger_type=tt.replace("_", " ").title(),
-            trigger_instructions=instructions,
-            state_report=state_md,
-        )
-    else:
-        user_msg = ROUTINE_ANALYSIS_PROMPT.format(state_report=state_md)
-
-    # Determine backend: Gemini (Vertex AI) or Claude (Anthropic)
-    backend = _detect_backend(config)
-    if backend is None:
-        set_current_server(None)
-        return None
-
-    logger.info(f"Running {analysis_type} analysis with {backend['type']} ({backend['model']})")
-
     try:
-        if backend["type"] == "gemini":
-            result = _run_gemini_loop(backend, max_tokens, max_tool_rounds, user_msg)
-        elif backend["type"] == "vertex-claude":
-            result = _run_vertex_claude_loop(backend, max_tokens, max_tool_rounds, user_msg)
-        elif backend["type"] == "openai":
-            result = _run_openai_loop(backend, max_tokens, max_tool_rounds, user_msg)
+        max_tokens = config.get("max_tokens", 8192)
+        max_tool_rounds = config.get("max_tool_rounds", 15)
+
+        # Build the state report for this server
+        report = build_state_report(server_id=server_id)
+        state_md = report.to_markdown()
+
+        # Skip quiet periods if configured (only for routine, never for incidents)
+        if analysis_type == "routine" and config.get("skip_quiet", True) and _is_quiet(report):
+            logger.info("State is quiet, skipping analysis")
+            return None
+
+        # Select prompt template
+        if analysis_type == "incident":
+            tt = trigger_type or "default"
+            instructions = INCIDENT_TRIGGERS.get(tt, INCIDENT_TRIGGERS["default"])
+            user_msg = INCIDENT_ANALYSIS_PROMPT.format(
+                trigger_type=tt.replace("_", " ").title(),
+                trigger_instructions=instructions,
+                state_report=state_md,
+            )
         else:
-            result = _run_anthropic_loop(backend, max_tokens, max_tool_rounds, user_msg)
-    except Exception as e:
-        logger.error(f"Agent analysis failed: {e}")
-        return None
+            user_msg = ROUTINE_ANALYSIS_PROMPT.format(state_report=state_md)
+
+        # Determine backend: Gemini (Vertex AI) or Claude (Anthropic)
+        backend = _detect_backend(config)
+        if backend is None:
+            return None
+
+        # Per-server system prompt (P3-2): real MySQL version + platform for
+        # this server_id, instead of the hardcoded constant.
+        system_prompt = build_system_prompt(server_id)
+
+        logger.info(f"Running {analysis_type} analysis with {backend['type']} ({backend['model']})")
+
+        start_time = time.time()
+        try:
+            if backend["type"] == "gemini":
+                result, truncated, tool_calls = _run_gemini_loop(
+                    backend, max_tokens, max_tool_rounds, user_msg, system_prompt
+                )
+            elif backend["type"] == "vertex-claude":
+                result, truncated, tool_calls = _run_vertex_claude_loop(
+                    backend, max_tokens, max_tool_rounds, user_msg, system_prompt
+                )
+            elif backend["type"] == "openai":
+                result, truncated, tool_calls = _run_openai_loop(
+                    backend, max_tokens, max_tool_rounds, user_msg, system_prompt
+                )
+            else:
+                result, truncated, tool_calls = _run_anthropic_loop(
+                    backend, max_tokens, max_tool_rounds, user_msg, system_prompt
+                )
+        except Exception as e:
+            # Honest failure (P1-6): a loop exception (e.g. a non-retryable LLM
+            # API error, or a retryable one that never recovered) used to be
+            # swallowed into the same `None` a caller also gets for "agent
+            # disabled" / "quiet state" — the API route then reported a real
+            # failure as "skipped". Return a distinguishable error shape so the
+            # route can respond honestly (502) instead.
+            logger.error(f"Agent analysis failed: {e}")
+            return {"status": "error", "error": str(e)}
+        duration_ms = int((time.time() - start_time) * 1000)
     finally:
-        # Symmetric with run_llm_analysis: reset the target-server ContextVar so
-        # a pooled worker thread can't leak it into a later call.
+        # Reset the target-server ContextVar so a pooled worker thread can't
+        # leak it into a later call (P1-10). This now covers the WHOLE
+        # region from state-report building through backend detection and
+        # the LLM loop -- previously the finally only wrapped the loop
+        # itself, so an exception raised while building the state report
+        # (e.g. a bad snapshot query) skipped the reset entirely and left
+        # this worker thread's ContextVar pointed at `server_id` for
+        # whatever job APScheduler runs next on it.
         set_current_server(None)
 
     # Parse and store the result
-    analysis = _parse_and_store(result, analysis_type, state_md, server_id, incident_id=incident_id)
+    analysis = _parse_and_store(
+        result, analysis_type, state_md, server_id, incident_id=incident_id,
+        truncated=truncated, model=backend["model"], tool_calls=tool_calls,
+        duration_ms=duration_ms,
+    )
     return analysis
 
 
@@ -226,6 +307,16 @@ def _detect_backend(config: dict) -> dict | None:
     if _looks_like_openai(model) and (openai_key or openai_base_url):
         return _openai()
     if model.startswith("claude"):
+        if anthropic_key and has_gcp_creds:
+            # Both are configured (P1-28): prefer the Anthropic API — an
+            # explicit key is a deliberate choice, whereas GCP credentials
+            # may just be ambiently present (e.g. for the gemini fallback
+            # path or other GCP services) rather than intended for Claude.
+            logger.info(
+                "claude-* model has both GCP credentials and ANTHROPIC_API_KEY "
+                "configured; preferring the Anthropic API (explicit key) over Vertex AI."
+            )
+            return _anthropic()
         if has_gcp_creds:
             return _vertex_claude()
         if anthropic_key:
@@ -260,8 +351,78 @@ def _missing(what: str) -> None:
     return None
 
 
-def _run_gemini_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: str) -> str:
-    """Run tool-use loop with Gemini via Vertex AI."""
+# repr(exception) substrings (matched case-insensitively) that indicate a
+# transient provider error worth retrying: rate limits (429), overload
+# (529 / "overloaded"), general rate-limit wording, upstream unavailability,
+# and request timeouts. Anything else (auth, bad request, schema errors) is
+# not retried.
+# "rate" alone used to be a marker here, but it false-matched non-retryable
+# errors mentioning "temperature", "generate", "moderate", "separate", etc.,
+# wasting a ~10s backoff sleep on an error that was never going to succeed on
+# retry (PR-4 review) — narrowed to the actual rate-limit phrasings.
+_RETRYABLE_ERROR_MARKERS = (
+    "429", "529", "overloaded", "rate limit", "rate_limit", "unavailable", "timeout",
+)
+
+# Backoff between attempts: 2s after the 1st failure, 8s after the 2nd, ...
+# (the last configured delay repeats if `attempts` is raised beyond this).
+_RETRY_BACKOFF_SECONDS = (2, 8)
+
+
+def _create_with_retry(fn, *, attempts: int = 3):
+    """Call `fn()`, retrying on transient LLM provider errors (P1-6).
+
+    A single 429/529/overload used to discard every tool round already
+    completed in the loop, and `run_analysis` had no way to tell that
+    failure apart from "agent disabled" / "quiet state" (both return None).
+    This wraps every provider `create()` call so a transient blip doesn't
+    throw away completed work.
+
+    Retries (up to `attempts` total calls) when `repr(exception)` contains
+    one of `_RETRYABLE_ERROR_MARKERS`, sleeping `_RETRY_BACKOFF_SECONDS`
+    between attempts. A non-retryable error re-raises immediately without
+    sleeping; a retryable error still re-raises once `attempts` is
+    exhausted, so the caller can report an honest failure.
+    """
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except Exception as e:
+            retryable = any(marker in repr(e).lower() for marker in _RETRYABLE_ERROR_MARKERS)
+            if not retryable or attempt == attempts - 1:
+                raise
+            delay = _RETRY_BACKOFF_SECONDS[min(attempt, len(_RETRY_BACKOFF_SECONDS) - 1)]
+            logger.warning(
+                "Retryable LLM provider error (attempt %d/%d): %r — retrying in %ss",
+                attempt + 1, attempts, e, delay,
+            )
+            time.sleep(delay)
+
+
+# Appended as a final user turn when a loop exhausts max_rounds while the
+# model is still calling tools (P1-5), with tool-calling disabled for that
+# one call so the model is forced to summarize instead of asking for more.
+_FINALIZE_NUDGE = (
+    "Tool budget exhausted. Produce your final structured analysis now from "
+    "the evidence gathered. Do not call tools."
+)
+
+
+def _run_gemini_loop(backend: dict, max_tokens: int, max_rounds: int,
+                      user_msg: str, system_prompt: str = SYSTEM_PROMPT) -> tuple[str, bool, int]:
+    """Run tool-use loop with Gemini via Vertex AI.
+
+    Returns (final_text, truncated, total_tool_calls) — `truncated` is True
+    if ANY response during the loop (a tool-calling round or the max-rounds
+    finalize call) was cut off at MAX_TOKENS (P1-13); the flag is monotonic,
+    so a mid-stream truncation stays flagged even if a later round completes
+    cleanly. `total_tool_calls` is the count of tool calls executed across
+    the whole loop (P1-22 telemetry).
+
+    `system_prompt` defaults to the bare SYSTEM_PROMPT constant so direct
+    callers/tests don't have to supply one; `run_analysis`/`run_llm_analysis`
+    pass the per-server prompt built by `build_system_prompt` (P3-2).
+    """
     from google import genai
     from google.genai import types
 
@@ -279,20 +440,42 @@ def _run_gemini_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: 
     # System instruction + initial message
     contents = [types.Content(role="user", parts=[types.Part.from_text(text=user_msg)])]
 
+    def _response_text(response) -> str:
+        """Concatenated text parts, tolerating empty/None candidates or parts
+        (safety blocks, MAX_TOKENS with no emitted content)."""
+        candidates = response.candidates or []
+        if not candidates:
+            return ""
+        candidate_content = candidates[0].content
+        parts = (candidate_content.parts if candidate_content else None) or []
+        return "\n".join(part.text for part in parts if part.text)
+
+    def _response_truncated(response) -> bool:
+        candidates = response.candidates or []
+        if not candidates:
+            return False
+        finish_reason = getattr(candidates[0], "finish_reason", None)
+        return "MAX_TOKENS" in str(finish_reason or "").upper()
+
     final_text = ""
+    truncated = False
     total_tool_calls = 0
     for round_num in range(max_rounds):
         logger.info(f"  Agent round {round_num + 1}/{max_rounds}")
-        response = client.models.generate_content(
+        response = _create_with_retry(lambda: client.models.generate_content(
             model=backend["model"],
             contents=contents,
             config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
+                system_instruction=system_prompt,
                 tools=[tools],
                 max_output_tokens=max_tokens,
                 temperature=0,
             ),
-        )
+        ))
+
+        if _response_truncated(response):
+            logger.warning("  Gemini response truncated (finish_reason=MAX_TOKENS)")
+            truncated = True
 
         # Gemini can return no candidates (safety/recitation block, or
         # MAX_TOKENS with no emitted content), and a candidate's `parts` can be
@@ -336,18 +519,54 @@ def _run_gemini_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: 
             logger.info(f"  Tool call [{total_tool_calls + 1}]: {name}({json.dumps(args)[:200]})")
             result = execute_tool(name, args)
             total_tool_calls += 1
-            tool_response_parts.append(
-                types.Part.from_function_response(name=name, response={"result": result})
-            )
+            # execute_tool() returns a JSON string (see agent/tools.py); hand
+            # Gemini the PARSED object instead of a JSON-string-within-a-
+            # string, which forced the model to re-parse a serialized blob
+            # on every tool result (P1-24). Falls back to the raw string for
+            # the rare handler that doesn't return valid JSON.
+            try:
+                parsed_result = json.loads(result)
+            except (TypeError, json.JSONDecodeError):
+                parsed_result = result
+            # Key parallel same-turn tool responses by id, not just name, so
+            # two calls to the same tool in one turn can't get crossed
+            # results (P1-12). `from_function_response()` in the installed
+            # google-genai SDK has no `id` kwarg, so build the FunctionResponse
+            # directly; `id=None` (no id on the call) serializes the same as
+            # the classmethod, so this one path covers both cases.
+            tool_response_parts.append(types.Part(function_response=types.FunctionResponse(
+                id=getattr(fc, "id", None), name=name, response={"result": parsed_result},
+            )))
 
         contents.append(types.Content(role="user", parts=tool_response_parts))
     else:
+        # Max rounds reached and the model was still calling tools (P1-5):
+        # make one final call with tools disabled so the model summarizes
+        # whatever evidence it already gathered, instead of storing "" or
+        # stale text left over from an earlier round.
         logger.warning(f"  Agent hit max rounds ({max_rounds}) with {total_tool_calls} tool calls")
+        contents.append(
+            types.Content(role="user", parts=[types.Part.from_text(text=_FINALIZE_NUDGE)])
+        )
+        finalize_response = _create_with_retry(lambda: client.models.generate_content(
+            model=backend["model"],
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                max_output_tokens=max_tokens,
+                temperature=0,
+            ),
+        ))
+        if _response_truncated(finalize_response):
+            logger.warning("  Gemini finalize response truncated (finish_reason=MAX_TOKENS)")
+            truncated = True
+        final_text = _response_text(finalize_response)
 
-    return final_text
+    return final_text, truncated, total_tool_calls
 
 
-def _run_vertex_claude_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: str) -> str:
+def _run_vertex_claude_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: str,
+                             system_prompt: str = SYSTEM_PROMPT) -> tuple[str, bool, int]:
     """Run tool-use loop with Claude via Vertex AI (GCP credentials)."""
     try:
         from anthropic import AnthropicVertex
@@ -364,22 +583,41 @@ def _run_vertex_claude_loop(backend: dict, max_tokens: int, max_rounds: int, use
         project_id=backend["project_id"],
         region=backend["region"],
     )
-    return _run_claude_loop(client, backend["model"], max_tokens, max_rounds, user_msg)
+    return _run_claude_loop(client, backend["model"], max_tokens, max_rounds, user_msg, system_prompt)
 
 
-def _run_anthropic_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: str) -> str:
+def _run_anthropic_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: str,
+                         system_prompt: str = SYSTEM_PROMPT) -> tuple[str, bool, int]:
     """Run tool-use loop with Claude via Anthropic API."""
     import anthropic
     client = anthropic.Anthropic(api_key=backend["api_key"])
-    return _run_claude_loop(client, backend["model"], max_tokens, max_rounds, user_msg)
+    return _run_claude_loop(client, backend["model"], max_tokens, max_rounds, user_msg, system_prompt)
 
 
-def _run_openai_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: str) -> str:
+def _openai_token_kwargs(model: str, max_tokens: int) -> dict:
+    """Token/sampling kwargs for chat.completions.create() (P1-11).
+
+    o-series reasoning models (o1/o3/o4/...) reject `max_tokens` and
+    `temperature` outright (400) — they take `max_completion_tokens` instead
+    and have no sampling temperature to set.
+    """
+    if re.match(r"^o\d", model):
+        return {"max_completion_tokens": max_tokens}
+    return {"max_tokens": max_tokens, "temperature": 0}
+
+
+def _run_openai_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: str,
+                      system_prompt: str = SYSTEM_PROMPT) -> tuple[str, bool, int]:
     """Tool-use loop for OpenAI and any OpenAI-compatible endpoint.
 
     A `base_url` in the backend points the OpenAI SDK at a compatible server
     (Azure OpenAI, Ollama, vLLM, Groq, OpenRouter, LM Studio, …), so this single
     loop covers "OpenAI" and "bring your own / any other LLM".
+
+    Returns (final_text, truncated, total_tool_calls) — see _run_gemini_loop
+    for the shared contract (P1-13 truncated, P1-22 total_tool_calls).
+    `system_prompt` defaults to the bare SYSTEM_PROMPT constant; the real
+    callers pass the per-server prompt from `build_system_prompt` (P3-2).
     """
     try:
         from openai import OpenAI
@@ -401,27 +639,34 @@ def _run_openai_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: 
     if base_url:
         client_kwargs["base_url"] = base_url
     client = OpenAI(**client_kwargs)
+    model = backend["model"]
+    # Invariant for the whole call — derive once (o-series vs. standard token
+    # params, P1-11) rather than per round + on the finalize call.
+    token_kwargs = _openai_token_kwargs(model, max_tokens)
 
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_msg},
     ]
     final_text = ""
+    truncated = False
     total_tool_calls = 0
 
     for round_num in range(max_rounds):
         logger.info(f"  Agent round {round_num + 1}/{max_rounds}")
-        response = client.chat.completions.create(
-            model=backend["model"],
-            max_tokens=max_tokens,
+        response = _create_with_retry(lambda: client.chat.completions.create(
+            model=model,
             tools=OPENAI_TOOL_DEFINITIONS,
             messages=messages,
-            temperature=0,
-        )
+            **token_kwargs,
+        ))
         choices = response.choices or []
         if not choices:
             logger.warning("OpenAI-compatible endpoint returned no choices; ending tool loop")
             break
+        if getattr(choices[0], "finish_reason", None) == "length":
+            logger.warning("  OpenAI response truncated (finish_reason=length)")
+            truncated = True
         msg = choices[0].message
         if msg.content:
             final_text = msg.content
@@ -458,27 +703,61 @@ def _run_openai_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: 
                 "content": result if isinstance(result, str) else json.dumps(result),
             })
     else:
+        # Max rounds reached and the model was still calling tools (P1-5):
+        # make one final call with tools omitted so the model summarizes
+        # whatever evidence it already gathered, instead of storing "" or
+        # stale text left over from an earlier round.
         logger.warning(f"  Agent hit max rounds ({max_rounds}) with {total_tool_calls} tool calls")
+        messages.append({"role": "user", "content": _FINALIZE_NUDGE})
+        finalize_response = _create_with_retry(lambda: client.chat.completions.create(
+            model=model,
+            messages=messages,
+            **token_kwargs,
+        ))
+        choices = finalize_response.choices or []
+        if choices:
+            if getattr(choices[0], "finish_reason", None) == "length":
+                logger.warning("  OpenAI finalize response truncated (finish_reason=length)")
+                truncated = True
+            final_text = choices[0].message.content or ""
+        else:
+            final_text = ""
 
-    return final_text
+    return final_text, truncated, total_tool_calls
 
 
-def _run_claude_loop(client, model: str, max_tokens: int, max_rounds: int, user_msg: str) -> str:
-    """Shared tool-use loop for any Claude client (API or Vertex)."""
+def _run_claude_loop(client, model: str, max_tokens: int, max_rounds: int, user_msg: str,
+                      system_prompt: str = SYSTEM_PROMPT) -> tuple[str, bool, int]:
+    """Shared tool-use loop for any Claude client (API or Vertex).
+
+    Returns (final_text, truncated, total_tool_calls) — `truncated` is True
+    if ANY response during the loop (a tool-calling round or the max-rounds
+    finalize call) ended on stop_reason "max_tokens" (P1-13); the flag is
+    monotonic, so a mid-stream truncation stays flagged even if a later
+    round completes cleanly. `total_tool_calls` is the count of tool calls
+    executed across the whole loop (P1-22 telemetry). `system_prompt`
+    defaults to the bare SYSTEM_PROMPT constant; the real callers pass the
+    per-server prompt from `build_system_prompt` (P3-2).
+    """
     messages = [{"role": "user", "content": user_msg}]
     final_text = ""
+    truncated = False
     total_tool_calls = 0
 
     for round_num in range(max_rounds):
         logger.info(f"  Agent round {round_num + 1}/{max_rounds}")
-        response = client.messages.create(
+        response = _create_with_retry(lambda: client.messages.create(
             model=model,
             max_tokens=max_tokens,
-            system=SYSTEM_PROMPT,
+            system=system_prompt,
             tools=TOOL_DEFINITIONS,
             messages=messages,
             temperature=0,
-        )
+        ))
+
+        if response.stop_reason == "max_tokens":
+            logger.warning("  Claude response truncated (stop_reason=max_tokens)")
+            truncated = True
 
         text_parts = []
         tool_uses = []
@@ -502,17 +781,43 @@ def _run_claude_loop(client, model: str, max_tokens: int, max_rounds: int, user_
             logger.info(f"  Tool call [{total_tool_calls + 1}]: {tool_use.name}({json.dumps(tool_use.input)[:200]})")
             result = execute_tool(tool_use.name, tool_use.input)
             total_tool_calls += 1
-            tool_results.append({
+            tool_result = {
                 "type": "tool_result",
                 "tool_use_id": tool_use.id,
                 "content": result,
-            })
+            }
+            # Flag tool-level errors so Claude treats them as failed calls
+            # rather than legitimate data (P1-26). execute_tool() always
+            # serializes errors as `{"error": ...}` (see agent/tools.py).
+            if isinstance(result, str) and result.startswith('{"error'):
+                tool_result["is_error"] = True
+            tool_results.append(tool_result)
 
         messages.append({"role": "user", "content": tool_results})
     else:
+        # Max rounds reached and the model was still calling tools (P1-5):
+        # make one final call with tool use disabled so the model summarizes
+        # whatever evidence it already gathered, instead of storing "" or
+        # stale text left over from an earlier round.
         logger.warning(f"  Agent hit max rounds ({max_rounds}) with {total_tool_calls} tool calls")
+        messages.append({"role": "user", "content": _FINALIZE_NUDGE})
+        finalize_response = _create_with_retry(lambda: client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            system=system_prompt,
+            tools=TOOL_DEFINITIONS,
+            tool_choice={"type": "none"},
+            messages=messages,
+            temperature=0,
+        ))
+        if finalize_response.stop_reason == "max_tokens":
+            logger.warning("  Claude finalize response truncated (stop_reason=max_tokens)")
+            truncated = True
+        final_text = "\n".join(
+            block.text for block in finalize_response.content if block.type == "text"
+        )
 
-    return final_text
+    return final_text, truncated, total_tool_calls
 
 
 def _is_quiet(report) -> bool:
@@ -522,6 +827,12 @@ def _is_quiet(report) -> bool:
 
     # Not quiet if there are regressions, DDL changes, deadlocks, or locks
     if changes.get("regressions"):
+        return False
+    if changes.get("new_queries"):
+        # A brand-new (never-before-seen) heavy query fingerprint deserves a
+        # look even if nothing else in the state report looks alarming yet —
+        # skipping it here meant a new query could run unreviewed for a full
+        # skip-quiet cycle before anything noticed it (P1-27).
         return False
     if changes.get("ddl_changes"):
         return False
@@ -537,42 +848,103 @@ def _is_quiet(report) -> bool:
     return True
 
 
+def _resolve_addressed_incident(
+    incident_id: int | None, self_reported: int | None,
+    analysis_type: str, source_text: str,
+) -> int | None:
+    """Decide which incident (if any) an analysis should link to (P1-4).
+
+    An explicit `incident_id` — the caller (scheduler/replay) driving this
+    analysis *at* a specific incident — is authoritative and is never gated.
+
+    A model's self-reported `### Addresses incident #N` is a different
+    thing: a blind "routine" run has no incident in its prompt at all, so an
+    unprompted self-report there is far more likely to be hallucinated than
+    real — it's honored only when the id genuinely appears in the text the
+    model was shown. Non-routine runs (incident/investigation/replay) are
+    already triggered with real incident context, so their self-report is
+    trusted outright.
+    """
+    if incident_id is not None:
+        return incident_id
+    if self_reported is None:
+        return None
+    if analysis_type != "routine" or re.search(rf"#{self_reported}\b", source_text or ""):
+        return self_reported
+    logger.warning(
+        f"Ignoring self-reported '### Addresses incident #{self_reported}' from a "
+        f"{analysis_type} analysis — id not present in the text the model was shown"
+    )
+    return None
+
+
+def _build_outcome_notes(confidence: float | None, truncated: bool) -> str | None:
+    """Serialize the extra per-analysis signals stashed in `outcome_notes`.
+
+    There are no dedicated `confidence`/`truncated` columns on
+    agent_analyses, so both are stored as JSON in `outcome_notes` rather than
+    a schema migration. Shared by `_parse_and_store` and `run_llm_analysis`
+    (P1-18: those two store paths are near-twins that have drifted before)
+    so a future signal added here can't silently land in only one of them.
+    Returns None when there's nothing to record (keeps the column NULL).
+    """
+    outcome = {}
+    if confidence is not None:
+        outcome["confidence"] = confidence
+    if truncated:
+        outcome["truncated"] = True
+    return json.dumps(outcome) if outcome else None
+
+
 def _parse_and_store(text: str, analysis_type: str, input_summary: str,
-                     server_id: str = "default", incident_id: int | None = None) -> dict:
+                     server_id: str = "default", incident_id: int | None = None,
+                     truncated: bool = False, model: str | None = None,
+                     tool_calls: int | None = None,
+                     duration_ms: int | None = None) -> dict:
     """Parse agent response and store in agent_analyses table.
 
     If `incident_id` is given (or the response self-reports one via
-    `### Addresses incident #N`), the newly-stored analysis is linked back to
-    that `incident_windows` row via `alerting.incidents.set_incident_analysis`
-    — best-effort, never raises.
+    `### Addresses incident #N` and that self-report passes
+    `_resolve_addressed_incident`'s gate — P1-4), the newly-stored analysis
+    is linked to that `incident_windows` row in the same transaction as the
+    insert via `storage.writer.write_agent_analysis_and_link` (P1-21) —
+    best-effort, never raises. The link itself never resurrects a
+    resolved/closed incident and never crosses server_id.
+
+    If the response has no usable text after parsing (max-rounds exhaustion
+    that never produced a finalize answer, or a Gemini safety block — P1-5),
+    nothing is written and no incident is linked: the caller gets back
+    `{"stored": False, ...}` and any incident is left `detected` so it can
+    be retried, instead of being silently marked "analyzed" forever with an
+    empty analysis attached.
     """
-    # Strip code fences — Gemini sometimes wraps its output in ```markdown blocks
-    cleaned = re.sub(r'^```(?:markdown)?\s*\n?', '', text, flags=re.MULTILINE)
-    cleaned = re.sub(r'\n?```\s*$', '', cleaned, flags=re.MULTILINE)
-    cleaned = cleaned.strip()
+    # One shared parser for severity/sections/confidence/addresses (P1-18) —
+    # see `parse_agent_response` below for the tolerant-form fixes (P1-2,
+    # P1-3, P1-19, P3-5, P3-9).
+    parsed = parse_agent_response(text)
+    if not parsed["cleaned"]:
+        logger.error(
+            f"Agent response for {analysis_type} analysis was empty after parsing "
+            "(max-rounds exhaustion or safety block) — not storing, not linking any incident"
+        )
+        return {
+            "stored": False,
+            "id": None,
+            "severity": None,
+            "findings": None,
+            "recommendations": None,
+            "confidence": None,
+            "truncated": truncated,
+            "raw_response": text,
+        }
 
-    # Extract severity — only match the header line, not mentions in body text.
-    severity = "info"
-    sev_match = re.search(
-        r'^#{2,3}\s*Severity:\s*(critical|warning|info)',
-        cleaned, re.IGNORECASE | re.MULTILINE,
+    severity = parsed["severity"]
+    findings = parsed["findings"]
+    recommendations = parsed["recommendations"]
+    confidence = parsed["confidence"]
+    addressed_incident = _resolve_addressed_incident(
+        incident_id, parsed["addresses_incident"], analysis_type, input_summary
     )
-    if sev_match:
-        severity = sev_match.group(1).lower()
-
-    # Extract findings and recommendations sections (case-insensitive, flexible markdown)
-    findings = _extract_section(cleaned, "findings", "recommendations")
-    recommendations = _extract_section(cleaned, "recommendations", None)
-
-    # If both are empty, store the full response so nothing is lost
-    if not findings and not recommendations:
-        findings = cleaned
-        logger.warning("Could not parse sections from agent response, storing full text as findings")
-
-    confidence = _extract_confidence(cleaned)
-    # An explicit incident_id (scheduler-driven) wins over anything the model
-    # self-reports; otherwise fall back to what the model claims to address.
-    addressed_incident = incident_id if incident_id is not None else _extract_addresses_incident(cleaned)
 
     analysis = {
         "analyzed_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
@@ -583,29 +955,30 @@ def _parse_and_store(text: str, analysis_type: str, input_summary: str,
         "findings": json.dumps(findings),
         "recommendations": json.dumps(recommendations),
         "applied": 0,
-        # No dedicated `confidence` column on agent_analyses — stash it in
-        # outcome_notes as JSON rather than a schema migration.
-        "outcome_notes": json.dumps({"confidence": confidence}) if confidence is not None else None,
+        "outcome_notes": _build_outcome_notes(confidence, truncated),
+        "model": model,
+        "tool_calls": tool_calls,
+        "duration_ms": duration_ms,
     }
 
     analysis_id = None
     try:
-        analysis_id = writer.write_agent_analysis_one(analysis)
+        analysis_id, linked = writer.write_agent_analysis_and_link(
+            analysis, addressed_incident, server_id
+        )
         logger.info(f"Stored {analysis_type} analysis (severity={severity})")
+        if addressed_incident is not None and not linked:
+            logger.info(
+                f"Analysis {analysis_id} not linked to incident {addressed_incident} "
+                "(incident is not open on this server)"
+            )
     except Exception as e:
-        logger.error(f"Failed to store analysis: {e}")
+        logger.error(f"Failed to store/link analysis: {e}")
 
     analysis["id"] = analysis_id
     analysis["raw_response"] = text
-
-    if addressed_incident is not None and analysis_id is not None:
-        try:
-            from alerting.incidents import set_incident_analysis
-            set_incident_analysis(addressed_incident, analysis_id, status="analyzed")
-        except Exception as e:
-            logger.warning(
-                f"Failed to link analysis {analysis_id} to incident {addressed_incident}: {e}"
-            )
+    analysis["stored"] = analysis_id is not None
+    analysis["truncated"] = truncated
 
     return analysis
 
@@ -613,20 +986,79 @@ def _parse_and_store(text: str, analysis_type: str, input_summary: str,
 # Parser contract for the confidence + incident-linkage headers (P1.3 / E(a)):
 #   ### Confidence: 0.82 — strong evidence
 #   ### Addresses incident #7
-_CONFIDENCE_RE = re.compile(r'^#{2,3}\s*Confidence:\s*([01](?:\.\d+)?)', re.IGNORECASE | re.MULTILINE)
-_ADDRESSES_RE = re.compile(r'^#{2,3}\s*Addresses\s+incident\s*#?(\d+)', re.IGNORECASE | re.MULTILINE)
+#
+# Tolerant forms (parser correctness batch, Task 4.2 — P1-2 / P1-19): the
+# severity regex used to be `^#{2,3}\s*Severity:` — stricter than everything
+# else in this file — so `**Severity:** critical` (bold), `#### Severity:`
+# (4+ hashes), and looser punctuation between label and value all silently
+# defaulted to "info", defeating every downstream severity filter.
+# Confidence used to reject a leading-dot decimal (".85") and never clamped
+# values above 1. Addresses used to reject a colon before the "#"
+# ("incident: #7").
+_SEV_RE = re.compile(
+    r'^\s*(?:#{1,6}\s*|\*\*)\s*Severity\s*[:*\s-]+\s*(critical|warning|info)',
+    re.IGNORECASE | re.MULTILINE,
+)
+_CONF_RE = re.compile(
+    r'^\s*(?:#{1,6}\s*|\*\*|-\s*\*\*)\s*Confidence\s*[:*]*\s*[:\s]\s*(\d?\.\d+|[01])',
+    re.IGNORECASE | re.MULTILINE,
+)
+_ADDR_RE = re.compile(
+    r'^\s*(?:#{1,6}\s*|\*\*)\s*Addresses\s+incident\s*[:#]*\s*#?(\d+)',
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 def _extract_confidence(text: str) -> float | None:
-    """Parse the `### Confidence: 0.xx` header line, if present."""
-    m = _CONFIDENCE_RE.search(text or "")
-    return float(m.group(1)) if m else None
+    """Parse the `### Confidence: 0.xx` header line, if present (tolerant
+    forms + clamped to [0, 1] — P1-19)."""
+    m = _CONF_RE.search(text or "")
+    return min(1.0, float(m.group(1))) if m else None
 
 
 def _extract_addresses_incident(text: str) -> int | None:
-    """Parse the `### Addresses incident #N` header line, if present."""
-    m = _ADDRESSES_RE.search(text or "")
+    """Parse the `### Addresses incident #N` header line, if present
+    (tolerant forms — P1-19)."""
+    m = _ADDR_RE.search(text or "")
     return int(m.group(1)) if m else None
+
+
+def _strip_outer_fence(text: str) -> str:
+    """Strip a single OUTER code fence wrapping the entire payload — Gemini
+    sometimes wraps its whole response in a ```markdown block.
+
+    A single DOTALL match anchored to the start/end of the (stripped) text —
+    never a per-line MULTILINE substitution — so an inner ```sql fence
+    nested inside a Recommendations section survives intact (P1-3).
+    """
+    m = re.match(r'^```(?:markdown)?\s*\n(.*)\n```\s*$', text.strip(), re.DOTALL)
+    return m.group(1) if m else text
+
+
+def parse_agent_response(text: str) -> dict:
+    """Parse a raw LLM analysis response into its structured parts.
+
+    The single shared parser used by both `_parse_and_store` (routine /
+    incident analyses) and `run_llm_analysis` (replay / investigator) —
+    P1-18: these used to be two independently-maintained copies of the same
+    severity/section/confidence/addresses regex logic that had already
+    drifted from each other.
+    """
+    cleaned = _strip_outer_fence(text or "").strip()
+    first_header = cleaned.find("###")
+    if first_header > 0:
+        cleaned = cleaned[first_header:]          # drop model preamble (P3-9)
+    sev = _SEV_RE.search(cleaned)
+    severity = sev.group(1).lower() if sev else "info"
+    if not sev and cleaned:
+        logger.warning("Agent response has no Severity header; defaulting to info")
+    findings, recommendations = _split_findings_recommendations(cleaned)
+    conf = _CONF_RE.search(cleaned)
+    confidence = min(1.0, float(conf.group(1))) if conf else None
+    addr = _ADDR_RE.search(cleaned)
+    return {"cleaned": cleaned, "severity": severity, "findings": findings,
+            "recommendations": recommendations, "confidence": confidence,
+            "addresses_incident": int(addr.group(1)) if addr else None}
 
 
 # Regex to find markdown section headers like "### Findings", "## FINDINGS", "**Findings**"
@@ -634,9 +1066,13 @@ _SECTION_RE_CACHE = {}
 
 def _section_pattern(name: str) -> re.Pattern:
     if name not in _SECTION_RE_CACHE:
-        # Note: use string concatenation, not f-string — f-string mangles {2,3} quantifiers
+        # Note: use string concatenation, not f-string — f-string mangles {2,3} quantifiers.
+        # No trailing `$` (P3-5): tolerates inline text after the header on the same
+        # line, e.g. "### Findings: No change since analysis #4", while the trailing
+        # `\s*` still eats the newline before real body text on the standard
+        # multi-line form ("### Findings\n<body>").
         _SECTION_RE_CACHE[name] = re.compile(
-            r'^(?:#{2,3}\s*|\*\*)' + name + r'(?:\*\*)?[:\s]*$',
+            r'^(?:#{2,3}\s*|\*\*)' + name + r'(?:\*\*)?\s*[:]?\s*',
             re.IGNORECASE | re.MULTILINE,
         )
     return _SECTION_RE_CACHE[name]
@@ -699,7 +1135,9 @@ def run_llm_analysis(
     """
     Public wrapper that dispatches any custom prompt to the configured LLM
     backend, stores the result in `agent_analyses`, and returns
-    `{"text": str, "analysis_id": int}`.
+    `{"text": str, "analysis_id": int, "severity": str, "confidence": float,
+    "truncated": bool}` (P1-13 — True if the final response was cut off at
+    max_tokens).
 
     Used by `agent.replay.run_replay` so the replay module doesn't have to
     reimplement backend detection or row-id wiring. Raises RuntimeError if
@@ -710,9 +1148,12 @@ def run_llm_analysis(
     and a lower `max_tool_rounds_override` so Phase 2 stays bounded.
 
     incident_id: When set (or when the response self-reports one via
-    `### Addresses incident #N`), the stored analysis is linked back to that
-    `incident_windows` row via `alerting.incidents.set_incident_analysis`
-    (best-effort — never raises).
+    `### Addresses incident #N` and that self-report passes
+    `_resolve_addressed_incident`'s gate — P1-4), the stored analysis is
+    linked to that `incident_windows` row in the same transaction as the
+    insert via `storage.writer.write_agent_analysis_and_link` (P1-21) —
+    best-effort, never raises. The link never resurrects a resolved/closed
+    incident and never crosses server_id.
     """
     config = get_config().get("agent", {})
     backend = _detect_backend(config)
@@ -722,6 +1163,10 @@ def run_llm_analysis(
     if server_id is None:
         from config.server_registry import get_server_registry
         server_id = get_server_registry().get_default_server_id()
+
+    # Per-server system prompt (P3-2): real MySQL version + platform for
+    # this server_id, instead of the hardcoded constant.
+    system_prompt = build_system_prompt(server_id)
 
     from agent.tools import set_current_server, set_current_budget
     try:
@@ -737,15 +1182,25 @@ def run_llm_analysis(
         else config.get("max_tool_rounds", 10)
     )
 
+    start_time = time.time()
     try:
         if backend["type"] == "gemini":
-            text = _run_gemini_loop(backend, max_tokens, max_tool_rounds, prompt)
+            text, truncated, tool_calls = _run_gemini_loop(
+                backend, max_tokens, max_tool_rounds, prompt, system_prompt
+            )
         elif backend["type"] == "vertex-claude":
-            text = _run_vertex_claude_loop(backend, max_tokens, max_tool_rounds, prompt)
+            text, truncated, tool_calls = _run_vertex_claude_loop(
+                backend, max_tokens, max_tool_rounds, prompt, system_prompt
+            )
         elif backend["type"] == "openai":
-            text = _run_openai_loop(backend, max_tokens, max_tool_rounds, prompt)
+            text, truncated, tool_calls = _run_openai_loop(
+                backend, max_tokens, max_tool_rounds, prompt, system_prompt
+            )
         else:
-            text = _run_anthropic_loop(backend, max_tokens, max_tool_rounds, prompt)
+            text, truncated, tool_calls = _run_anthropic_loop(
+                backend, max_tokens, max_tool_rounds, prompt, system_prompt
+            )
+        duration_ms = int((time.time() - start_time) * 1000)
     finally:
         # Clear the per-investigation context so later calls on this (possibly
         # pooled) thread don't inherit a stale budget or target server.
@@ -757,46 +1212,63 @@ def run_llm_analysis(
         except Exception:
             pass
 
-    # Parse severity + sections locally (same logic as _parse_and_store) so
-    # we can use the one-shot writer and capture the row id.
-    cleaned = re.sub(r'^```(?:markdown)?\s*\n?', '', text, flags=re.MULTILINE)
-    cleaned = re.sub(r'\n?```\s*$', '', cleaned, flags=re.MULTILINE).strip()
+    # One shared parser for severity/sections/confidence/addresses (P1-18) —
+    # same call as `_parse_and_store` so we can use the one-shot writer and
+    # capture the row id.
+    parsed = parse_agent_response(text)
+    if not parsed["cleaned"]:
+        # Same empty-response guard as `_parse_and_store` (P1-5): this sibling
+        # path (used by replay + the webhook investigator, which pass
+        # incident_id explicitly) must NOT persist a content-free analysis or
+        # link/close an incident against one. Leave the incident as-is and
+        # return an unstored result.
+        logger.error(
+            f"{analysis_type} LLM response was empty after parsing "
+            "(max-rounds exhaustion or safety block) — not storing, not linking any incident"
+        )
+        return {
+            "text": text, "analysis_id": None, "severity": None,
+            "confidence": None, "truncated": truncated,
+        }
 
-    severity = "info"
-    m = re.search(
-        r'^#{2,3}\s*Severity:\s*(critical|warning|info)',
-        cleaned, re.IGNORECASE | re.MULTILINE,
+    severity = parsed["severity"]
+    findings = parsed["findings"]
+    recommendations = parsed["recommendations"]
+    confidence = parsed["confidence"]
+    addressed_incident = _resolve_addressed_incident(
+        incident_id, parsed["addresses_incident"], analysis_type, prompt
     )
-    if m:
-        severity = m.group(1).lower()
-
-    findings, recommendations = _split_findings_recommendations(cleaned)
-    confidence = _extract_confidence(cleaned)
-    addressed_incident = incident_id if incident_id is not None else _extract_addresses_incident(cleaned)
 
     try:
-        analysis_id = writer.write_agent_analysis_one({
-            "analyzed_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
-            "server_id": server_id,
-            "analysis_type": analysis_type,
-            "severity": severity,
-            "input_summary": prompt[:2000],
-            "findings": json.dumps(findings),
-            "recommendations": json.dumps(recommendations),
-            "applied": 0,
-            "outcome_notes": json.dumps({"confidence": confidence}) if confidence is not None else None,
-        })
+        analysis_id, linked = writer.write_agent_analysis_and_link(
+            {
+                "analyzed_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+                "server_id": server_id,
+                "analysis_type": analysis_type,
+                "severity": severity,
+                "input_summary": prompt[:2000],
+                "findings": json.dumps(findings),
+                "recommendations": json.dumps(recommendations),
+                "applied": 0,
+                "outcome_notes": _build_outcome_notes(confidence, truncated),
+                "model": backend["model"],
+                "tool_calls": tool_calls,
+                "duration_ms": duration_ms,
+            },
+            addressed_incident,
+            server_id,
+        )
+        if addressed_incident is not None and not linked:
+            logger.info(
+                f"Analysis {analysis_id} not linked to incident {addressed_incident} "
+                "(incident is not open on this server)"
+            )
     except Exception as e:
         logger.warning(f"Failed to persist {analysis_type} analysis: {e}")
         analysis_id = None
 
-    if addressed_incident is not None and analysis_id is not None:
-        try:
-            from alerting.incidents import set_incident_analysis
-            set_incident_analysis(addressed_incident, analysis_id, status="analyzed")
-        except Exception as e:
-            logger.warning(
-                f"Failed to link analysis {analysis_id} to incident {addressed_incident}: {e}"
-            )
-
-    return {"text": text, "analysis_id": analysis_id, "severity": severity, "confidence": confidence}
+    return {
+        "text": text, "analysis_id": analysis_id, "severity": severity,
+        "confidence": confidence, "truncated": truncated,
+        "model": backend["model"], "tool_calls": tool_calls, "duration_ms": duration_ms,
+    }

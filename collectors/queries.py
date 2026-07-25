@@ -284,6 +284,7 @@ GLOBAL_VARIABLES = "SHOW GLOBAL VARIABLES"
 
 # Curated list of variables worth tracking for the LLM agent
 TRACKED_VARIABLES = [
+    "version",
     "innodb_buffer_pool_size",
     "innodb_buffer_pool_instances",
     "innodb_log_file_size",

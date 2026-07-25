@@ -141,7 +141,12 @@ def _with_server_and_args(
 
     sid = server or _default_server()
     agent_tools.set_current_server(sid)
-    return fn(input_data)
+    try:
+        return fn(input_data)
+    finally:
+        # Reset even if fn() raises (P1-10) -- otherwise a pooled/reused
+        # thread leaks `sid` into whatever MCP call runs on it next.
+        agent_tools.set_current_server(None)
 
 
 def _default_server() -> str:
