@@ -45,7 +45,7 @@ SELECT COUNT(*) as lock_count,
        MAX(wait_seconds) as max_wait_sec,
        AVG(wait_seconds) as avg_wait_sec
 FROM lock_wait_snapshots
-WHERE snapshot_time >= datetime('now', ?)
+WHERE datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', ?)
   AND server_id = ?
 """
 
@@ -87,6 +87,7 @@ WHERE snapshot_time = (
     SELECT MAX(snapshot_time) FROM gcp_metric_snapshots WHERE server_id = ?
 )
   AND server_id = ?
+  AND datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now','-15 minutes')
 """
 
 CURRENT_QPS = """
@@ -111,11 +112,11 @@ ORDER BY detected_at DESC
 NEW_QUERY_FINGERPRINTS = """
 SELECT DISTINCT digest, digest_text, schema_name
 FROM query_digest_snapshots
-WHERE snapshot_time >= datetime('now', '-1 hour')
+WHERE datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-1 hour')
   AND server_id = ?
   AND digest NOT IN (
     SELECT DISTINCT digest FROM query_digest_snapshots
-    WHERE snapshot_time < datetime('now', '-1 hour')
+    WHERE datetime(REPLACE(snapshot_time,'T',' ')) < datetime('now', '-1 hour')
       AND server_id = ?
   )
 """
@@ -126,14 +127,14 @@ WITH recent AS (
            AVG(avg_time_sec) as recent_avg,
            SUM(exec_count) as recent_execs
     FROM query_digest_snapshots
-    WHERE snapshot_time >= datetime('now', '-1 hour')
+    WHERE datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-1 hour')
       AND server_id = ?
     GROUP BY digest
 ),
 baseline AS (
     SELECT digest, AVG(avg_time_sec) as baseline_avg
     FROM query_digest_snapshots
-    WHERE snapshot_time BETWEEN datetime('now', '-7 days') AND datetime('now', '-1 hour')
+    WHERE datetime(REPLACE(snapshot_time,'T',' ')) BETWEEN datetime('now', '-7 days') AND datetime('now', '-1 hour')
       AND server_id = ?
     GROUP BY digest
 )
@@ -145,6 +146,7 @@ FROM recent r
 JOIN baseline b ON r.digest = b.digest
 WHERE b.baseline_avg > 0
   AND r.recent_avg / b.baseline_avg >= ?
+  AND r.recent_avg >= ?
 ORDER BY regression_factor DESC
 LIMIT 20
 """
@@ -198,7 +200,7 @@ SELECT DATE(snapshot_time) as day, AVG(avg_time_sec) as daily_avg
 FROM query_digest_snapshots
 WHERE digest = ?
   AND server_id = ?
-  AND snapshot_time >= datetime('now', '-30 days')
+  AND datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-30 days')
 GROUP BY DATE(snapshot_time)
 ORDER BY day ASC
 """
@@ -242,7 +244,7 @@ SELECT * FROM (
     FROM query_digest_snapshots
     WHERE digest = ?
       AND server_id = ?
-      AND snapshot_time >= datetime('now', ?)
+      AND datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', ?)
     ORDER BY snapshot_time DESC
     LIMIT 2000
 )
@@ -273,7 +275,7 @@ RECENT_ANALYSES = """
 SELECT analyzed_at, analysis_type, severity, findings, recommendations
 FROM agent_analyses
 WHERE server_id = ?
-  AND analyzed_at >= datetime('now', ?)
+  AND datetime(REPLACE(analyzed_at,'T',' ')) >= datetime('now', ?)
 ORDER BY analyzed_at DESC
 LIMIT ?
 """
@@ -295,20 +297,20 @@ SELECT MAX(CAST(raw_value AS REAL)) as peak_threads
 FROM global_status_snapshots
 WHERE variable_name = 'Threads_running'
   AND server_id = ?
-  AND snapshot_time >= datetime('now', '-1 day')
+  AND datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-1 day')
 """
 
 LONGEST_LOCK_24H = """
 SELECT MAX(wait_seconds) as longest_wait_sec, COUNT(*) as total_lock_events
 FROM lock_wait_snapshots
 WHERE server_id = ?
-  AND snapshot_time >= datetime('now', '-1 day')
+  AND datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-1 day')
 """
 
 PREVIOUS_RECOMMENDATIONS = """
 SELECT analyzed_at, severity, recommendations
 FROM agent_analyses
-WHERE analyzed_at >= datetime('now', '-1 day')
+WHERE datetime(REPLACE(analyzed_at,'T',' ')) >= datetime('now', '-1 day')
   AND server_id = ?
   AND recommendations IS NOT NULL
   AND recommendations != '""'

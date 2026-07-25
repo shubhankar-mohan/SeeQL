@@ -76,6 +76,18 @@ class ExplainCaptureCollector(BaseCollector):
                 if not normalized.startswith(_EXPLAINABLE_PREFIXES):
                     continue
 
+                schema_name = q.get("schema_name")
+                digest = q.get("digest") or ""
+                if not schema_name:
+                    # P1b-10: a NULL/empty schema_name means we don't know
+                    # which database this query ran against. EXPLAINing it
+                    # anyway would silently run under whatever schema a
+                    # previous iteration's `USE` left active on this shared
+                    # connection, producing a plan for the wrong schema
+                    # instead of no plan at all.
+                    logger.debug("skipping EXPLAIN for %s — no schema recorded", digest[:16])
+                    continue
+
                 explain_json = self._run_explain(conn, q, sql_text)
                 if explain_json:
                     rows.append({
@@ -83,7 +95,7 @@ class ExplainCaptureCollector(BaseCollector):
                         "server_id": ctx.server_id,
                         "digest": q.get("digest"),
                         "digest_text": q.get("digest_text", ""),
-                        "schema_name": q.get("schema_name"),
+                        "schema_name": schema_name,
                         "explain_json": explain_json,
                         "total_time_sec": q.get("total_time_sec"),
                         "avg_time_sec": q.get("avg_time_sec"),

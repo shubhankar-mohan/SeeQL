@@ -34,6 +34,14 @@ intervals:
   slow_loop: 1800         # Table sizes, index usage, schema snapshots, variables
   retention_loop: 86400   # Daily retention cleanup
 
+# --- Scheduler / Fleet Resilience (P1b-4) ---
+scheduler:
+  # A server that fails EVERY collector for 3 consecutive cycles trips a
+  # per-server circuit breaker and is skipped entirely for this many further
+  # cycles (instead of being retried, and re-timing-out, every cycle). See
+  # scheduler/runner.py's _run_loop_over_servers.
+  circuit_reset_cycles: 10
+
 # --- Collection Limits ---
 limits:
   top_queries: 50         # How many top queries to capture per digest snapshot
@@ -41,6 +49,17 @@ limits:
   processlist_query_max_len: 500   # Truncate long queries in processlist
   digest_text_max_len: 1024        # Truncate digest text for storage (was 200, too short for EXPLAIN)
   max_batch_size: 500              # Max rows per batch insert
+
+# --- Slow Loop Guardrails (P1b-7) ---
+slow_loop:
+  # Large-schema guardrail: the schema-snapshot collector orders tables by
+  # UPDATE_TIME DESC (NULLS LAST) and fingerprints/sizes at most this many
+  # per cycle. Deferred tables are logged (never silently dropped) and get
+  # picked up on a later cycle once more-recently-changed tables clear.
+  # Only above this cap: a DDL change on a table while it sits deferred may
+  # be recorded as a fresh snapshot rather than an old->new ddl_changes
+  # diff once that table is finally processed again.
+  max_tables_per_cycle: 2000
 
 # --- Data Retention ---
 retention:
@@ -64,17 +83,22 @@ gcp:
   cloud_sql_instance_id: "your-instance-id"
   region: "asia-south1"
   vertex_region: "us-east5"              # Region for Vertex AI (Claude: us-east5, Gemini: us-central1)
+  # Vertex regions differ per publisher: Gemini serves from most regions,
+  # Claude serves from us-east5. Override per backend if needed.
+  gemini_region: "us-central1"
+  claude_region: "us-east5"
   monitoring_credentials_file: "${MONITORING_APPLICATION_CREDENTIALS}"  # Optional: separate SA for Monitoring/Logging
 
 # --- LLM Agent ---
 agent:
-  enabled: true                    # Set to true + provide credentials to enable
+  enabled: false                   # Opt-in — set true + provide credentials
   # Model name drives backend selection (or set `provider` to force one).
   #   gemini-*  -> Gemini via Vertex AI (needs GCP creds)
   #   claude-*  -> Claude via Vertex AI (GCP creds) or the Anthropic API (key)
   #   gpt-*/o*  -> OpenAI (needs openai_api_key)
-  model: "gemini-2.0-flash"
+  model: "gemini-2.5-flash"
   # provider: openai               # Force a backend: openai | anthropic | vertex-claude | gemini
+  # fallback_model: claude-sonnet-4-20250514  # Used only if no model/creds match (Anthropic API path)
   max_tokens: 8192
   max_tool_rounds: 10
   schedule_seconds: 900             # 15 minutes
@@ -87,6 +111,7 @@ agent:
   state_builder:
     trend_threshold: 0.2            # 20% change = "up" or "down"
     regression_threshold: 3.0       # 3x slowdown = regression
+    min_recent_avg_sec: 0.01        # absolute floor: ignore ratio-only "regressions" faster than this
     long_transaction_sec: 30
     lookback_minutes: 5
 
@@ -123,6 +148,7 @@ alerting:
       enabled: true
       severity: warning
       threshold: 5.0
+      min_recent_avg_sec: 0.01        # absolute floor: ignore ratio-only "regressions" faster than this
       cooldown_minutes: 30
       channels: [slack, log]
     ddl_change:

@@ -45,6 +45,22 @@ def _gap_minutes() -> int:
     )
 
 
+def _later_timestamp(a: str, b: str) -> str:
+    """Return whichever of two timestamp strings is later, without rewinding.
+
+    Comparison is done on a format-normalized copy (the `T`/space date-time
+    separator is unified) so a stray formatting difference between the two
+    inputs can't flip the ordering, but the ORIGINAL (un-normalized) string of
+    the later timestamp is what gets returned/stored — callers should not see
+    their T-format rewritten. Plain string comparison is safe here because
+    every timestamp in this codebase is zero-padded ISO-8601 in UTC, which
+    sorts lexicographically in chronological order.
+    """
+    norm_a = a.replace("T", " ")
+    norm_b = b.replace("T", " ")
+    return a if norm_a >= norm_b else b
+
+
 def _max_duration_minutes() -> int:
     """Cap on total incident duration. Events beyond this start a new incident."""
     return int(
@@ -156,6 +172,12 @@ def _attach_or_create(
         ):
             new_severity = event["severity"]
 
+        # P1-20: an out-of-order event (e.g. a delayed write landing with an
+        # older `detected_at` than the incident's current end_time) must
+        # extend the incident without moving end_time BACKWARDS. Compare in
+        # Python and keep whichever of the two is later.
+        new_end_time = _later_timestamp(row["end_time"], event["detected_at"])
+
         conn.execute(
             """
             UPDATE incident_windows
@@ -165,7 +187,7 @@ def _attach_or_create(
                 event_count = event_count + 1
             WHERE id = ?
             """,
-            (event["detected_at"], new_severity, json.dumps(metrics), row["id"]),
+            (new_end_time, new_severity, json.dumps(metrics), row["id"]),
         )
         incident_id = row["id"]
         created = False
@@ -262,10 +284,18 @@ def resolve_returned_to_baseline(server_id: str) -> list[int]:
 
     An incident is considered "returned to baseline" when its `end_time` is
     older than `incident_resolve_quiet_minutes` (default 30) AND no newer
-    `anomaly_events` row has landed for this server since then — a fresh
-    event means the underlying condition is still active, so we leave it
-    open (it will simply get extended by `update_windows` on the next cycle
-    instead).
+    `anomaly_events` row BELONGING TO THIS INCIDENT (or not yet grouped) has
+    landed for this server since then — a fresh event for THIS incident means
+    the underlying condition is still active, so we leave it open (it will
+    simply get extended by `update_windows` on the next cycle instead).
+
+    P1-8: the newer-event guard is scoped to this incident (`incident_id IS
+    NULL OR incident_id = ?`) rather than to the whole server. Without that
+    scoping, a newer anomaly already grouped into a DIFFERENT (e.g.
+    superseding) incident on the same server would block this one from ever
+    resolving, even though it has nothing to do with this incident's
+    condition — superseded incidents would get stuck 'detected'/'analyzed'
+    forever.
 
     Returns the list of incident IDs that were resolved.
     """
@@ -289,9 +319,10 @@ def resolve_returned_to_baseline(server_id: str) -> list[int]:
                 """
                 SELECT 1 FROM anomaly_events
                 WHERE server_id = ? AND datetime(detected_at) > datetime(?)
+                  AND (incident_id IS NULL OR incident_id = ?)
                 LIMIT 1
                 """,
-                (server_id, row["end_time"]),
+                (server_id, row["end_time"], row["id"]),
             ).fetchone()
             if newer_event:
                 continue
