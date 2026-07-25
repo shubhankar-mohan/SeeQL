@@ -18,8 +18,9 @@ Connections and the server list live **only** in the config file — there are n
 `${VAR}` (e.g. `password: ${PROD_DB_PASSWORD}`).
 
 A few **operational** knobs stay as env vars (like Prometheus's `--storage.*` /
-`--log.level` flags): `SEEQL_CONFIG`, `SEEQL_MON_DB_PATH`, `SEEQL_DB_MAX_SIZE_MB`,
-`SEEQL_LOG_MAX_SIZE_MB`, `SEEQL_RETENTION_DAYS`, `SEEQL_LOG_LEVEL`, `SEEQL_ENV`.
+`--log.level` flags): `SEEQL_CONFIG`, `SEEQL_AGENT_ENABLED`, `SEEQL_API_PORT`,
+`SEEQL_MON_DB_PATH`, `SEEQL_DB_MAX_SIZE_MB`, `SEEQL_LOG_MAX_SIZE_MB`,
+`SEEQL_RETENTION_DAYS`, `SEEQL_LOG_LEVEL`, `SEEQL_PROM_CACHE_TTL`, `SEEQL_ENV`.
 
 ## Production database (required)
 
@@ -191,15 +192,16 @@ gcp:
   monitoring_credentials_file: "${MONITORING_APPLICATION_CREDENTIALS}"
 ```
 
-Env:
+`project_id`, `region`, `cloud_sql_instance_id`, and `vertex_region` are
+**file-only** — set them in the `gcp:` block above (or a per-server `gcp:`
+block under `servers:`). There are no `GCP_*` env overrides.
 
-| Variable | YAML key |
-|----------|----------|
-| `GCP_PROJECT_ID` | `gcp.project_id` |
-| `GCP_REGION` | `gcp.region` |
-| `GCP_CLOUD_SQL_INSTANCE` | `gcp.cloud_sql_instance_id` |
-| `GOOGLE_APPLICATION_CREDENTIALS` | (SDK-native) |
-| `MONITORING_APPLICATION_CREDENTIALS` | dedicated SA for Monitoring/Logging only |
+Credentials, however, come from the environment:
+
+| Variable | What |
+|----------|------|
+| `GOOGLE_APPLICATION_CREDENTIALS` | Service-account key path — read natively by the Google client libraries (Cloud Monitoring, Cloud Logging, Vertex AI) |
+| `MONITORING_APPLICATION_CREDENTIALS` (via `${…}`) | Optional dedicated SA for Monitoring/Logging only, referenced from `monitoring_credentials_file` above |
 
 When `gcp.project_id` is empty or left as the default placeholder
 (`your-gcp-project-id`), GCP collectors register as no-ops.
@@ -209,7 +211,7 @@ When `gcp.project_id` is empty or left as the default placeholder
 ```yaml
 agent:
   enabled: false                      # Set true after configuring a backend
-  model: "claude-sonnet-4-6"          # or "gemini-2.0-flash", "claude-opus-4-6", etc.
+  model: "gemini-2.5-flash"           # shipped default; or a claude-* id like "claude-opus-4-6"
   max_tokens: 8192
   max_tool_rounds: 10
   schedule_seconds: 900               # How often the routine analysis runs
@@ -221,8 +223,6 @@ agent:
     long_transaction_sec: 30
     lookback_minutes: 5
 ```
-
-Env: `SEEQL_AGENT_ENABLED`, `SEEQL_AGENT_MODEL`, `ANTHROPIC_API_KEY`.
 
 Backend selection is model-name-driven — see [agent.md](agent.md) for
 the matrix.
@@ -257,8 +257,6 @@ alerting:
     # ... 6 more rules, see alerting.md
 ```
 
-Env: `SEEQL_ALERTING_ENABLED`, `SLACK_WEBHOOK_URL`.
-
 Full rule-by-rule tuning in [alerting.md](alerting.md).
 
 ## Prometheus
@@ -286,13 +284,21 @@ Env: `SEEQL_LOG_LEVEL`, `SEEQL_LOG_MAX_SIZE_MB`.
 
 ## Precedence examples
 
-```bash
-# 1. YAML default in config/settings.yaml: host: "10.0.0.1"
-# 2. Local override in settings.local.yaml: host: "10.0.5.5"
-# 3. Env var at runtime: PROD_DB_HOST=10.0.9.9
+There is no env var for connection or interval settings — change them by
+editing your config file and restarting:
 
-docker run -e PROD_DB_HOST=10.0.9.9 ...   # → SeeQL uses 10.0.9.9
+```bash
+# 1. Built-in default in config/settings.yaml: intervals.medium_loop: 300
+# 2. Your seeql.yml overrides it:
+$EDITOR seeql.yml        # intervals: { medium_loop: 600 }
+docker restart seeql     # re-reads seeql.yml on startup → 600 wins
 ```
 
-Env wins. Local YAML wins over the stock config. The stock config is
-the last-resort fallback.
+`${VAR}` substitution only fills placeholders you actually wrote into the
+YAML (e.g. `password: "${PROD_DB_PASSWORD}"`). Setting an env var that isn't
+referenced anywhere in your config file does nothing — SeeQL never reads
+connection settings from the environment directly.
+
+Your `seeql.yml` always wins over the built-in `config/settings.yaml`
+defaults (deep-merged, key by key). The stock config is the last-resort
+fallback.

@@ -548,3 +548,9 @@ class TestPrometheusMetrics:
         resp = api_client.get("/metrics")
         assert resp.status_code == 200
         assert not self._has_sample("mysql_lock_waits_current", server="server_lockheartbeat")
+
+
+def test_prom_cache_ttl_config(monkeypatch):
+    from api import prometheus
+    monkeypatch.setattr(prometheus, "get_config", lambda: {"prometheus": {"cache_ttl_seconds": 42}})
+    assert prometheus._get_cache_ttl() == 42

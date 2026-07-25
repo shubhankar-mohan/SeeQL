@@ -83,17 +83,22 @@ gcp:
   cloud_sql_instance_id: "your-instance-id"
   region: "asia-south1"
   vertex_region: "us-east5"              # Region for Vertex AI (Claude: us-east5, Gemini: us-central1)
+  # Vertex regions differ per publisher: Gemini serves from most regions,
+  # Claude serves from us-east5. Override per backend if needed.
+  gemini_region: "us-central1"
+  claude_region: "us-east5"
   monitoring_credentials_file: "${MONITORING_APPLICATION_CREDENTIALS}"  # Optional: separate SA for Monitoring/Logging
 
 # --- LLM Agent ---
 agent:
-  enabled: true                    # Set to true + provide credentials to enable
+  enabled: false                   # Opt-in — set true + provide credentials
   # Model name drives backend selection (or set `provider` to force one).
   #   gemini-*  -> Gemini via Vertex AI (needs GCP creds)
   #   claude-*  -> Claude via Vertex AI (GCP creds) or the Anthropic API (key)
   #   gpt-*/o*  -> OpenAI (needs openai_api_key)
-  model: "gemini-2.0-flash"
+  model: "gemini-2.5-flash"
   # provider: openai               # Force a backend: openai | anthropic | vertex-claude | gemini
+  # fallback_model: claude-sonnet-4-20250514  # Used only if no model/creds match (Anthropic API path)
   max_tokens: 8192
   max_tool_rounds: 10
   schedule_seconds: 900             # 15 minutes

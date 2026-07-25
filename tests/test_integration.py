@@ -183,8 +183,12 @@ class TestFullCycleIntegration:
         # get_connection is consumed (in order) by the MySQL collectors:
         # query_digests, wait_events, table_io, innodb_metrics, buffer_pool,
         # global_status, innodb_status, execution_stages, explain_capture.
-        # The GCP collectors run but DO NOT call get_connection (they will fail
-        # harmlessly with no GCP creds — not asserted).
+        # Keep this hermetic: clear gcp.project_id so the medium loop skips the
+        # GCP collectors (per its own gating) instead of attempting real Cloud
+        # Monitoring/Logging calls — those hang on any machine that happens to
+        # have gcloud ADC configured (creds are now honored), which is not what
+        # this MySQL-cycle test means to exercise.
+        config_module._config["gcp"]["project_id"] = ""
         ctx = self._make_ctx([
             self._conn(MOCK_QUERY_DIGESTS),
             self._conn(MOCK_WAIT_EVENTS),

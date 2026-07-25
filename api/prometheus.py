@@ -14,6 +14,7 @@ from prometheus_client import (
 )
 from fastapi import APIRouter, Response
 
+from config import get_config
 from storage.connection import get_mon_reader
 
 logger = logging.getLogger(__name__)
@@ -74,7 +75,13 @@ seeql_alerts_fired = Counter("seeql_alerts_fired_total", "Total alerts fired", [
 
 # Cache to avoid hammering SQLite on every /metrics scrape
 _last_update = 0.0
-_cache_ttl = 10  # seconds
+
+
+def _get_cache_ttl() -> int:
+    try:
+        return int(get_config().get("prometheus", {}).get("cache_ttl_seconds", 10))
+    except Exception:
+        return 10
 
 # P1c-4: a server's row is only trusted as "live" if its most recent
 # snapshot_time is within this many minutes of now. Older data means the
@@ -176,7 +183,7 @@ def update_metrics():
     global _last_update
 
     now = time.time()
-    if now - _last_update < _cache_ttl:
+    if now - _last_update < _get_cache_ttl():
         return
     _last_update = now
 
