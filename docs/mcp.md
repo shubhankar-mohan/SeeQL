@@ -27,9 +27,9 @@ can see.
 ## Install
 
 ```bash
-pip install 'seeql[mcp]'
-# or, from the repo:
-pip install 'mcp>=1.2'
+pip install 'seeql[mcp]'   # once 0.2.0 is on PyPI
+# from source:
+pip install -e ".[mcp]"
 ```
 
 ## Run: stdio (Claude Desktop, Claude Code, subprocess clients)
