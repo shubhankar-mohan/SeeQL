@@ -27,6 +27,9 @@ Requires Python 3.12+ (uses modern typing syntax).
 - [Configuration](#configuration)
 - [CLI](#cli)
 - [Dashboard](#dashboard)
+- [Use it from Claude (MCP)](#use-it-from-claude-mcp)
+- [Alert → automated investigation](#alert--automated-investigation)
+- [Incident replay](#incident-replay)
 - [Prometheus](#prometheus)
 - [Alerting](#alerting)
 - [API](#api)
@@ -261,6 +264,42 @@ and incidents pages. HTMX auto-refresh, no SPA build step, ARIA live regions
 on auto-updating widgets.
 
 See [docs/dashboard.md](docs/dashboard.md) for a per-page tour.
+
+---
+
+## Use it from Claude (MCP)
+
+SeeQL ships an MCP server: 28 read-only/gated tools (state reports, query
+history, EXPLAINs, live locks — plus opt-in actions) behind a safety layer
+with per-session budgets and rate limits.
+
+```bash
+seeql mcp            # stdio, for Claude Desktop / Claude Code
+seeql mcp --http     # bearer-token HTTP for remote clients
+```
+
+Point Claude at your database and ask "why is checkout slow?" —
+setup in [docs/mcp.md](docs/mcp.md).
+
+---
+
+## Alert → automated investigation
+
+`POST /webhooks/{provider}` (PagerDuty, Grafana, GCP Monitoring, generic;
+HMAC-verified) triggers a 3-phase investigation: zero-cost triage from
+collected data → budgeted LLM root-cause analysis → bounded follow-up
+sampling with load guards. Results land in the dashboard and
+`seeql investigations`. See [docs/incidents.md](docs/incidents.md).
+
+---
+
+## Incident replay
+
+```bash
+seeql replay --latest        # timeline + LLM postmortem of the last incident
+```
+
+Works without an LLM key too (timeline-only postmortem primer).
 
 ---
 
