@@ -4,7 +4,7 @@ All notable changes to SeeQL will be documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] — 2026-07-25
 
 ### Changed
 - **Default agent model is now `gemini-2.0-flash`** (was `claude-opus-4-6`). The
@@ -57,6 +57,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **LICENSE (Apache 2.0)**, **CHANGELOG.md**, metadata polish in `pyproject.toml`.
 - Recent Incidents section in the LLM state report so routine analyses see
   unresolved incident windows from the last 24h.
+
+### Fixed (release audit)
+- Retention cleanup now commits before `VACUUM` so deletes are no longer lost.
+- Timestamp window comparisons corrected (stored ISO-`T` timestamps vs
+  `datetime('now')`).
+- DDL capture no longer truncates large `SHOW CREATE TABLE` output.
+- Lock-cascade / deadlock storm detection hardened (baselines, cooldowns,
+  incident exclusion).
+- Agent defaults corrected (ships disabled with a resolvable default model).
+- API bearer-token auth middleware added for non-public endpoints.
+- SQL literal redaction (default-on) before query text reaches the LLM.
 
 ### Fixed
 - **`/dashboard/todo` returned a 500 on an empty or sparse database.** The

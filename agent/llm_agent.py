@@ -356,7 +356,13 @@ def _run_vertex_claude_loop(backend: dict, max_tokens: int, max_rounds: int, use
 
 def _run_anthropic_loop(backend: dict, max_tokens: int, max_rounds: int, user_msg: str) -> str:
     """Run tool-use loop with Claude via Anthropic API."""
-    import anthropic
+    try:
+        import anthropic
+    except ImportError as e:
+        raise RuntimeError(
+            "The Anthropic API backend needs the 'anthropic' package. Install it with "
+            "`pip install 'seeql[claude]'`."
+        ) from e
     client = anthropic.Anthropic(api_key=backend["api_key"])
     return _run_claude_loop(client, backend["model"], max_tokens, max_rounds, user_msg)
 

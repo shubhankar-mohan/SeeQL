@@ -14,6 +14,8 @@ Cloud SQL, AWS RDS/Aurora, or self-hosted.
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](pyproject.toml)
 [![Build status](https://img.shields.io/github/actions/workflow/status/shubhankar-mohan/SeeQL/docker-publish.yml?branch=main)](https://github.com/shubhankar-mohan/SeeQL/actions/workflows/docker-publish.yml)
 
+Requires Python 3.12+ (uses modern typing syntax).
+
 ---
 
 ## Table of contents
