@@ -62,11 +62,16 @@ def evaluate_threads_running_spike(rule_config: dict, server_id: str = "default"
             ORDER BY snapshot_time DESC LIMIT 1
         """, (server_id,)).fetchone()
 
+        # Baseline EXCLUDES the last hour. If it didn't, the ongoing spike
+        # would be folded into its own baseline: the longer a sustained
+        # incident runs, the more the "last 24h" average creeps toward the
+        # spike value, until current/baseline drops below the multiplier and
+        # the alert self-silences (P1c-7).
         baseline = conn.execute("""
             SELECT AVG(raw_value) as avg_val FROM global_status_snapshots
             WHERE variable_name = 'Threads_running'
               AND server_id = ?
-              AND datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-24 hours')
+              AND datetime(REPLACE(snapshot_time,'T',' ')) BETWEEN datetime('now', '-25 hours') AND datetime('now', '-1 hour')
         """, (server_id,)).fetchone()
 
     if not current or not baseline or not baseline["avg_val"]:
@@ -96,6 +101,9 @@ def evaluate_threads_running_spike(rule_config: dict, server_id: str = "default"
 def evaluate_query_regression(rule_config: dict, server_id: str = "default") -> Alert | None:
     """Fire if any query has regressed beyond threshold."""
     threshold = rule_config.get("threshold", 5.0)
+    # Absolute floor (P1c-8): a ratio-only gate reports "5x slower" for
+    # 0.1ms -> 0.5ms, which is noise, not a regression worth paging anyone.
+    min_recent_avg = rule_config.get("min_recent_avg_sec", 0.01)
 
     with get_mon_reader() as conn:
         rows = conn.execute("""
@@ -117,8 +125,9 @@ def evaluate_query_regression(rule_config: dict, server_id: str = "default") -> 
                    r.recent_avg / NULLIF(b.baseline_avg, 0) as factor
             FROM recent r JOIN baseline b ON r.digest = b.digest
             WHERE b.baseline_avg > 0 AND r.recent_avg / b.baseline_avg >= ?
+              AND r.recent_avg >= ?
             ORDER BY factor DESC LIMIT 5
-        """, (server_id, server_id, threshold)).fetchall()
+        """, (server_id, server_id, threshold, min_recent_avg)).fetchall()
 
     if not rows:
         return None
@@ -173,6 +182,7 @@ def evaluate_high_cpu(rule_config: dict, server_id: str = "default") -> Alert | 
             SELECT value FROM gcp_metric_snapshots
             WHERE metric_name = 'cpu_utilization'
               AND server_id = ?
+              AND datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-15 minutes')
             ORDER BY snapshot_time DESC LIMIT 1
         """, (server_id,)).fetchone()
 
@@ -203,6 +213,7 @@ def evaluate_high_memory(rule_config: dict, server_id: str = "default") -> Alert
             SELECT value FROM gcp_metric_snapshots
             WHERE metric_name = 'memory_utilization'
               AND server_id = ?
+              AND datetime(REPLACE(snapshot_time,'T',' ')) >= datetime('now', '-15 minutes')
             ORDER BY snapshot_time DESC LIMIT 1
         """, (server_id,)).fetchone()
 

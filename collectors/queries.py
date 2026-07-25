@@ -357,3 +357,23 @@ LIMIT 30
 # =============================================================================
 
 EXPLAIN_PREFIX = "EXPLAIN FORMAT=JSON "
+
+# =============================================================================
+# DOCTOR / DIAGNOSTIC QUERIES (seeql doctor — not part of any collection loop)
+# =============================================================================
+
+# performance_schema being ON (SHOW VARIABLES) doesn't mean the consumers
+# feeding query digests / statement history / stage+wait events are ON —
+# Cloud SQL and hardened installs commonly ship with some of these OFF.
+DOCTOR_CONSUMERS = """
+SELECT NAME, ENABLED FROM performance_schema.setup_consumers
+WHERE NAME IN ('events_statements_current','events_statements_history',
+               'global_instrumentation','thread_instrumentation','statements_digest')
+"""
+
+# Informational only: execution_stages needs stage/% instruments enabled to
+# collect anything. Not required, so doctor never fails on this.
+DOCTOR_STAGE_INSTRUMENTS = """
+SELECT NAME, ENABLED FROM performance_schema.setup_instruments
+WHERE NAME LIKE 'stage/%'
+"""

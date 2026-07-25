@@ -188,6 +188,36 @@ class TestResolveReturnedToBaseline:
         row = _incident_row(incident_loop_db, iid)
         assert row["status"] == "detected"
 
+    def test_resolves_superseded_incident_when_newer_event_belongs_to_another(
+        self, incident_loop_db
+    ):
+        """P1-8: incident 1 is stale and quiet; a newer anomaly event exists
+        for the same server but is already grouped into incident 2 (a
+        separate, superseding incident). That must NOT block incident 1 from
+        resolving. Before the fix, the newer-event guard checked ANY newer
+        event for the whole server regardless of which incident it belonged
+        to, so a superseded incident like #1 here would stay
+        'detected'/'analyzed' forever."""
+        iid1 = _insert_incident(incident_loop_db, status="detected", end_minutes_ago=60)
+        iid2 = _insert_incident(incident_loop_db, status="detected", end_minutes_ago=5)
+
+        conn = sqlite3.connect(str(incident_loop_db))
+        conn.execute(
+            "INSERT INTO anomaly_events (server_id, detected_at, metric_name, "
+            "current_value, baseline_mean, baseline_stddev, z_score, pct_change, "
+            "direction, severity, incident_id) VALUES "
+            "('default', ?, 'threads_running', 50, 10, 2, 20, 400, 'high', 'warning', ?)",
+            (_iso(2), iid2),
+        )
+        conn.commit()
+        conn.close()
+
+        resolved = inc.resolve_returned_to_baseline("default")
+
+        assert iid1 in resolved
+        row1 = _incident_row(incident_loop_db, iid1)
+        assert row1["status"] == "resolved"
+
     def test_leaves_already_resolved_incidents_alone(self, incident_loop_db):
         iid = _insert_incident(incident_loop_db, status="resolved", end_minutes_ago=60)
         resolved = inc.resolve_returned_to_baseline("default")

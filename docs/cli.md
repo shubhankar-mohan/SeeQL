@@ -11,7 +11,7 @@ seeql <command> [options]
 
 Commands:
   check           Run health checks and exit
-  doctor          Diagnose the local environment (7 checks)
+  doctor          Diagnose the local environment (9 checks)
   init-db         Initialize the monitoring SQLite schema
   run             Continuous collector loop (add --once for a single cycle)
   serve           API + dashboard + scheduler
@@ -48,7 +48,7 @@ Fast preflight. Exits 0 if SeeQL can:
 
 ## `seeql doctor`
 
-Deeper diagnostic — runs 7 checks and prints a coloured pass/fail
+Deeper diagnostic — runs 9 checks and prints a coloured pass/fail
 table:
 
 1. Python version (≥3.12)
