@@ -21,6 +21,7 @@ import sys
 import argparse
 import logging
 import logging.handlers
+from importlib.metadata import version as _pkg_version, PackageNotFoundError
 from pathlib import Path
 
 from config import get_config
@@ -619,6 +620,11 @@ def _main_inner():
         prog="seeql",
         description="SeeQL — LLM-powered MySQL DBA agent",
     )
+    try:
+        _v = _pkg_version("seeql")
+    except PackageNotFoundError:
+        _v = "unknown"
+    parser.add_argument("--version", action="version", version=f"seeql {_v}")
 
     # Legacy flags: kept working for one release (suppressed from --help but
     # accepted at runtime). Use `seeql <cmd>` instead.

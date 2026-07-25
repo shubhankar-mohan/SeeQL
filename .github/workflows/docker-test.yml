@@ -18,6 +18,8 @@ on:
       - 'seeql/**'
       - 'templates/**'
       - 'static/**'
+      - 'tests/**'
+      - '**/*.py'
       - '.github/workflows/docker-*.yml'
 
 concurrency:
@@ -54,3 +56,40 @@ jobs:
             INSTALL_EXTRAS=${{ matrix.extras }}
           cache-from: type=gha,scope=${{ matrix.variant }}
           cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
+
+      # `load: true` can't be combined with a multi-platform build — the
+      # docker exporter can't load a manifest list (buildx errors with
+      # "docker exporter does not currently support exporting manifest
+      # lists", confirmed locally). Rebuild amd64-only (the runner's native
+      # arch) so the image lands in the local Docker engine for the smoke
+      # test below. This reuses the GHA cache scope from the multi-arch
+      # build above, so every layer is a cache hit and it adds only a few
+      # seconds.
+      - name: Build amd64 image for smoke test
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: seeql:pr-${{ matrix.variant }}
+          build-args: |
+            SEEQL_VERSION=pr-${{ github.event.pull_request.number || github.sha }}
+            VCS_REF=${{ github.sha }}
+            INSTALL_EXTRAS=${{ matrix.extras }}
+          cache-from: type=gha,scope=${{ matrix.variant }}
+
+      # `seeql serve`'s default CMD runs a full synchronous initial
+      # collection against the configured production MySQL before it opens
+      # the HTTP port. With no DB reachable in CI, each of the ~19
+      # collectors retries a ~10s connect timeout with backoff, pushing
+      # first-listen well past this step's retry budget (confirmed locally:
+      # multiple minutes, vs. the ~1s below). --no-scheduler serves the API
+      # only, which is all this smoke test is meant to check — booting and
+      # answering HTTP — not live production DB connectivity, which no
+      # ephemeral CI runner has anyway.
+      - name: Boot smoke test
+        run: |
+          docker run -d --name seeql-smoke -p 8080:8080 seeql:pr-${{ matrix.variant }} seeql serve --no-scheduler
+          for i in $(seq 1 20); do curl -fsS http://localhost:8080/health && exit 0 || sleep 3; done
+          docker logs seeql-smoke; exit 1

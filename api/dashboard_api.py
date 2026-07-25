@@ -448,28 +448,6 @@ def wait_events_top(
     return query_rows(sql, (server, server, limit))
 
 
-@router.get("/server/gcp-metrics")
-def gcp_metrics(
-    range: str = QueryParam(default="1h"),
-    metrics: str = QueryParam(default="cpu,memory,disk"),
-    server: str = QueryParam(default=None),
-):
-    """GCP Cloud Monitoring metrics over time."""
-    server = resolve_server_id(server)
-    start, end = parse_time_range(range)
-    metric_list = [m.strip() for m in metrics.split(",")]
-    placeholders = ",".join("?" * len(metric_list))
-    sql = f"""
-        SELECT snapshot_time, metric_name, value, unit
-        FROM gcp_metric_snapshots
-        WHERE metric_name IN ({placeholders})
-          AND snapshot_time BETWEEN ? AND ?
-          {_sf(server)}
-        ORDER BY snapshot_time ASC
-    """
-    return query_rows(sql, (*metric_list, start, end, *_sp(server)))
-
-
 # ---------------------------------------------------------------------------
 # Incidents (Phase 1.10)
 # ---------------------------------------------------------------------------

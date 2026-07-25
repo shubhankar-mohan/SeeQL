@@ -109,8 +109,7 @@ stdout. Save it yourself:
 seeql replay --incident 42 > reports/incident-42.md
 ```
 
-Auto-save-to-reports is tracked as a P2 todo (see
-[TODOS.md](../TODOS.md#auto-generated-postmortem-markdown-files)).
+Auto-save-to-reports is tracked as a follow-up item internally.
 
 ## Multi-server isolation
 

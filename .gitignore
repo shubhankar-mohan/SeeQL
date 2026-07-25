@@ -46,6 +46,12 @@ data/grandline_demo.db
 data/grandline_demo.db-*
 dist/
 
-# Internal working docs (local-only)
+# Internal dev docs (local-only)
+IMPLEMENTATION.md
+PLAN.md
+TODOS.md
+FRONTEND_CLAUDE.md
+CLAUDE.md
+SETUP.md
 RELEASE_AUDIT.md
 EXECUTION_PLAN.md

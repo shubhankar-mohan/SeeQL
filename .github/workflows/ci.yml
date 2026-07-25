@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install SeeQL (dev,api,mcp,openai extras)
+        run: pip install -e ".[dev,api,mcp,openai]"
+
+      # advisory until the pre-existing lint debt is cleared in a follow-up;
+      # flip to a hard gate then.
+      - name: Lint (ruff)
+        run: ruff check .
+        continue-on-error: true
+
+      - name: Test
+        run: pytest -q

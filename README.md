@@ -17,6 +17,8 @@ Cloud SQL, AWS RDS/Aurora, or self-hosted.
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](pyproject.toml)
 [![Build status](https://img.shields.io/github/actions/workflow/status/shubhankar-mohan/SeeQL/docker-publish.yml?branch=main)](https://github.com/shubhankar-mohan/SeeQL/actions/workflows/docker-publish.yml)
 
+Requires Python 3.12+ (uses modern typing syntax).
+
 ---
 
 ## Table of contents
@@ -28,6 +30,9 @@ Cloud SQL, AWS RDS/Aurora, or self-hosted.
 - [Configuration](#configuration)
 - [CLI](#cli)
 - [Dashboard](#dashboard)
+- [Use it from Claude (MCP)](#use-it-from-claude-mcp)
+- [Alert → automated investigation](#alert--automated-investigation)
+- [Incident replay](#incident-replay)
 - [Prometheus](#prometheus)
 - [Alerting](#alerting)
 - [API](#api)
@@ -184,19 +189,26 @@ innodb_monitor_enable=all
 
 Restart the server after changing these.
 
-**Execution-stage timing** (parsing / optimizing / sending data / sorting
-— where a query spends its time) needs its `performance_schema`
-instruments turned on separately; stock MySQL 8.0 ships them disabled.
-Run once, as a privileged user:
+### 3. Stage instrumentation (optional, for execution-stage breakdowns)
+
+The `execution_stages` collector reports where query time goes (parsing,
+optimizing, sorting, sending data). It needs two `performance_schema`
+instruments turned on that are off by default — enable at runtime:
 
 ```sql
 UPDATE performance_schema.setup_instruments
 SET ENABLED = 'YES', TIMED = 'YES'
 WHERE NAME LIKE 'stage/%';
+
+UPDATE performance_schema.setup_consumers
+SET ENABLED = 'YES'
+WHERE NAME LIKE 'events_stages%';
 ```
 
-Without this, the `execution_stages` collector still runs but returns no
-rows — it degrades silently, no error.
+This does not persist across a MySQL restart. On Cloud SQL, make it
+permanent with the `performance-schema-instrument` flag set to
+`stage/%=ON`. On self-hosted MySQL, add the equivalent
+`performance-schema-instrument` line to `my.cnf`.
 
 ---
 
@@ -283,6 +295,42 @@ Not a real production workload.)*
 ![Schema and Indexes page — table sizes with row counts and data/index MB](https://raw.githubusercontent.com/shubhankar-mohan/SeeQL/main/docs/screenshots/schema.png)
 
 See [docs/dashboard.md](docs/dashboard.md) for a per-page tour.
+
+---
+
+## Use it from Claude (MCP)
+
+SeeQL ships an MCP server: 28 read-only/gated tools (state reports, query
+history, EXPLAINs, live locks — plus opt-in actions) behind a safety layer
+with per-session budgets and rate limits.
+
+```bash
+seeql mcp            # stdio, for Claude Desktop / Claude Code
+seeql mcp --http     # bearer-token HTTP for remote clients
+```
+
+Point Claude at your database and ask "why is checkout slow?" —
+setup in [docs/mcp.md](docs/mcp.md).
+
+---
+
+## Alert → automated investigation
+
+`POST /webhooks/{provider}` (PagerDuty, Grafana, GCP Monitoring, generic;
+HMAC-verified) triggers a 3-phase investigation: zero-cost triage from
+collected data → budgeted LLM root-cause analysis → bounded follow-up
+sampling with load guards. Results land in the dashboard and
+`seeql investigations`. See [docs/incidents.md](docs/incidents.md).
+
+---
+
+## Incident replay
+
+```bash
+seeql replay --latest        # timeline + LLM postmortem of the last incident
+```
+
+Works without an LLM key too (timeline-only postmortem primer).
 
 ---
 

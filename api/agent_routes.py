@@ -198,31 +198,3 @@ def test_alert():
         results[name] = channel.send(test_alert)
 
     return {"channels_tested": results}
-
-
-# ---------------------------------------------------------------------------
-# Anomaly Detection
-# ---------------------------------------------------------------------------
-
-@router.get("/api/v1/anomalies")
-def check_anomalies():
-    """Run anomaly detection and return current anomalies."""
-    from alerting.anomaly import detect_anomalies, METRIC_CONFIGS
-    anomalies = detect_anomalies()
-    return {
-        "anomaly_count": len(anomalies),
-        "anomalies": [
-            {
-                "metric": a.metric,
-                "description": METRIC_CONFIGS.get(a.metric, {}).get("description", a.metric),
-                "current": round(a.current, 4),
-                "baseline_mean": round(a.baseline_mean, 4),
-                "baseline_stddev": round(a.baseline_stddev, 4),
-                "z_score": round(a.z_score, 2),
-                "pct_change": round(a.pct_change, 1),
-                "direction": a.direction,
-                "severity": a.severity,
-            }
-            for a in anomalies
-        ],
-    }
