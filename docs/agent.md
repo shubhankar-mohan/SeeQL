@@ -21,7 +21,7 @@ Set in `settings.local.yaml`:
 ```yaml
 agent:
   enabled: true
-  model: "claude-sonnet-4-6"          # or "gemini-2.0-flash", etc.
+  model: "gemini-2.5-flash"           # shipped default; or a claude-* id like "claude-opus-4-6"
   anthropic_api_key: "${ANTHROPIC_API_KEY}"
 ```
 

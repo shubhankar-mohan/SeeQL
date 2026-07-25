@@ -75,9 +75,12 @@ open http://localhost:8080                 # dashboard
 > instance (all databases inside an instance are monitored automatically).
 > See [docs/config.md](docs/config.md).
 >
-> **LLM agent is opt-in.** Metrics + anomaly detection run without any LLM. Add
-> `agent: {enabled: true, model: claude-opus-4-6}` to `seeql.yml` and pass
-> `-e ANTHROPIC_API_KEY=sk-ant-...` for Claude-written root-cause narrations.
+> **LLM agent is opt-in.** Metrics + anomaly detection run without any LLM.
+> Enable it with `agent: {enabled: true, model: gemini-2.5-flash}`
+> (gemini-2.5-flash is the shipped model default; needs a GCP project +
+> Vertex AI credentials) — or use any `claude-*` model +
+> `-e ANTHROPIC_API_KEY=sk-ant-...` for a GCP-free setup with Claude-written
+> root-cause narrations.
 
 ---
 
@@ -163,7 +166,8 @@ SeeQL depends on `performance_schema` and the slow query log.
 | Flag | Value | Why |
 |------|-------|-----|
 | `performance_schema` | `on` | Query digests, wait events, lock waits |
-| `slow_query_log` | `on` | Slow query log collector |
+| `performance_schema` consumers/instruments | enabled | digests/waits/stages data — granular state isn't individually verified by `seeql doctor` (it only checks the top-level flag above) |
+| `slow_query_log` | `on` | Slow query log collector — ingested via Cloud Logging on the `-gcp` image; on other platforms the `Slow_queries` counter is tracked but log *entries* are not collected yet |
 | `long_query_time` | `1` | Log queries > 1s |
 | `innodb_monitor_enable` | `all` | 300+ InnoDB internal metrics |
 
@@ -180,37 +184,46 @@ innodb_monitor_enable=all
 
 Restart the server after changing these.
 
+**Execution-stage timing** (parsing / optimizing / sending data / sorting
+— where a query spends its time) needs its `performance_schema`
+instruments turned on separately; stock MySQL 8.0 ships them disabled.
+Run once, as a privileged user:
+
+```sql
+UPDATE performance_schema.setup_instruments
+SET ENABLED = 'YES', TIMED = 'YES'
+WHERE NAME LIKE 'stage/%';
+```
+
+Without this, the `execution_stages` collector still runs but returns no
+rows — it degrades silently, no error.
+
 ---
 
 ## Configuration
 
-Every knob can be set via environment variable OR `settings.local.yaml`.
-Env vars win over file config. See
-[docs/config.md](docs/config.md) for the full matrix.
+SeeQL is configured by **one YAML file** (mounted at `/etc/seeql/seeql.yml` in
+Docker, or pointed to by `SEEQL_CONFIG`). Secrets are injected into that file
+via `${VAR}` placeholders resolved from the environment / `.env`. Connection
+and server settings are **file-only by design** — there are no `PROD_DB_*`
+env overrides.
 
-Most common env vars:
+| Variable | What |
+|----------|------|
+| `SEEQL_CONFIG` | Path to your config file (default `/etc/seeql/seeql.yml`) |
+| `PROD_DB_PASSWORD` (via `${…}`) | MySQL password referenced from the config file |
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENAI_BASE_URL` | LLM credentials |
+| `SLACK_WEBHOOK_URL` (via `${…}`) | Slack alerts channel |
+| `SEEQL_AGENT_ENABLED` | Override `agent.enabled` (kill-switch) |
+| `SEEQL_API_PORT` | HTTP port (default 8080) |
+| `SEEQL_MON_DB_PATH` | Monitoring SQLite path |
+| `SEEQL_DB_MAX_SIZE_MB` | SQLite size cap (default 5000) |
+| `SEEQL_RETENTION_DAYS` | Data retention (default 90) |
+| `SEEQL_LOG_LEVEL` / `SEEQL_LOG_MAX_SIZE_MB` | Logging knobs |
+| `SEEQL_PROM_CACHE_TTL` | /metrics re-read cadence seconds (default 10) |
 
-| Variable | Required | Default | What |
-|----------|----------|---------|------|
-| `PROD_DB_HOST` | yes | — | MySQL host |
-| `PROD_DB_PORT` | | 3306 | MySQL port |
-| `PROD_DB_USER` | | `dba_agent` | Monitoring user |
-| `PROD_DB_PASSWORD` | yes | — | Monitoring password |
-| `PROD_DB_DATABASE` | yes | — | Default schema (for EXPLAIN) |
-| `SEEQL_AGENT_ENABLED` | | `false` | Enable LLM root-cause analysis |
-| `SEEQL_AGENT_MODEL` | | `claude-sonnet-4-6` | LLM model name |
-| `ANTHROPIC_API_KEY` | | — | Claude API key (if using Claude) |
-| `SEEQL_ALERTING_ENABLED` | | `false` | Evaluate alert rules |
-| `SLACK_WEBHOOK_URL` | | — | Slack incoming webhook |
-| `SEEQL_FAST_INTERVAL` | | `30` | Fast loop interval (seconds) |
-| `SEEQL_MEDIUM_INTERVAL` | | `300` | Medium loop interval (seconds) |
-| `SEEQL_SLOW_INTERVAL` | | `1800` | Slow loop interval (seconds) |
-| `SEEQL_DB_MAX_SIZE_MB` | | `5000` | Max SQLite DB size (MB) |
-| `SEEQL_RETENTION_DAYS` | | `90` | Data retention (days) |
-| `SEEQL_LOG_LEVEL` | | `INFO` | Log level |
-
-GCP-specific vars only apply when you're using the `-gcp` image
-or `[gcp]` extra — see [GCP extras](#gcp--cloud-sql-extras).
+Everything else (`servers:`, intervals, `agent:`, `alerting:`, `webhooks:`,
+`mcp:`) lives in the YAML — see [docs/config.md](docs/config.md).
 
 ---
 
@@ -228,6 +241,8 @@ seeql replay --latest             # reconstruct + narrate the most recent incide
 seeql replay --incident 42        # narrate a specific incident id
 seeql replay --from <ts> --to <ts>
 seeql incidents list              # browse detected incident windows
+seeql investigations list|show|trigger|abort  # webhook-triggered investigations
+seeql mcp [--http]                 # run the MCP server (stdio by default)
 ```
 
 Full reference in [docs/cli.md](docs/cli.md).
@@ -237,8 +252,9 @@ Full reference in [docs/cli.md](docs/cli.md).
 ## Dashboard
 
 Served at `http://<host>:8080/` — overview, queries, locks, schema, server,
-and incidents pages. HTMX auto-refresh, no SPA build step, ARIA live regions
-on auto-updating widgets.
+and an Action Center page; incidents render as a timeline widget on
+Overview. HTMX auto-refresh, no SPA build step, ARIA live regions on
+auto-updating widgets.
 
 *(All screenshots show the One Piece-themed **Grand Line** demo dataset —
 `pirates`, `crews`, `bounties`, `devil_fruits` — staged mid lock-cascade
@@ -294,7 +310,7 @@ monitoring SQLite DB. Match it to your scrape interval.
 
 ## Alerting
 
-Six deterministic rules plus one statistical anomaly rule, all configurable:
+Seven deterministic rules plus one statistical anomaly rule, all configurable:
 
 | Rule | Default trigger | Severity |
 |------|----------------|----------|
@@ -303,8 +319,12 @@ Six deterministic rules plus one statistical anomaly rule, all configurable:
 | `query_regression` | Any query 5× slower than 7d baseline | warning |
 | `ddl_change` | Any schema change detected | info |
 | `high_cpu` | CPU > 85% | warning |
+| `high_memory` | Memory > 85% | warning |
 | `deadlock_detected` | Deadlock in `SHOW ENGINE INNODB STATUS` | critical |
 | `anomaly_detection` | z-score > 3 on same-hour-same-weekday baseline | warning |
+
+`anomaly_detection` escalates to critical at z ≥ 1.5× threshold (default
+z ≥ 4.5, since the default `z_threshold` is 3.0).
 
 Channels: Slack, generic webhook, log. Cooldowns are per-rule and
 per-server. See [docs/alerting.md](docs/alerting.md) for tuning.
@@ -340,6 +360,13 @@ The `[gcp]` optional extra (and the `-gcp` image variant) add:
 - Google GenAI SDK — Gemini via Vertex AI, and Claude via Vertex AI
   (`AnthropicVertex`)
 
+> **RDS / Aurora / self-hosted:** Infra metrics (CPU/mem/disk) are
+> GCP-only today — on RDS/Aurora/self-hosted, MySQL-level monitoring
+> works fully but `high_cpu`/`high_memory` and 2 of 7 anomaly-detection
+> metrics (`cpu_utilization`, `memory_utilization`) are inactive since
+> nothing populates the `gcp_metric_snapshots` table they read from. A
+> CloudWatch collector is planned.
+
 **Service account roles required:**
 
 - `roles/monitoring.viewer` — Cloud Monitoring API
@@ -349,8 +376,10 @@ The `[gcp]` optional extra (and the `-gcp` image variant) add:
 **Compose:**
 
 ```bash
-export PROD_DB_HOST=... PROD_DB_PASSWORD=... PROD_DB_DATABASE=...
-export GCP_PROJECT_ID=... GCP_CLOUD_SQL_INSTANCE=...
+# seeql.yml: add host/database + a per-server `gcp:` block
+#   (project_id, cloud_sql_instance_id) — see docs/config.md
+cp seeql.example.yml seeql.yml && $EDITOR seeql.yml
+export PROD_DB_PASSWORD=your_password
 docker compose -f docker-compose.gcp.yml up -d
 ```
 

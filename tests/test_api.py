@@ -317,3 +317,9 @@ class TestStatusEndpoint:
     def test_scheduler_not_running(self, api_client):
         resp = api_client.get("/status")
         assert resp.status_code == 200
+
+
+def test_prom_cache_ttl_config(monkeypatch):
+    from api import prometheus
+    monkeypatch.setattr(prometheus, "get_config", lambda: {"prometheus": {"cache_ttl_seconds": 42}})
+    assert prometheus._get_cache_ttl() == 42

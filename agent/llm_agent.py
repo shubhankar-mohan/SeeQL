@@ -153,6 +153,16 @@ def _cfg_value(config: dict, key: str) -> str | None:
     return v or None
 
 
+def _adc_available() -> bool:
+    """True when google-auth can resolve any default credentials (env var, ADC file, metadata)."""
+    try:
+        import google.auth
+        google.auth.default()
+        return True
+    except Exception:
+        return False
+
+
 def _detect_backend(config: dict) -> dict | None:
     """Detect which LLM backend to use.
 
@@ -170,8 +180,10 @@ def _detect_backend(config: dict) -> dict | None:
     """
     gcp_config = get_config().get("gcp", {})
     project_id = gcp_config.get("project_id")
-    model = config.get("model", "gemini-2.0-flash")
-    has_gcp_creds = bool(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") and project_id)
+    if project_id in (None, "", "your-gcp-project-id"):
+        project_id = None
+    model = config.get("model", "gemini-2.5-flash")
+    has_gcp_creds = bool(project_id) and (bool(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")) or _adc_available())
 
     anthropic_key = _cfg_value(config, "anthropic_api_key")
     openai_key = _cfg_value(config, "openai_api_key") or os.environ.get("OPENAI_API_KEY")
@@ -179,14 +191,14 @@ def _detect_backend(config: dict) -> dict | None:
 
     def _vertex_claude():
         return {"type": "vertex-claude", "model": model, "project_id": project_id,
-                "region": gcp_config.get("vertex_region", "us-east5")}
+                "region": gcp_config.get("claude_region") or gcp_config.get("vertex_region", "us-east5")}
 
     def _anthropic():
         return {"type": "anthropic", "model": model, "api_key": anthropic_key}
 
     def _gemini(m):
         return {"type": "gemini", "model": m, "project_id": project_id,
-                "region": gcp_config.get("vertex_region", "us-central1")}
+                "region": gcp_config.get("gemini_region") or gcp_config.get("vertex_region", "us-central1")}
 
     def _openai():
         return {"type": "openai", "model": model, "api_key": openai_key,
@@ -206,7 +218,7 @@ def _detect_backend(config: dict) -> dict | None:
         if provider == "vertex-claude":
             return _vertex_claude() if has_gcp_creds else _missing("GCP credentials")
         if provider == "gemini":
-            return _gemini(model if model.startswith("gemini") else "gemini-2.0-flash") \
+            return _gemini(model if model.startswith("gemini") else "gemini-2.5-flash") \
                 if has_gcp_creds else _missing("GCP credentials")
         logger.warning("Unknown agent.provider %r; falling back to auto-detection.", provider)
 
@@ -224,15 +236,16 @@ def _detect_backend(config: dict) -> dict | None:
     # --- Fallback by whatever credentials exist -------------------------------
     if has_gcp_creds:
         if not model.startswith("gemini"):
-            logger.warning("Model %r has no matching backend/creds; using gemini-2.0-flash "
+            logger.warning("Model %r has no matching backend/creds; using gemini-2.5-flash "
                            "via Vertex AI (GCP creds present).", model)
-            model = "gemini-2.0-flash"
+            model = "gemini-2.5-flash"
         return _gemini(model)
     if anthropic_key:
         if not model.startswith("claude"):
+            fallback = config.get("fallback_model", "claude-sonnet-4-20250514")
             logger.warning("Model %r has no matching backend/creds; using "
-                           "claude-sonnet-4-20250514 via the Anthropic API.", model)
-            model = "claude-sonnet-4-20250514"
+                           "%s via the Anthropic API.", model, fallback)
+            model = fallback
         return _anthropic()
     if openai_key or openai_base_url:
         return _openai()

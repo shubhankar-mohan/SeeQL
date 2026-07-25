@@ -1,7 +1,7 @@
 # Alerting
 
-SeeQL ships **6 deterministic rules** plus **1 statistical anomaly
-detection rule** = 7 configured. All are individually toggleable,
+SeeQL ships **7 deterministic rules** plus **1 statistical anomaly
+detection rule** = 8 configured. All are individually toggleable,
 tunable, and per-channel routable.
 
 Evaluation runs at the end of every medium loop (default every 5 min).
@@ -87,6 +87,21 @@ high_cpu:
   channels: [slack, log]
 ```
 
+### `high_memory` — warning
+
+**Triggers when:** Cloud SQL memory utilization exceeds `threshold`
+(0–1). Same GCP dependency as `high_cpu` — requires the `[gcp]` extra +
+`gcp.project_id` configured; otherwise this rule is a no-op.
+
+```yaml
+high_memory:
+  enabled: true
+  severity: warning
+  threshold: 0.85                     # 85 %
+  cooldown_minutes: 15
+  channels: [slack, log]
+```
+
 ### `deadlock_detected` — critical
 
 **Triggers when:** the `SHOW ENGINE INNODB STATUS` parser finds a new
@@ -102,9 +117,10 @@ deadlock_detected:
 
 ### `anomaly_detection` — warning
 
-**Triggers when:** any of 8 tracked metrics has a z-score above
+**Triggers when:** any of 7 tracked metrics has a z-score above
 `z_threshold` vs its same-hour-same-weekday baseline over 28 days
 (with fallbacks to 24-hour and all-data baselines for cold starts).
+Escalates to `critical` when z ≥ 1.5× `z_threshold`.
 
 ```yaml
 anomaly_detection:
@@ -119,11 +135,10 @@ Tracked metrics (from `alerting/anomaly.py`):
 
 - `threads_running`
 - `threads_connected`
-- `queries_per_second`
-- `slow_queries_per_second`
+- `qps`
 - `lock_frequency`
-- `cpu_utilization`
-- `memory_utilization`
+- `cpu_utilization` — GCP images only (`[gcp]` extra + `gcp.project_id`)
+- `memory_utilization` — GCP images only (`[gcp]` extra + `gcp.project_id`)
 - `buffer_pool_hit_ratio`
 
 Anomaly events persist to `anomaly_events` and feed the incident
