@@ -36,6 +36,22 @@ class QueryDigestCollector(BaseCollector):
     is a normalized query pattern with accumulated stats.
     """
 
+    # P1b-8: exec_count (COUNT_STAR) and every SUM_*/MAX_*/MIN_* column
+    # queries.QUERY_DIGESTS reads are CUMULATIVE counters that
+    # performance_schema has kept since each digest was first seen — they
+    # only ever increase. A
+    # `TRUNCATE performance_schema.events_statements_summary_by_digest` or a
+    # server restart resets every digest's counters back to zero. No
+    # consumer diffs exec_count across snapshots today (nothing computes a
+    # rate like "executions/sec for this fingerprint"), so a reset is
+    # currently harmless — the next snapshot simply starts accumulating
+    # again under the same digest hash. Before adding trend math that DIFFS
+    # exec_count (or any of these other cumulative columns) between
+    # snapshots, add reset detection first: a snapshot whose exec_count is
+    # LOWER than the previous snapshot's for the same digest means a reset
+    # happened in between, and that pair must be skipped rather than
+    # reported as a large negative delta.
+
     @property
     def name(self) -> str:
         return "query_digests"

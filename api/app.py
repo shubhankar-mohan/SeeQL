@@ -7,9 +7,11 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from api.auth import BearerTokenMiddleware, resolve_auth_token
 from api.routes import router
 from api.dashboard_routes import router as dashboard_router
 from api.dashboard_api import router as dashboard_api_router
+from config import get_config
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -20,6 +22,17 @@ def create_app() -> FastAPI:
         description="MySQL DBA Agent - LLM-powered MySQL monitoring",
         version="0.1.0",
     )
+
+    # Optional bearer auth (api.auth_token) — inert until configured, so
+    # existing deployments/tests that never set a token are unaffected.
+    api_cfg = get_config().get("api") or {}
+    auth_token = resolve_auth_token(api_cfg)
+    if auth_token:
+        app.add_middleware(
+            BearerTokenMiddleware,
+            token=auth_token,
+            protect_reads=bool(api_cfg.get("protect_reads", False)),
+        )
 
     # Static files
     static_dir = BASE_DIR / "static"

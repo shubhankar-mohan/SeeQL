@@ -9,7 +9,7 @@
 #   api,gcp              — adds Cloud Monitoring and Cloud Logging support
 #
 # google-genai (Vertex AI / Gemini backend) is installed in every variant so
-# the documented default model (gemini-2.0-flash) works out of the box.
+# the documented default model (gemini-2.5-flash) works out of the box.
 #
 # Build args:
 #   SEEQL_VERSION    Image version label (default: dev)

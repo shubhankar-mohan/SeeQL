@@ -12,10 +12,12 @@ Markdown string (for the LLM prompt).
 
 import json
 import logging
+import re as _re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from agent import queries as Q
+from agent.redact import maybe_redact
 from config import get_config
 from storage.connection import get_mon_reader
 
@@ -57,6 +59,14 @@ def build_state_report(since: str | None = None, server_id: str | None = None) -
         server_id = get_server_registry().get_default_server_id()
     config = get_config().get("agent", {}).get("state_builder", {})
     regression_threshold = config.get("regression_threshold", 3.0)
+    # Absolute floor (P1c-8): suppress ratio-only "regressions" whose recent
+    # avg is still negligibly fast (e.g. 0.1ms -> 0.5ms). This is the state
+    # builder's OWN floor, read from agent.state_builder.min_recent_avg_sec
+    # (default 0.01s). Like regression_threshold above (3.0 here vs the
+    # alerting rule's 5.0), it is configured independently of
+    # alerting.rules.query_regression.min_recent_avg_sec -- the shipped
+    # default value happens to match, but they are not wired together.
+    min_recent_avg = config.get("min_recent_avg_sec", 0.01)
     long_txn_sec = config.get("long_transaction_sec", 30)
 
     report = StateReport(generated_at=datetime.now(timezone.utc).replace(tzinfo=None).isoformat())
@@ -72,7 +82,7 @@ def build_state_report(since: str | None = None, server_id: str | None = None) -
         # ---------------------------------------------------------------
         if since is None:
             since = _get_last_analysis_time(conn, server_id)
-        report.changes = _build_changes(conn, since, regression_threshold, server_id)
+        report.changes = _build_changes(conn, since, regression_threshold, min_recent_avg, server_id)
 
         # ---------------------------------------------------------------
         # 3. Historical Context
@@ -143,9 +153,17 @@ def _build_current_state(conn, long_txn_sec: int, server_id: str) -> dict:
     row = conn.execute(Q.CURRENT_QPS, (sid,)).fetchone()
     state["qps"] = row["per_second"] if row and row["per_second"] else 0
 
-    # Long transactions
+    # Long transactions — trx_query carries raw statement text, which can
+    # contain literal customer data (emails, IDs, ...) from a WHERE/SET
+    # clause. Redact at CONSTRUCTION time (not render time) so both
+    # to_markdown() and to_dict() inherit the mask — to_dict() is what
+    # mcp_server/tools/state.py and api/agent_routes.py hand to callers
+    # verbatim (P0-9).
     rows = conn.execute(Q.LONG_TRANSACTIONS, (sid, sid, long_txn_sec)).fetchall()
-    state["long_transactions"] = [dict(r) for r in rows]
+    long_txns = [dict(r) for r in rows]
+    for t in long_txns:
+        t["trx_query"] = maybe_redact(t.get("trx_query"))
+    state["long_transactions"] = long_txns
 
     # GCP metrics
     rows = conn.execute(Q.CURRENT_GCP_METRICS, (sid, sid)).fetchall()
@@ -154,7 +172,7 @@ def _build_current_state(conn, long_txn_sec: int, server_id: str) -> dict:
     return state
 
 
-def _build_changes(conn, since: str, regression_threshold: float, server_id: str) -> dict:
+def _build_changes(conn, since: str, regression_threshold: float, min_recent_avg: float, server_id: str) -> dict:
     changes = {}
     sid = server_id
 
@@ -167,7 +185,7 @@ def _build_changes(conn, since: str, regression_threshold: float, server_id: str
     changes["new_queries"] = [dict(r) for r in rows]
 
     # Query regressions
-    rows = conn.execute(Q.QUERY_REGRESSIONS, (sid, sid, regression_threshold)).fetchall()
+    rows = conn.execute(Q.QUERY_REGRESSIONS, (sid, sid, regression_threshold, min_recent_avg)).fetchall()
     changes["regressions"] = [dict(r) for r in rows]
 
     # Recent deadlocks
@@ -347,7 +365,7 @@ def _render_markdown(report: StateReport) -> str:
     bp = cs.get("buffer_pool", {})
     if bp:
         hit = bp.get("hit_ratio")
-        hit_str = f"{hit:.4f}" if hit else "N/A"
+        hit_str = f"{hit:.4f}" if hit is not None else "N/A"
         lines.append(f"### Buffer Pool: hit_ratio={hit_str}, dirty_pages={bp.get('dirty_pages', 0)}")
     lines.append("")
 
@@ -359,7 +377,9 @@ def _render_markdown(report: StateReport) -> str:
     lines.append(f"### Server: Threads_running={running}, Threads_connected={connected}, QPS={qps:.1f}")
     lines.append("")
 
-    # GCP metrics
+    # GCP metrics. Empty is now common because the query filters out stale
+    # rows (>15 min old); say so explicitly rather than silently omitting the
+    # section, so the LLM knows infra data is stale/absent, not just missing.
     gcp = cs.get("gcp_metrics", {})
     if gcp:
         cpu = gcp.get("cpu_utilization")
@@ -369,12 +389,18 @@ def _render_markdown(report: StateReport) -> str:
             f"### Infrastructure: CPU={_pct(cpu)}, Memory={_pct(mem)}, Disk={_pct(disk)}"
         )
         lines.append("")
+    else:
+        lines.append("### Infrastructure: no recent GCP metrics (none within the last 15 min)")
+        lines.append("")
 
     # Long transactions
     long_txns = cs.get("long_transactions", [])
     if long_txns:
         lines.append(f"### Long Transactions: {len(long_txns)} active")
         for t in long_txns[:5]:
+            # trx_query is already redacted at construction time
+            # (_build_current_state), so no maybe_redact() call here — it
+            # would just be a redundant (if idempotent) re-application.
             lines.append(
                 f"- trx={t.get('trx_id')}, pid={t.get('pid', '?')}, age={t.get('age_sec')}s, "
                 f"rows_locked={t.get('rows_locked', 0)}, rows_modified={t.get('rows_modified', 0)}, "
@@ -467,11 +493,11 @@ def _render_markdown(report: StateReport) -> str:
     baseline_tr = hist.get("baseline_threads_running")
     if baseline_tr is not None:
         current_tr = threads.get("Threads_running", "?")
-        lines.append(f"- Threads_running now: {current_tr}, same hour last week avg: {baseline_tr:.1f}")
+        lines.append(f"- Threads_running now: {current_tr}, 28-day same-hour avg: {baseline_tr:.1f}")
 
     baseline_qps = hist.get("baseline_qps")
     if baseline_qps is not None:
-        lines.append(f"- QPS now: {qps:.1f}, same hour last week avg: {baseline_qps:.1f}")
+        lines.append(f"- QPS now: {qps:.1f}, 28-day same-hour avg: {baseline_qps:.1f}")
 
     peak_24h = hist.get("peak_threads_24h")
     if peak_24h is not None:
@@ -486,16 +512,19 @@ def _render_markdown(report: StateReport) -> str:
 
     lines.append("")
 
-    # Previous recommendations — prevents duplicate suggestions
+    # Previous recommendations — prevents duplicate suggestions. This is our OWN model's
+    # prior output being re-injected into a new prompt (second-order injection, P2-2): fence
+    # it as untrusted and strip `#` so a stored analysis can't inject new markdown headers /
+    # fake instructions into this prompt.
     prev_recs = hist.get("previous_recommendations", [])
     if prev_recs:
         lines.append("### Previous Recommendations (last 24h)")
         lines.append("Do NOT repeat these unless the issue persists and was not acted on.")
+        lines.append("<untrusted_prior_output>")
         for pr in prev_recs:
-            lines.append(
-                f"- [{pr['severity']}] at {pr['analyzed_at']}: "
-                f"{pr['recommendations'][:200]}"
-            )
+            text = (pr["recommendations"] or "")[:200].replace("#", "")
+            lines.append(f"- [{pr['severity']}] at {pr['analyzed_at']}: {text}")
+        lines.append("</untrusted_prior_output>")
         lines.append("")
 
     trends = hist.get("regression_trends", [])
@@ -553,7 +582,6 @@ def _pct(val) -> str:
     return f"{val * 100:.1f}%"
 
 
-import re as _re
 _TABLE_RE = _re.compile(
     r'(?:FROM|JOIN|UPDATE|INTO)\s+`?(?:\w+`?\.`?)?(\w+)`?', _re.IGNORECASE)
 

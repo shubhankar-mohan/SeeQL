@@ -12,6 +12,12 @@ from alerting.models import Alert
 
 logger = logging.getLogger(__name__)
 
+# Slack rejects section blocks with text over ~4000 chars. Keep a safety
+# margin and mark truncated messages so on-call engineers know more detail
+# exists in the dashboard / monitoring DB (P4-16).
+SLACK_MAX_MESSAGE_CHARS = 3900
+SLACK_TRUNCATION_MARKER = "…[truncated]"
+
 
 class AlertChannel(ABC):
     @abstractmethod
@@ -45,6 +51,10 @@ class SlackChannel(AlertChannel):
             alert.severity.value, ":bell:"
         )
 
+        message = alert.message
+        if len(message) > SLACK_MAX_MESSAGE_CHARS:
+            message = message[:SLACK_MAX_MESSAGE_CHARS] + SLACK_TRUNCATION_MARKER
+
         blocks = [
             {
                 "type": "header",
@@ -52,7 +62,7 @@ class SlackChannel(AlertChannel):
             },
             {
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": f"*Severity:* {alert.severity.value.upper()}\n*Message:* {alert.message}"},
+                "text": {"type": "mrkdwn", "text": f"*Severity:* {alert.severity.value.upper()}\n*Message:* {message}"},
             },
         ]
 

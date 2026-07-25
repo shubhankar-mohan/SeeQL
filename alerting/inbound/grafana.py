@@ -85,12 +85,14 @@ class GrafanaAdapter:
         annotations = primary.get("annotations") or {}
 
         alertname = str(labels.get("alertname") or labels.get("alert_name") or "")
+        # P2-4: cap at normalization — alert_summary reaches the LLM prompt and this
+        # payload is authenticated-but-untrusted (any HMAC/bearer-holder can submit any text).
         summary = str(
             annotations.get("summary")
             or annotations.get("description")
             or alertname
             or "(no summary)"
-        )
+        )[:500]
 
         alert_type = map_alert_type(
             alertname or summary,

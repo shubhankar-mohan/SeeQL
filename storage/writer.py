@@ -187,6 +187,76 @@ def write_ddl_changes(rows: list[dict]) -> int:
     ], rows)
 
 
+def write_schema_and_changes(snapshots: list[dict], changes: list[dict]) -> int:
+    """
+    Write schema_snapshots and ddl_changes in a single transaction.
+
+    P1b-6: SchemaSnapshotCollector must not advance its in-memory hash
+    cache until the corresponding rows are durably on disk. Writing the two
+    tables via separate write_schema_snapshots()/write_ddl_changes() calls
+    (each its own get_mon_connection() block/commit) leaves a window where
+    the snapshot commits but the DDL change doesn't (or vice versa) if the
+    process dies mid-write. Combining both executemany()s under one
+    get_mon_connection() block gives one commit for both — either both
+    land or (on exception) neither does, via that context manager's
+    rollback-on-exception behavior. The collector's store() only advances
+    its cache after this call returns successfully.
+
+    Column lists are copied verbatim from write_schema_snapshots() and
+    write_ddl_changes() above — keep them in sync if either table's schema
+    changes.
+    """
+    snapshot_columns = [
+        "server_id", "snapshot_time", "table_schema", "table_name",
+        "schema_hash", "index_hash", "create_stmt",
+        "table_rows", "data_mb", "index_mb",
+    ]
+    change_columns = [
+        "detected_at", "server_id", "table_schema", "table_name", "change_type",
+        "old_schema_hash", "new_schema_hash",
+        "old_index_hash", "new_index_hash",
+        "old_ddl", "new_ddl",
+    ]
+
+    if not snapshots and not changes:
+        return 0
+
+    def _get(row: dict, col: str):
+        val = row.get(col)
+        if val is None and col == "server_id":
+            return "default"
+        return _serialize_value(val)
+
+    snapshot_sql = "INSERT INTO schema_snapshots ({}) VALUES ({})".format(
+        ", ".join(snapshot_columns), ", ".join(["?"] * len(snapshot_columns))
+    )
+    change_sql = "INSERT INTO ddl_changes ({}) VALUES ({})".format(
+        ", ".join(change_columns), ", ".join(["?"] * len(change_columns))
+    )
+
+    snapshot_values = [
+        tuple(_get(row, col) for col in snapshot_columns) for row in snapshots
+    ]
+    change_values = [
+        tuple(_get(row, col) for col in change_columns) for row in changes
+    ]
+
+    try:
+        with get_mon_connection() as conn:
+            if snapshot_values:
+                conn.executemany(snapshot_sql, snapshot_values)
+            if change_values:
+                conn.executemany(change_sql, change_values)
+            logger.debug(
+                f"Inserted {len(snapshot_values)} schema_snapshots + "
+                f"{len(change_values)} ddl_changes rows (single transaction)"
+            )
+        return len(snapshot_values) + len(change_values)
+    except Exception as e:
+        logger.error(f"Failed to write schema snapshot + DDL changes: {e}")
+        raise
+
+
 def write_gcp_metrics(rows: list[dict]) -> int:
     return _batch_insert("gcp_metric_snapshots", [
         "server_id", "snapshot_time", "metric_name", "metric_type", "value", "unit",
@@ -245,6 +315,7 @@ def write_agent_analysis(rows: list[dict]) -> int:
     return _batch_insert("agent_analyses", [
         "analyzed_at", "server_id", "analysis_type", "severity", "input_summary",
         "findings", "recommendations", "applied", "outcome_notes",
+        "model", "tool_calls", "duration_ms",
     ], rows)
 
 
@@ -258,6 +329,7 @@ def write_agent_analysis_one(row: dict) -> int:
     cols = [
         "analyzed_at", "server_id", "analysis_type", "severity", "input_summary",
         "findings", "recommendations", "applied", "outcome_notes",
+        "model", "tool_calls", "duration_ms",
     ]
     placeholders = ", ".join(["?"] * len(cols))
     col_names = ", ".join(cols)
@@ -273,6 +345,72 @@ def write_agent_analysis_one(row: dict) -> int:
     with get_mon_connection() as conn:
         cursor = conn.execute(sql, values)
         return cursor.lastrowid
+
+
+def write_agent_analysis_and_link(
+    analysis: dict, incident_id: int | None, server_id: str | None = None,
+    status: str = "analyzed",
+) -> tuple[int, bool]:
+    """
+    Insert an agent_analyses row and (when `incident_id` is given) link it to
+    an OPEN incident_windows row, in ONE get_mon_connection() transaction
+    (P1-21).
+
+    Storing the analysis and linking it to its incident used to be two
+    separate get_mon_connection() calls/commits (write_agent_analysis_one()
+    then alerting.incidents.set_incident_analysis()). Between them, a
+    concurrently-running resolve_returned_to_baseline() sweep could resolve
+    the incident, and the old *blind* UPDATE in the link step would then
+    resurrect it — a resolve-then-resurrect race. Running both statements on
+    the same connection, under the single get_mon_connection() lock/commit,
+    closes that window: either both land together, or the guarded UPDATE
+    below correctly no-ops against whatever status is already committed.
+
+    We can't just call alerting.incidents.set_incident_analysis() here: that
+    function opens its own get_mon_connection(), and _mon_lock is a plain
+    (non-reentrant) threading.Lock — calling it from inside a connection we
+    already hold would deadlock. So the guard below is intentionally a
+    duplicate of that function's UPDATE (same WHERE clause: only an OPEN
+    incident — status 'detected'/'analyzed' — on the given server_id is ever
+    touched; a 'resolved' incident is never resurrected). Keep both in sync.
+
+    Returns:
+        (analysis_id, linked) — `linked` is True only if the UPDATE actually
+        changed a row (mirrors set_incident_analysis's return contract).
+        `linked` is always False when incident_id is None.
+    """
+    cols = [
+        "analyzed_at", "server_id", "analysis_type", "severity", "input_summary",
+        "findings", "recommendations", "applied", "outcome_notes",
+        "model", "tool_calls", "duration_ms",
+    ]
+    placeholders = ", ".join(["?"] * len(cols))
+    col_names = ", ".join(cols)
+    insert_sql = f"INSERT INTO agent_analyses ({col_names}) VALUES ({placeholders})"
+
+    def _get(col: str):
+        val = analysis.get(col)
+        if val is None and col == "server_id":
+            return "default"
+        return _serialize_value(val)
+
+    values = tuple(_get(c) for c in cols)
+
+    with get_mon_connection() as conn:
+        cursor = conn.execute(insert_sql, values)
+        analysis_id = cursor.lastrowid
+
+        linked = False
+        if incident_id is not None:
+            link_cursor = conn.execute(
+                "UPDATE incident_windows SET status = ?, analysis_id = ? "
+                "WHERE id = ? AND status IN ('detected','analyzed')"
+                + (" AND server_id = ?" if server_id else ""),
+                (status, analysis_id, incident_id, *((server_id,) if server_id else ())),
+            )
+            linked = link_cursor.rowcount > 0
+
+    return analysis_id, linked
 
 
 def write_inbound_alert(row: dict) -> int:

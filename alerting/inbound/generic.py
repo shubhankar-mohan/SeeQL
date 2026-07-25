@@ -79,7 +79,9 @@ class GenericAdapter:
             external_id=external_id,
             alert_type=alert_type,
             severity=coerce_severity(payload.get("severity")),
-            summary=str(payload.get("summary") or payload.get("title") or "(no summary)"),
+            # P2-4: cap at normalization — alert_summary reaches the LLM prompt and this
+            # payload is authenticated-but-untrusted (any HMAC-holder can submit any text).
+            summary=str(payload.get("summary") or payload.get("title") or "(no summary)")[:500],
             fired_at=str(payload.get("fired_at") or "").strip(),
             server_id=resolve_server_id(payload, self.provider, provider_default_server_id),
             callback_url=payload.get("callback_url"),

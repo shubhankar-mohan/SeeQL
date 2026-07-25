@@ -1,7 +1,7 @@
 # Alerting
 
-SeeQL ships **6 deterministic rules** plus **1 statistical anomaly
-detection rule** = 7 configured. All are individually toggleable,
+SeeQL ships **7 deterministic rules** plus **1 statistical anomaly
+detection rule** = 8 configured. All are individually toggleable,
 tunable, and per-channel routable.
 
 Evaluation runs at the end of every medium loop (default every 5 min).
@@ -87,6 +87,21 @@ high_cpu:
   channels: [slack, log]
 ```
 
+### `high_memory` — warning
+
+**Triggers when:** Cloud SQL memory utilization exceeds `threshold`
+(0–1). Same GCP dependency as `high_cpu` — requires the `[gcp]` extra +
+`gcp.project_id` configured; otherwise this rule is a no-op.
+
+```yaml
+high_memory:
+  enabled: true
+  severity: warning
+  threshold: 0.85                     # 85 %
+  cooldown_minutes: 15
+  channels: [slack, log]
+```
+
 ### `deadlock_detected` — critical
 
 **Triggers when:** the `SHOW ENGINE INNODB STATUS` parser finds a new
@@ -102,9 +117,10 @@ deadlock_detected:
 
 ### `anomaly_detection` — warning
 
-**Triggers when:** any of 8 tracked metrics has a z-score above
+**Triggers when:** any of 7 tracked metrics has a z-score above
 `z_threshold` vs its same-hour-same-weekday baseline over 28 days
 (with fallbacks to 24-hour and all-data baselines for cold starts).
+Escalates to `critical` when z ≥ 1.5× `z_threshold`.
 
 ```yaml
 anomaly_detection:
@@ -115,15 +131,34 @@ anomaly_detection:
   channels: [slack, log]
 ```
 
+**Baseline warm-up.** The same-hour-same-weekday baseline is only as good
+as the history behind it, and it fills in gradually after install. Each
+calendar week contributes just one instance of any given weekday, so a
+genuinely representative same-hour baseline needs several weeks of data to
+accumulate — up to the full 28-day window. To reach a usable sample count
+sooner, the same-hour query matches a **±1-hour band** (the current UTC
+hour and its two neighbours) rather than an exact hour, tripling the rows
+that qualify for each matching weekday. `min_samples` ranges from 3 to 5
+depending on the metric (3 for most; `threads_connected`,
+`memory_utilization`, and `buffer_pool_hit_ratio` require 5) — until the
+preferred window holds at least that many samples, `compute_baseline()`
+falls back to the all-data baseline (every sample older than 10 minutes),
+so anomaly detection works from early on but off a coarser, non-seasonal
+band. In practice, sensitivity ramps up over roughly
+the first few weeks as same-weekday history builds and detection shifts
+onto the tighter weekly-seasonal baseline. (Metrics configured without a
+weekly pattern — e.g. `threads_connected`, `memory_utilization` — use a
+rolling 24-hour baseline as their primary window instead, with the same
+all-data fallback.)
+
 Tracked metrics (from `alerting/anomaly.py`):
 
 - `threads_running`
 - `threads_connected`
-- `queries_per_second`
-- `slow_queries_per_second`
+- `qps`
 - `lock_frequency`
-- `cpu_utilization`
-- `memory_utilization`
+- `cpu_utilization` — GCP images only (`[gcp]` extra + `gcp.project_id`)
+- `memory_utilization` — GCP images only (`[gcp]` extra + `gcp.project_id`)
 - `buffer_pool_hit_ratio`
 
 Anomaly events persist to `anomaly_events` and feed the incident

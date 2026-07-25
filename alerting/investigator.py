@@ -13,8 +13,8 @@ Phase 1 (≤10s, zero new MySQL queries):
     → hypothesis finding, decide whether to proceed to Phase 2
 
 Phase 2 (≤120s, budgeted):
-    run_llm_analysis with WEBHOOK_INVESTIGATION_PROMPT + tool_budget
-    → root-cause finding
+    run_llm_analysis with WEBHOOK_INVESTIGATION_PROMPT (user turn) +
+    WEBHOOK_SYSTEM_PROMPT (system turn) + tool_budget → root-cause finding
 
 Phase 3 (scheduled separately via scheduler.add_job + DateTrigger):
     implemented in CP5.
@@ -26,9 +26,7 @@ on use so tests that don't exercise the LLM path don't drag in the SDK.
 import json
 import logging
 import re
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
 
 from storage import writer
 from storage.connection import get_mon_reader
@@ -282,12 +280,14 @@ def _phase2_investigate(inv: dict, alert: InboundAlert, triage: dict) -> dict:
 
     try:
         from agent.llm_agent import run_llm_analysis
+        from agent.prompts import WEBHOOK_SYSTEM_PROMPT
         result = run_llm_analysis(
             prompt,
             analysis_type="investigation",
             server_id=inv["server_id"],
             tool_budget=budget,
             max_tool_rounds_override=int(config.get("phase2_max_tool_rounds", 8) or 8),
+            system_prompt=WEBHOOK_SYSTEM_PROMPT,
         )
     except RuntimeError as e:
         logger.info(f"Phase 2 LLM unavailable: {e}. Falling back to triage.")
@@ -383,10 +383,6 @@ _ROOT_CAUSE_RE = re.compile(
     r"\*\*Root cause\*\*\s*[:\-]\s*(.+?)(?=\n[\-\*]|\n###|\Z)",
     re.IGNORECASE | re.DOTALL,
 )
-_CONFIDENCE_RE = re.compile(
-    r"\*\*Confidence\*\*\s*[:\-]\s*([0-9]*\.?[0-9]+)",
-    re.IGNORECASE,
-)
 
 
 def _extract_root_cause(text: str) -> str | None:
@@ -399,19 +395,27 @@ def _extract_root_cause(text: str) -> str | None:
 
 
 def _extract_confidence(text: str) -> float:
-    if not text:
-        return 0.0
-    m = _CONFIDENCE_RE.search(text)
-    if not m:
-        return 0.0
-    try:
-        val = float(m.group(1))
-    except Exception:
-        return 0.0
-    # Some LLMs emit "80%" — coerce to 0-1 scale if > 1.
-    if val > 1.0:
-        val = val / 100.0
-    return max(0.0, min(val, 1.0))
+    """Confidence, parsed from the `### Confidence:` HEADER line.
+
+    P3-1 contract unification: this used to be a private bullet-form regex
+    (`- **Confidence**: 0.92`) that only this module could produce or parse —
+    which is exactly why webhook-investigation confidence showed up as null
+    everywhere else that reads `agent_analyses.outcome_notes` (that shared
+    path only ever understood the header form). WEBHOOK_SYSTEM_PROMPT now
+    mandates the same `### Confidence:` header every other analysis path
+    uses, so this delegates to the one shared parser instead of maintaining
+    a second, incompatible syntax.
+
+    NOTE: when PR-4's `parse_agent_response` lands on main it supersedes
+    `agent.llm_agent._extract_confidence` — same `###`-header syntax, so this
+    delegation stays compatible without further changes here.
+
+    Unlike the shared parser (which returns `None` when absent), this always
+    returns a float so `phase2.get("confidence", 0.0) >= threshold` in
+    `run_investigation` never has to guard against `None`.
+    """
+    from agent.llm_agent import _extract_confidence as _shared_extract_confidence
+    return _shared_extract_confidence(text) or 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -583,6 +587,17 @@ def _dispatch_findings(
     """
     Package findings as an `Alert` and send via the configured channels.
     Best-effort: channel failures must never prevent terminal transition.
+
+    SECURITY (P2-3): the outbound message is built from STRUCTURED fields
+    ONLY — severity, alert type, server id, investigation id, confidence, the
+    correlator's suspect digest, and the stored analysis id. It never
+    includes `root_cause`/`hypothesis` free text. That text is LLM output,
+    and the LLM was fed untrusted data (slow-log SQL, an externally-submitted
+    alert summary, prior analyses) — relaying it verbatim to Slack/webhook
+    channels would turn a successful prompt injection into an exfiltration
+    channel. The full narrative is still stored (`investigations.root_cause_summary`,
+    `agent_analyses`) for a human to read on the dashboard; only the channel
+    payload is allow-listed.
     """
     try:
         from alerting.models import Alert, Severity
@@ -592,10 +607,27 @@ def _dispatch_findings(
         logger.debug(f"dispatch: cannot import channel stack: {e}")
         return
 
-    root = (phase2 or {}).get("root_cause") or (triage or {}).get("hypothesis") or alert.summary
+    sev = (phase2 or {}).get("severity") or alert.severity
+
+    analysis_id = (phase2 or {}).get("analysis_id")
+    analysis_id_display = analysis_id if analysis_id is not None else "n/a"
+
+    confidence = (phase2 or {}).get("confidence")
+    if confidence is None:
+        confidence = 0.4 if triage_only else 0.0
+    conf_display = f"{confidence:.2f}" if isinstance(confidence, (int, float)) else "n/a"
+
+    # The correlator's top suspect digest is a performance_schema hash (a
+    # deterministic, fixed-format hex string MySQL computes) — structured
+    # data, not LLM free text, so it's safe in an allow-listed payload.
+    correlation = (triage or {}).get("correlation")
+    top_evidence = getattr(correlation, "top_evidence", None) if correlation is not None else None
+    digest_display = getattr(top_evidence, "digest", None) or "n/a"
+
     message = (
-        f"Investigation #{investigation_id} for {alert.alert_type} alert on "
-        f"server `{alert.server_id}`: {root}"
+        f"[{sev}] {alert.alert_type} on {alert.server_id} — investigation "
+        f"#{investigation_id} complete (confidence {conf_display}). "
+        f"Digest: {digest_display}. See dashboard/analysis #{analysis_id_display}."
     )
     context = {
         "investigation_id": investigation_id,
@@ -603,12 +635,11 @@ def _dispatch_findings(
         "provider": alert.provider,
         "server_id": alert.server_id,
         "triage_only": triage_only,
+        "confidence": confidence,
+        "analysis_id": analysis_id,
+        "digest": top_evidence.digest if top_evidence is not None else None,
     }
-    if phase2:
-        context["confidence"] = phase2.get("confidence")
-        context["analysis_id"] = phase2.get("analysis_id")
 
-    sev = alert.severity
     try:
         a = Alert(
             rule_name=f"investigation:{alert.alert_type}",

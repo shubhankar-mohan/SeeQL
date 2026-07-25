@@ -7,7 +7,7 @@ what's happening.
 
 ```
 ┌─────────────────┐     ┌──────────────────────┐     ┌─────────────────┐
-│  Target MySQL   │◄────│   Collectors (19)    │────►│  SQLite (26     │
+│  Target MySQL   │◄────│   Collectors (19)    │────►│  SQLite (30     │
 │  8.0+           │     │  Fast  /  Medium  /  │     │  tables, WAL)   │
 │                 │     │  Slow  schedulers    │     │                 │
 └─────────────────┘     └──────────────────────┘     └────────┬────────┘
@@ -29,7 +29,7 @@ what's happening.
                                      │                        ▼
 ┌──────────────────────┐     ┌───────┴──────┐          ┌──────────────┐
 │  Alerting Engine     │────►│  Channels:   │          │  agent_      │
-│  6 deterministic     │     │  Slack /     │          │  analyses    │
+│  7 deterministic     │     │  Slack /     │          │  analyses    │
 │  + anomaly rule      │     │  webhook /   │          │  table       │
 └──────────────────────┘     │  log         │          └──────────────┘
                              └──────────────┘

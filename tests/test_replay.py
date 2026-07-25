@@ -1,5 +1,6 @@
 """Tests for agent/replay.py (Phase 1.6)."""
 
+import contextlib
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -173,3 +174,136 @@ class TestReplay:
         )
         md = result.to_markdown()
         assert f"incident #{incident_id}" in md
+
+
+class TestReplayRedaction:
+    """agent/replay.py — timeline lock-wait `wq` (waiting-query) field (P0-9)."""
+
+    @staticmethod
+    def _seed_lock_wait(db_path: Path, waiting_query: str, server_id: str = "default"):
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            """INSERT INTO lock_wait_snapshots
+               (snapshot_time, server_id, waiting_pid, blocking_pid, wait_seconds,
+                waiting_query, blocking_query)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (_iso(5), server_id, 501, 502, 9, waiting_query,
+             "UPDATE loyalty_members SET points = 5 WHERE id = 1"),
+        )
+        conn.commit()
+        conn.close()
+
+    def test_waiting_query_masked_by_default(self, replay_db):
+        self._seed_lock_wait(
+            replay_db, "SELECT * FROM loyalty_members WHERE phone = '9998887777'"
+        )
+        result = run_replay(from_ts=_iso(10), to_ts=_iso(1))
+        assert "9998887777" not in result.timeline_md
+        assert "'?'" in result.timeline_md
+
+    def test_waiting_query_raw_when_disabled(self, replay_db):
+        config_module._config["agent"]["redact_sql_literals"] = False
+        self._seed_lock_wait(
+            replay_db, "SELECT * FROM loyalty_members WHERE phone = '9998887777'"
+        )
+        result = run_replay(from_ts=_iso(10), to_ts=_iso(1))
+        assert "9998887777" in result.timeline_md
+
+
+class TestReplayHardening:
+    """Task 4.5: P1-14 lock-wait downsampling, P1-17 NULL-safe formatting,
+    P3-11 window padding."""
+
+    def test_lock_wait_downsampling_caps_emitted_lines(self, replay_db):
+        """P1-14: replay used to emit ONE line per lock-wait row -- during a
+        real lock cascade (the exact incident type this tool exists for)
+        that's thousands of lines. Must downsample like the
+        threads_running series already does."""
+        server_id = "default"
+        base = datetime.now(timezone.utc) - timedelta(minutes=15)
+        conn = sqlite3.connect(str(replay_db))
+        rows = [
+            (
+                (base + timedelta(seconds=i)).isoformat(), server_id, 800 + i, 900,
+                5, "SELECT 1", "UPDATE t SET x=1",
+            )
+            for i in range(500)
+        ]
+        conn.executemany(
+            """INSERT INTO lock_wait_snapshots
+               (snapshot_time, server_id, waiting_pid, blocking_pid, wait_seconds,
+                waiting_query, blocking_query)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            rows,
+        )
+        conn.commit()
+        conn.close()
+
+        from_ts = (base - timedelta(minutes=1)).isoformat()
+        to_ts = (base + timedelta(minutes=20)).isoformat()
+        result = run_replay(from_ts=from_ts, to_ts=to_ts, server_id=server_id)
+
+        lock_lines = result.timeline_md.count("**LOCK**")
+        assert 0 < lock_lines <= 60, (
+            f"expected downsampled lock lines (<=60), got {lock_lines}"
+        )
+
+    def test_null_anomaly_value_does_not_kill_timeline(self, monkeypatch):
+        """P1-17: a NULL current_value/baseline_mean/z_score on an anomaly
+        row used to raise TypeError from `:.2f`/`:.1f` formatting, and
+        run_replay's broad except turned that into "Timeline unavailable"
+        for the WHOLE window -- not just the one bad row."""
+        import agent.replay as replay_mod
+
+        anomaly_row = {
+            "ts": "2026-01-01T00:00:00+00:00",
+            "metric_name": "threads_running",
+            "current_value": None,
+            "baseline_mean": None,
+            "z_score": None,
+            "severity": "critical",
+            "direction": "high",
+        }
+
+        class _FakeConn:
+            def execute(self, sql, params):
+                if "anomaly_events" in sql:
+                    return [anomaly_row]
+                return []
+
+        @contextlib.contextmanager
+        def _fake_reader():
+            yield _FakeConn()
+
+        monkeypatch.setattr(replay_mod, "get_mon_reader", _fake_reader)
+
+        timeline_md, counts = replay_mod._build_timeline(
+            "default", "2026-01-01T00:00:00+00:00", "2026-01-01T01:00:00+00:00"
+        )
+
+        assert "unavailable" not in timeline_md.lower()
+        assert "ANOMALY" in timeline_md
+        assert counts["anomalies"] == 1
+
+    def test_window_padded_captures_boundary_event(self, replay_db):
+        """P3-11: an event landing just BEFORE from_ts must still show up --
+        pad the internal query window by +/-5 min so an exact BETWEEN
+        doesn't silently drop the anomaly that triggered the window."""
+        server_id = "default"
+        from_ts = _iso(20)
+        to_ts = _iso(10)
+        boundary_event_ts = _iso(23)  # 3 min before from_ts -- within a 5-min pad
+
+        persist([
+            AnomalyResult(
+                metric="threads_running", current=50.0, baseline_mean=10.0,
+                baseline_stddev=2.0, z_score=20.0, pct_change=400.0,
+                direction="high", severity="critical", server_id=server_id,
+                detected_at=boundary_event_ts,
+            ),
+        ])
+
+        result = run_replay(from_ts=from_ts, to_ts=to_ts, server_id=server_id)
+
+        assert "ANOMALY" in result.timeline_md
+        assert result.events_by_category.get("anomalies", 0) >= 1

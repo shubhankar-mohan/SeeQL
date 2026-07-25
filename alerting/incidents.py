@@ -29,7 +29,7 @@ import logging
 from typing import Any
 
 from config import get_config
-from storage.connection import get_mon_connection
+from storage.connection import get_mon_connection, get_mon_reader
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,22 @@ def _gap_minutes() -> int:
     return int(
         get_config().get("alerting", {}).get("incident_gap_minutes", 15)
     )
+
+
+def _later_timestamp(a: str, b: str) -> str:
+    """Return whichever of two timestamp strings is later, without rewinding.
+
+    Comparison is done on a format-normalized copy (the `T`/space date-time
+    separator is unified) so a stray formatting difference between the two
+    inputs can't flip the ordering, but the ORIGINAL (un-normalized) string of
+    the later timestamp is what gets returned/stored — callers should not see
+    their T-format rewritten. Plain string comparison is safe here because
+    every timestamp in this codebase is zero-padded ISO-8601 in UTC, which
+    sorts lexicographically in chronological order.
+    """
+    norm_a = a.replace("T", " ")
+    norm_b = b.replace("T", " ")
+    return a if norm_a >= norm_b else b
 
 
 def _max_duration_minutes() -> int:
@@ -156,6 +172,12 @@ def _attach_or_create(
         ):
             new_severity = event["severity"]
 
+        # P1-20: an out-of-order event (e.g. a delayed write landing with an
+        # older `detected_at` than the incident's current end_time) must
+        # extend the incident without moving end_time BACKWARDS. Compare in
+        # Python and keep whichever of the two is later.
+        new_end_time = _later_timestamp(row["end_time"], event["detected_at"])
+
         conn.execute(
             """
             UPDATE incident_windows
@@ -165,7 +187,7 @@ def _attach_or_create(
                 event_count = event_count + 1
             WHERE id = ?
             """,
-            (event["detected_at"], new_severity, json.dumps(metrics), row["id"]),
+            (new_end_time, new_severity, json.dumps(metrics), row["id"]),
         )
         incident_id = row["id"]
         created = False
@@ -198,23 +220,61 @@ def _attach_or_create(
     return incident_id, created
 
 
+def get_dominant_metric(incident_id: int) -> str | None:
+    """Return the most-frequent `anomaly_events.metric_name` for this incident
+    window (P3-3), or None if the incident has no linked events yet.
+
+    Used by the scheduler to pick a trigger-specific INCIDENT_TRIGGERS
+    playbook (see agent/prompts.py) instead of always falling through to
+    "default" — those tailored playbooks were dead code until trigger_type
+    was wired all the way from here through to `run_analysis`.
+
+    Ties (equal counts) break alphabetically on metric_name for a
+    deterministic result.
+    """
+    with get_mon_reader() as conn:
+        row = conn.execute(
+            """
+            SELECT metric_name, COUNT(*) as cnt
+            FROM anomaly_events
+            WHERE incident_id = ?
+            GROUP BY metric_name
+            ORDER BY cnt DESC, metric_name ASC
+            LIMIT 1
+            """,
+            (incident_id,),
+        ).fetchone()
+        return row["metric_name"] if row else None
+
+
 # ---------------------------------------------------------------------------
 # Incident -> analysis lifecycle (P1.3 / E(a))
 # ---------------------------------------------------------------------------
-def set_incident_analysis(incident_id: int, analysis_id: int, status: str = "analyzed") -> None:
-    """
-    Link a stored `agent_analyses` row to an `incident_windows` row and move
-    the incident out of "detected".
+def set_incident_analysis(incident_id: int, analysis_id: int, status: str = "analyzed",
+                          server_id: str | None = None) -> bool:
+    """Link an analysis to an OPEN incident on the same server. Returns True if a row changed.
+    Never resurrects resolved/closed incidents (post-mortems don't mutate lifecycle).
 
     Called by `agent.llm_agent._parse_and_store` / `run_llm_analysis` once an
-    LLM analysis that addresses this incident has been persisted, and by the
-    scheduler right after it triggers that analysis.
+    LLM analysis that addresses this incident has been persisted (those two
+    call sites actually go through `storage.writer.write_agent_analysis_and_link`
+    for atomicity — P1-21 — but it applies this exact same guard). Kept as a
+    standalone function for replay/other callers that don't need the atomic
+    insert+link.
+
+    P1-4: the old version was a blind `UPDATE ... WHERE id = ?` — no status
+    guard, no server scope — so a hallucinated self-report could flip an
+    arbitrary incident to "analyzed", and re-linking a resolved incident
+    (e.g. a replay post-mortem) would resurrect it.
     """
     with get_mon_connection() as conn:
-        conn.execute(
-            "UPDATE incident_windows SET status = ?, analysis_id = ? WHERE id = ?",
-            (status, analysis_id, incident_id),
+        cur = conn.execute(
+            "UPDATE incident_windows SET status = ?, analysis_id = ? "
+            "WHERE id = ? AND status IN ('detected','analyzed')"
+            + (" AND server_id = ?" if server_id else ""),
+            (status, analysis_id, incident_id, *((server_id,) if server_id else ())),
         )
+        return cur.rowcount > 0
 
 
 def resolve_returned_to_baseline(server_id: str) -> list[int]:
@@ -224,10 +284,18 @@ def resolve_returned_to_baseline(server_id: str) -> list[int]:
 
     An incident is considered "returned to baseline" when its `end_time` is
     older than `incident_resolve_quiet_minutes` (default 30) AND no newer
-    `anomaly_events` row has landed for this server since then — a fresh
-    event means the underlying condition is still active, so we leave it
-    open (it will simply get extended by `update_windows` on the next cycle
-    instead).
+    `anomaly_events` row BELONGING TO THIS INCIDENT (or not yet grouped) has
+    landed for this server since then — a fresh event for THIS incident means
+    the underlying condition is still active, so we leave it open (it will
+    simply get extended by `update_windows` on the next cycle instead).
+
+    P1-8: the newer-event guard is scoped to this incident (`incident_id IS
+    NULL OR incident_id = ?`) rather than to the whole server. Without that
+    scoping, a newer anomaly already grouped into a DIFFERENT (e.g.
+    superseding) incident on the same server would block this one from ever
+    resolving, even though it has nothing to do with this incident's
+    condition — superseded incidents would get stuck 'detected'/'analyzed'
+    forever.
 
     Returns the list of incident IDs that were resolved.
     """
@@ -251,9 +319,10 @@ def resolve_returned_to_baseline(server_id: str) -> list[int]:
                 """
                 SELECT 1 FROM anomaly_events
                 WHERE server_id = ? AND datetime(detected_at) > datetime(?)
+                  AND (incident_id IS NULL OR incident_id = ?)
                 LIMIT 1
                 """,
-                (server_id, row["end_time"]),
+                (server_id, row["end_time"], row["id"]),
             ).fetchone()
             if newer_event:
                 continue

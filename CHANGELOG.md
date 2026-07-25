@@ -7,7 +7,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [0.2.0] — 2026-07-25
 
 ### Changed
-- **Default agent model is now `gemini-2.0-flash`** (was `claude-opus-4-6`). The
+- **Default agent model is now `gemini-2.5-flash`** (was `claude-opus-4-6`). The
   previous default required Vertex AI / a valid Opus id and would not resolve on
   a plain Anthropic-API setup; Gemini is the lowest-friction default and other
   models are a one-line config change.
@@ -17,9 +17,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   only in this file — use a `servers:` block for multiple hosts — with secrets
   injected via `${VAR}`. **Breaking:** the `PROD_DB_*` and `SEEQL_SERVER_*`
   environment overrides were removed; move those into the config file. A small
-  set of operational env vars remains (`SEEQL_CONFIG`, `SEEQL_MON_DB_PATH`,
-  `SEEQL_DB_MAX_SIZE_MB`, `SEEQL_LOG_MAX_SIZE_MB`, `SEEQL_RETENTION_DAYS`,
-  `SEEQL_LOG_LEVEL`, `SEEQL_ENV`).
+  set of operational env vars remains (`SEEQL_CONFIG`, `SEEQL_AGENT_ENABLED`,
+  `SEEQL_MON_DB_PATH`, `SEEQL_DB_MAX_SIZE_MB`, `SEEQL_LOG_MAX_SIZE_MB`,
+  `SEEQL_RETENTION_DAYS`, `SEEQL_LOG_LEVEL`, `SEEQL_ENV`).
 - **`seeql run`/`serve` now self-initialize the monitoring schema.** Startup
   previously ran only migrations, which never created the 30-table base schema,
   so a fresh deployment needed a separate `seeql init-db`. The idempotent

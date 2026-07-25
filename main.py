@@ -13,6 +13,7 @@ Environment variables:
     PROD_DB_PASSWORD    Password for the production MySQL monitoring user
     SEEQL_ENV           Environment name (production, dev, test)
     SEEQL_API_PORT      API server port (default: 8080)
+    SEEQL_API_TOKEN     Optional bearer token for the API (unset = no auth)
 """
 
 import os
@@ -191,7 +192,7 @@ def _run_startup_migrations():
 
 
 def cmd_doctor():
-    """Run the seeql diagnostic — 7 checks against the local env."""
+    """Run the seeql diagnostic — 9 checks against the local env."""
     from seeql import doctor
     failures = doctor.run()
     sys.exit(failures)
@@ -515,11 +516,29 @@ def cmd_mcp(args):
         run_stdio(name=mcp_cfg.get("server_name", "seeql"))
 
 
+def _warn_if_api_bind_insecure(host: str, token: str | None) -> None:
+    """Loud warning when the HTTP API is bound off-loopback with no bearer
+    token configured — every POST (collection triggers, LLM analysis, alert
+    tests) and the full read surface would be reachable by anyone who can
+    reach this port. Mirrors the MCP HTTP transport's equivalent check
+    (mcp_server/server.py::_warn_if_insecure_binding)."""
+    if token or host in ("127.0.0.1", "localhost", "::1"):
+        return
+    logging.getLogger(__name__).warning(
+        f"SeeQL API bound to {host} with no api.auth_token configured — "
+        "every endpoint (including POST /collect/*, POST /api/v1/agent/analyze, "
+        "POST /api/v1/alerts/test) is reachable by anyone who can reach this "
+        "port. Set api.auth_token (SEEQL_API_TOKEN) or bind to 127.0.0.1 "
+        "behind a reverse proxy."
+    )
+
+
 def cmd_api(with_scheduler: bool = True):
     """Start the API server, optionally with the scheduler."""
     try:
         import uvicorn
         from api.app import create_app
+        from api.auth import resolve_auth_token
     except ImportError as e:
         print(
             f"The API server / dashboard needs the web dependencies, which aren't "
@@ -530,6 +549,9 @@ def cmd_api(with_scheduler: bool = True):
         sys.exit(2)
 
     port = int(os.environ.get("SEEQL_API_PORT", "8080"))
+    api_cfg = dict(get_config().get("api") or {})
+    host = api_cfg.get("bind", "0.0.0.0")
+    _warn_if_api_bind_insecure(host, resolve_auth_token(api_cfg))
     app = create_app()
 
     _run_startup_migrations()
@@ -553,7 +575,7 @@ def cmd_api(with_scheduler: bool = True):
         logger.info("Scheduler started alongside API server.")
 
     try:
-        uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+        uvicorn.run(app, host=host, port=port, log_level="info")
     finally:
         # Uvicorn has its own SIGTERM/SIGINT handling; when it returns, tear
         # down the scheduler and flush the SQLite WAL so we don't lose
@@ -632,7 +654,7 @@ def _main_inner():
     serve_p.add_argument("--no-scheduler", action="store_true",
                          help="Serve API only — don't start the collector")
 
-    sub.add_parser("doctor", help="Diagnose the local environment (7 checks)")
+    sub.add_parser("doctor", help="Diagnose the local environment (9 checks)")
 
     replay_p = sub.add_parser("replay", help="Replay a past incident")
     replay_p.add_argument("--from", dest="from_ts",

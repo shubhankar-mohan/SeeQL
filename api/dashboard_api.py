@@ -157,6 +157,7 @@ def query_regressions(
         JOIN baseline b ON r.digest = b.digest
         WHERE b.baseline_avg > 0
           AND r.recent_avg / b.baseline_avg >= ?
+          AND r.recent_avg >= 0.01
         ORDER BY regression_factor DESC
         LIMIT 20
     """
