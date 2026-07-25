@@ -67,7 +67,7 @@ Shipped so far:
 - Semantic HTML (`<main>`, `<nav>`, `<section>`)
 - Alt text on Chart.js canvases via `aria-label`
 
-Known gaps (see [TODOS.md — Dashboard a11y](../TODOS.md)):
+Known gaps:
 
 - Skip-to-content link missing
 - Info tooltips are hover-only (need `tabindex="0"` + `:focus` styling)
@@ -95,5 +95,3 @@ To add a new page:
 ## Related
 
 - [API reference](api.md)
-- [Frontend design doc](../FRONTEND_CLAUDE.md) — internal, not in
-  public image

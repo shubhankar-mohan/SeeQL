@@ -177,6 +177,27 @@ innodb_monitor_enable=all
 
 Restart the server after changing these.
 
+### 3. Stage instrumentation (optional, for execution-stage breakdowns)
+
+The `execution_stages` collector reports where query time goes (parsing,
+optimizing, sorting, sending data). It needs two `performance_schema`
+instruments turned on that are off by default — enable at runtime:
+
+```sql
+UPDATE performance_schema.setup_instruments
+SET ENABLED = 'YES', TIMED = 'YES'
+WHERE NAME LIKE 'stage/%';
+
+UPDATE performance_schema.setup_consumers
+SET ENABLED = 'YES'
+WHERE NAME LIKE 'events_stages%';
+```
+
+This does not persist across a MySQL restart. On Cloud SQL, make it
+permanent with the `performance-schema-instrument` flag set to
+`stage/%=ON`. On self-hosted MySQL, add the equivalent
+`performance-schema-instrument` line to `my.cnf`.
+
 ---
 
 ## Configuration

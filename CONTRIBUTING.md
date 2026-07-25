@@ -79,9 +79,6 @@ ruff check .
 - `scheduler/runner.py` — APScheduler orchestration, graceful shutdown.
 - `main.py` — CLI entry point (argparse subparsers).
 
-For the full context read `CLAUDE.md`. For the execution plan read `PLAN.md`
-and `IMPLEMENTATION.md`.
-
 ## Opening a PR
 
 1. Branch from `main`.

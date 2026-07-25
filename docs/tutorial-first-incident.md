@@ -2,8 +2,7 @@
 
 > **Status:** This walkthrough depends on `seeql demo` — a
 > bundled-incident seed command that is planned but not yet
-> implemented (tracked in
-> [PLAN.md §2.3](../PLAN.md) and [IMPLEMENTATION.md §2.3](../IMPLEMENTATION.md)).
+> implemented.
 > When it ships in v0.2, this page will walk you end-to-end through:
 >
 > - `seeql demo` → seed a synthetic 30-day incident history against a
@@ -37,9 +36,9 @@ Until then, to dogfood the flow against your own data:
    seeql replay --latest
    ```
 
-Meanwhile the demo command is tracked — see
-[TODOS.md](../TODOS.md) — and will land with a self-contained
-synthetic incident you can explore without touching production.
+Meanwhile the demo command is tracked internally and will land with a
+self-contained synthetic incident you can explore without touching
+production.
 
 ## Related
 
