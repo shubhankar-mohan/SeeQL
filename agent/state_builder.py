@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from agent import queries as Q
+from agent.redact import maybe_redact
 from config import get_config
 from storage.connection import get_mon_reader
 
@@ -152,9 +153,17 @@ def _build_current_state(conn, long_txn_sec: int, server_id: str) -> dict:
     row = conn.execute(Q.CURRENT_QPS, (sid,)).fetchone()
     state["qps"] = row["per_second"] if row and row["per_second"] else 0
 
-    # Long transactions
+    # Long transactions — trx_query carries raw statement text, which can
+    # contain literal customer data (emails, IDs, ...) from a WHERE/SET
+    # clause. Redact at CONSTRUCTION time (not render time) so both
+    # to_markdown() and to_dict() inherit the mask — to_dict() is what
+    # mcp_server/tools/state.py and api/agent_routes.py hand to callers
+    # verbatim (P0-9).
     rows = conn.execute(Q.LONG_TRANSACTIONS, (sid, sid, long_txn_sec)).fetchall()
-    state["long_transactions"] = [dict(r) for r in rows]
+    long_txns = [dict(r) for r in rows]
+    for t in long_txns:
+        t["trx_query"] = maybe_redact(t.get("trx_query"))
+    state["long_transactions"] = long_txns
 
     # GCP metrics
     rows = conn.execute(Q.CURRENT_GCP_METRICS, (sid, sid)).fetchall()
@@ -389,6 +398,9 @@ def _render_markdown(report: StateReport) -> str:
     if long_txns:
         lines.append(f"### Long Transactions: {len(long_txns)} active")
         for t in long_txns[:5]:
+            # trx_query is already redacted at construction time
+            # (_build_current_state), so no maybe_redact() call here — it
+            # would just be a redundant (if idempotent) re-application.
             lines.append(
                 f"- trx={t.get('trx_id')}, pid={t.get('pid', '?')}, age={t.get('age_sec')}s, "
                 f"rows_locked={t.get('rows_locked', 0)}, rows_modified={t.get('rows_modified', 0)}, "
@@ -500,16 +512,19 @@ def _render_markdown(report: StateReport) -> str:
 
     lines.append("")
 
-    # Previous recommendations — prevents duplicate suggestions
+    # Previous recommendations — prevents duplicate suggestions. This is our OWN model's
+    # prior output being re-injected into a new prompt (second-order injection, P2-2): fence
+    # it as untrusted and strip `#` so a stored analysis can't inject new markdown headers /
+    # fake instructions into this prompt.
     prev_recs = hist.get("previous_recommendations", [])
     if prev_recs:
         lines.append("### Previous Recommendations (last 24h)")
         lines.append("Do NOT repeat these unless the issue persists and was not acted on.")
+        lines.append("<untrusted_prior_output>")
         for pr in prev_recs:
-            lines.append(
-                f"- [{pr['severity']}] at {pr['analyzed_at']}: "
-                f"{pr['recommendations'][:200]}"
-            )
+            text = (pr["recommendations"] or "")[:200].replace("#", "")
+            lines.append(f"- [{pr['severity']}] at {pr['analyzed_at']}: {text}")
+        lines.append("</untrusted_prior_output>")
         lines.append("")
 
     trends = hist.get("regression_trends", [])

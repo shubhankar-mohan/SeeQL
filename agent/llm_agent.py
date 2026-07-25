@@ -132,7 +132,7 @@ def run_analysis(analysis_type: str = "routine", trigger_type: str | None = None
         server_id = get_server_registry().get_default_server_id()
 
     # Set the current server for live tools
-    from agent.tools import set_current_server
+    from agent.tools import set_current_server, set_current_budget
     set_current_server(server_id)
     try:
         max_tokens = config.get("max_tokens", 8192)
@@ -167,6 +167,19 @@ def run_analysis(analysis_type: str = "routine", trigger_type: str | None = None
         # Per-server system prompt (P3-2): real MySQL version + platform for
         # this server_id, instead of the hardcoded constant.
         system_prompt = build_system_prompt(server_id)
+
+        # Tool budget (P2-6): routine/incident analysis was the one LLM path with no cap on
+        # live-MySQL tool calls (webhook Phase 2 has always been budgeted — see
+        # alerting/investigator.py's Budget(...) construction, mirrored here). Build the
+        # SAME kind of Budget from agent.live_tool_cap / agent.explain_cap so a scheduled
+        # 15-minute check can't run unbounded live calls against prod.
+        from alerting.budget import Budget
+        budget = Budget(
+            investigation_id=0,  # not a real investigation row — routine/incident analysis
+            live_tool_cap=int(config.get("live_tool_cap", 6) or 6),
+            explain_cap=int(config.get("explain_cap", 3) or 3),
+        )
+        set_current_budget(budget)
 
         logger.info(f"Running {analysis_type} analysis with {backend['type']} ({backend['model']})")
 
@@ -206,8 +219,10 @@ def run_analysis(analysis_type: str = "routine", trigger_type: str | None = None
         # itself, so an exception raised while building the state report
         # (e.g. a bad snapshot query) skipped the reset entirely and left
         # this worker thread's ContextVar pointed at `server_id` for
-        # whatever job APScheduler runs next on it.
+        # whatever job APScheduler runs next on it. The tool budget (P2-6) is
+        # reset here too, for the same worker-thread-leak reason.
         set_current_server(None)
+        set_current_budget(None)
 
     # Parse and store the result
     analysis = _parse_and_store(

@@ -1,0 +1,96 @@
+# CI-tested set — install with: pip install -e ".[dev,api,mcp,openai,gcp]" -c constraints.txt
+#
+# Generated via `./venv/bin/pip freeze --exclude-editable` against the venv
+# that exercises the full test suite (core deps + dev, api, mcp, openai, gcp
+# extras). Pruned of packages with no path back to pyproject.toml's
+# dependencies/optional-dependencies and no import anywhere in the source
+# tree: `playwright`, `pyee`, `greenlet` (playwright's own closure, pulled in
+# ad hoc for local screenshot tooling, never a declared project dependency).
+#
+# Regenerate after intentionally bumping a dependency:
+#   ./venv/bin/pip freeze --exclude-editable > constraints.txt
+# then re-apply this header and re-check for stray/ad-hoc packages.
+
+aiofiles==25.1.0
+annotated-doc==0.0.4
+annotated-types==0.7.0
+anthropic==0.84.0
+anyio==4.12.1
+APScheduler==3.11.2
+attrs==26.1.0
+certifi==2026.2.25
+cffi==2.0.0
+charset-normalizer==3.4.5
+click==8.3.1
+coverage==7.13.4
+cryptography==46.0.5
+distro==1.9.0
+docstring_parser==0.17.0
+fastapi==0.135.1
+google-api-core==2.30.0
+google-auth==2.49.0
+google-cloud-appengine-logging==1.8.0
+google-cloud-audit-log==0.4.0
+google-cloud-core==2.5.0
+google-cloud-logging==3.14.0
+google-cloud-monitoring==2.29.1
+google-genai==1.66.0
+googleapis-common-protos==1.73.0
+grpc-google-iam-v1==0.14.3
+grpcio==1.78.0
+grpcio-status==1.78.0
+h11==0.16.0
+httpcore==1.0.9
+httptools==0.7.1
+httpx==0.28.1
+httpx-sse==0.4.3
+idna==3.11
+importlib_metadata==8.7.1
+iniconfig==2.3.0
+Jinja2==3.1.6
+jiter==0.13.0
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+MarkupSafe==3.0.3
+mcp==1.27.0
+mysql-connector-python==9.6.0
+openai==2.44.0
+opentelemetry-api==1.40.0
+packaging==26.0
+pluggy==1.6.0
+prometheus_client==0.24.1
+proto-plus==1.27.1
+protobuf==6.33.5
+pyasn1==0.6.2
+pyasn1_modules==0.4.2
+pycparser==3.0
+pydantic==2.12.5
+pydantic-settings==2.14.0
+pydantic_core==2.41.5
+Pygments==2.19.2
+PyJWT==2.12.1
+pytest==9.0.2
+pytest-cov==7.0.0
+pytest-mock==3.15.1
+python-dotenv==1.2.2
+python-multipart==0.0.26
+PyYAML==6.0.3
+referencing==0.37.0
+requests==2.32.5
+rpds-py==0.30.0
+rsa==4.9.1
+ruff==0.15.5
+sniffio==1.3.1
+sse-starlette==3.3.4
+starlette==0.52.1
+tenacity==9.1.4
+tqdm==4.68.3
+typing-inspection==0.4.2
+typing_extensions==4.15.0
+tzlocal==5.3.1
+urllib3==2.6.3
+uvicorn==0.41.0
+uvloop==0.22.1
+watchfiles==1.1.1
+websockets==16.0
+zipp==3.23.0

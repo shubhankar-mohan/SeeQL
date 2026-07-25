@@ -187,9 +187,11 @@ class GCPAdapter:
             merged_view, self.provider, provider_default_server_id
         )
 
+        # P2-4: cap at normalization — alert_summary reaches the LLM prompt and this
+        # payload is authenticated-but-untrusted (any OIDC/HMAC-holder can submit any text).
         summary = str(
             incident.get("summary") or incident.get("condition_name") or policy_name or "(no summary)"
-        )
+        )[:500]
 
         return InboundAlert(
             provider=self.provider,

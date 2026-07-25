@@ -11,7 +11,6 @@ The expensive `seeql_explain_query` (live EXPLAIN against prod) lives in
 mcp_server/tools/action.py (MCP-4) because it's gated behind config.
 """
 
-import json
 import logging
 
 from mcp_server.safety import MCPSafety, wrap_tool
@@ -77,10 +76,12 @@ def register(mcp, safety: MCPSafety) -> None:
         name="seeql_search_slow_log",
         description=(
             "Keyword-search the slow query log (populated by GCP Cloud "
-            "Logging). Returns real SQL with actual parameter values, "
-            "query_time_sec, lock_time_sec, rows examined/sent. Useful "
-            "when you need to see the literal query that fired, not just "
-            "the digest-ified form."
+            "Logging). Returns query_time_sec, lock_time_sec, rows "
+            "examined/sent, and the matched SQL statement — with literal "
+            "values (strings, numbers) masked by default "
+            "(agent.redact_sql_literals). Structure and keywords survive, "
+            "so this still shows more shape than the digest-ified form, "
+            "just not raw parameter values."
         ),
     )
     def search_slow_log_tool(keyword: str, limit: int = 10) -> dict:

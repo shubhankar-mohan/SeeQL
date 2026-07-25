@@ -347,6 +347,9 @@ FastAPI app at `http://<host>:8080/`. Full reference:
 | `GET` | `/api/v1/incidents/recent` | Detected incident windows |
 | `GET` | `/api/v1/alerts` | Alert history |
 
+**No auth by default — never expose this publicly without a token.** See
+[Securing the endpoint](docs/deployment.md#securing-the-endpoint).
+
 ---
 
 ## GCP / Cloud SQL extras
@@ -396,10 +399,14 @@ Full walkthrough in [docs/deployment.md#gcp-cloud-sql](docs/deployment.md).
 and you still get all collectors, anomaly detection, incidents, the
 dashboard, Prometheus, and alerting. You lose root-cause narration.
 
-**Is my data ever sent to the LLM?** Only on explicit analysis runs
-(`/api/v1/agent/analyze`, the scheduled agent, or `seeql replay`), and
-only the structured state report — no raw rows or customer data. Metrics
-stay in SQLite on the host that runs SeeQL.
+**Is my data ever sent to the LLM?** Only on analysis runs (scheduled agent,
+`/api/v1/agent/analyze`, `seeql replay`, webhook investigations). What's sent:
+the structured state report plus tool results. Query *fingerprints* are
+normalized (`?` placeholders). Live statement text (processlist, transactions,
+slow-log samples) can contain literal values from your workload; by default
+SeeQL masks those literals (`agent.redact_sql_literals: true`) before they
+reach the model. SeeQL never reads or transmits table row data. Metrics stay
+in SQLite on the host that runs SeeQL.
 
 **Does SeeQL write to the production MySQL?** No. `SELECT` + `PROCESS`
 grants are sufficient. Live tool calls (`run_explain`, `get_live_*`)

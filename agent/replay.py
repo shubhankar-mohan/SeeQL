@@ -19,7 +19,8 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from storage.connection import get_mon_reader
-from agent.prompts import INCIDENT_INVESTIGATOR_PROMPT
+from agent.prompts import INCIDENT_INVESTIGATOR_PROMPT, REPLAY_SYSTEM_PROMPT
+from agent.redact import maybe_redact
 
 logger = logging.getLogger(__name__)
 
@@ -178,7 +179,8 @@ def _build_timeline(server_id: str, from_ts: str, to_ts: str) -> tuple[str, dict
 
         # Lock waits: downsample like threads_running below (P1-14) -- a real
         # lock cascade (the exact incident type replay exists to explain)
-        # can produce thousands of rows, one per polling cycle.
+        # can produce thousands of rows, one per polling cycle. Redact the
+        # waiting query text (P0-9) as it goes into the timeline.
         lock_rows = list(
             conn.execute(_TIMELINE_LOCK_WAITS, (server_id, q_from, q_to))
         )
@@ -186,7 +188,7 @@ def _build_timeline(server_id: str, from_ts: str, to_ts: str) -> tuple[str, dict
         lock_step = max(1, len(lock_rows) // 50)
         for i, row in enumerate(lock_rows):
             if i % lock_step == 0:
-                wq = (row["waiting_query"] or "")[:80]
+                wq = (maybe_redact(row["waiting_query"]) or "")[:80]
                 events.append((
                     row["ts"],
                     f"**LOCK** pid={row['waiting_pid']} waiting {row['wait_seconds']}s "
@@ -291,6 +293,7 @@ def run_replay(
             analysis_type="replay",
             server_id=server_id,
             incident_id=incident_id,
+            system_prompt=REPLAY_SYSTEM_PROMPT,
         )
         result.analysis_md = llm.get("text")
         result.analysis_id = llm.get("analysis_id")

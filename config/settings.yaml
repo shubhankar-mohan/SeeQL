@@ -101,8 +101,25 @@ agent:
   # fallback_model: claude-sonnet-4-20250514  # Used only if no model/creds match (Anthropic API path)
   max_tokens: 8192
   max_tool_rounds: 10
+  # Tool budget for ROUTINE/incident analysis (P2-6). Mirrors the webhook
+  # investigator's Phase 2 budget (see `investigator:` below) so a scheduled
+  # 15-minute check can't run unbounded live-MySQL tool calls against prod.
+  # Snapshot tools (local SQLite) are never capped by this.
+  live_tool_cap: 6                  # max live-MySQL tool calls per analysis
+  explain_cap: 3                    # max EXPLAIN-against-prod calls per analysis
   schedule_seconds: 900             # 15 minutes
   skip_quiet: true                  # Skip analysis when nothing interesting is happening
+  # --- Privacy: what reaches the LLM ---
+  # Live statement text (processlist, transactions, lock waits) and slow-log
+  # samples can contain literal values from your workload (emails, ids, ...).
+  # On by default: string/number/hex literals are masked with `?` before
+  # that text reaches the model, while structure (keywords, identifiers)
+  # stays intact. See the README FAQ ("Is my data ever sent to the LLM?").
+  redact_sql_literals: true
+  # search_slow_log returns REAL SQL plus the user/host that ran it (not
+  # normalized like query digests). On by default; set false to disable the
+  # tool entirely if that's more exposure than you want the agent to have.
+  slow_log_tool_enabled: true
   anthropic_api_key: "${ANTHROPIC_API_KEY}"
   openai_api_key: "${OPENAI_API_KEY}"
   # Point at any OpenAI-compatible server (Azure OpenAI, Ollama, vLLM, Groq,
@@ -244,6 +261,12 @@ investigator:
     cpu_pct: 0.75
     rows_examined_ratio: 100
   confidence_completion_threshold: 0.8
+
+# --- HTTP API (dashboard, /api/v1, /collect/*, /metrics) ---
+api:
+  bind: "0.0.0.0"                   # set 127.0.0.1 if fronted by a local reverse proxy
+  auth_token: ${SEEQL_API_TOKEN}    # unset = no auth (private networks only)
+  protect_reads: false              # also require the token on /api/v1 GETs
 
 # --- MCP Server (Model Context Protocol — external Claude clients) ---
 mcp:

@@ -5,6 +5,7 @@ your operational setup.
 
 - [Docker (recommended)](#docker-recommended)
 - [Docker Compose](#docker-compose)
+- [Securing the endpoint](#securing-the-endpoint)
 - [GCP Cloud SQL](#gcp-cloud-sql)
 - [Kubernetes](#kubernetes)
 - [systemd](#systemd)
@@ -65,6 +66,57 @@ Includes a `--profile dev` MySQL 8.0 for local testing:
 docker compose --profile dev up
 # Then point seeql.yml at host: mysql-dev and re-run the seeql container
 ```
+
+## Securing the endpoint
+
+By default the API has **no authentication** and binds `0.0.0.0` — every
+`GET`/`POST` on the port you published is reachable by anyone who can reach
+it, including `POST /collect/*` (runs a full collection cycle against prod
+MySQL), `POST /api/v1/agent/analyze` (spends LLM budget), and
+`POST /api/v1/alerts/test` (fires a real alert to Slack/webhook channels).
+**Never publish port 8080 straight to the internet.** Pick one of:
+
+1. **Bearer token (simplest).** Set `api.auth_token` in your config,
+   sourced from an env var:
+
+   ```yaml
+   api:
+     bind: "0.0.0.0"
+     auth_token: ${SEEQL_API_TOKEN}   # set to a long random string
+     protect_reads: false             # true also gates GET /api/v1/*
+   ```
+
+   ```bash
+   docker run -d --name seeql \
+     -p 8080:8080 \
+     -v "$PWD/seeql.yml":/etc/seeql/seeql.yml:ro \
+     -e PROD_DB_PASSWORD=your_password \
+     -e SEEQL_API_TOKEN=your-long-random-token \
+     ghcr.io/shubhankar-mohan/seeql:latest
+   ```
+
+   Callers then need `Authorization: Bearer <token>` on every `POST` (plus
+   `GET /api/v1/*` if `protect_reads: true`). `GET /health` and
+   `GET /metrics` always stay open, so liveness probes and Prometheus
+   scrapers keep working unauthenticated. `POST /webhooks/*` is exempt
+   from the bearer gate: it authenticates via per-provider HMAC signatures
+   (the `webhooks.providers.*.secret` values) instead of the API token —
+   external providers (GCP/PagerDuty/Grafana) never send a bearer header,
+   so gating them here would only reject legitimate signed alerts.
+
+2. **Bind to loopback + reverse proxy (recommended for production).** Set
+   `api.bind: "127.0.0.1"` and drop `-p 8080:8080` entirely — front the API
+   with nginx/Caddy/Traefik on the same host or in the same pod, terminate
+   TLS there, and layer on whatever auth your org standardizes on.
+
+3. **Private network only, no token.** If SeeQL only ever runs inside a
+   VPC/cluster with no public ingress, the default (`auth_token` unset) is
+   fine — but a non-loopback `bind` with no token logs a startup warning as
+   a reminder that anyone on that network can call `POST /collect/*` or
+   spend your LLM budget.
+
+There is no rate limiting on the API, and the collection endpoints do real
+work against your production database — treat the port accordingly.
 
 ## GCP Cloud SQL
 

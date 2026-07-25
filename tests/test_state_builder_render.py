@@ -292,9 +292,11 @@ class TestStateBuilderGoldenRender:
         assert "### Server: Threads_running=12, Threads_connected=40, QPS=30.0" in md
 
         assert "### Long Transactions: 1 active" in md
+        # SQL literals are redacted by default (P0-9: agent.redact_sql_literals
+        # ships True), so the transaction query the LLM sees is masked.
         assert (
             "- trx=421, pid=555, age=90s, rows_locked=120, rows_modified=45, "
-            "query=`UPDATE orders SET status='shipped' WHERE id=99`"
+            "query=`UPDATE orders SET status='?' WHERE id=?`"
         ) in md
 
         assert "### Statistical Anomalies: 1 detected" in md
