@@ -5,9 +5,14 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -15,8 +20,12 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install SeeQL (dev,api,mcp,openai extras)
-        run: pip install -e ".[dev,api,mcp,openai]"
+      # Includes [gcp] so google-genai is present — the default agent backend
+      # is Gemini (from the google SDK), and its tests import `google.genai`.
+      # Without this the TestGeminiResponseShapes suite fails with
+      # ModuleNotFoundError: No module named 'google'.
+      - name: Install SeeQL (dev,api,mcp,openai,gcp extras)
+        run: pip install -e ".[dev,api,mcp,openai,gcp]"
 
       # advisory until the pre-existing lint debt is cleared in a follow-up;
       # flip to a hard gate then.
