@@ -47,7 +47,7 @@ RUN apt-get update \
 WORKDIR /build
 
 # Only the files pip needs to resolve and build the dependency graph
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md constraints.txt ./
 COPY main.py ./
 COPY config/ ./config/
 COPY collectors/ ./collectors/
@@ -62,7 +62,9 @@ COPY mcp_server/ ./mcp_server/
 
 # google-genai is built unconditionally so the default (api-only) runtime
 # image can import the Gemini/Vertex backend without the [gcp] extra.
-RUN pip wheel --wheel-dir /wheels ".[${INSTALL_EXTRAS}]" google-genai 'mcp>=1.2' 'openai>=1.40' 'anthropic>=0.39.0'
+# -c constraints.txt pins the resolved versions to the CI-tested set (notably
+# mcp==1.27; the code targets mcp v1's FastMCP, not the renamed 2.x API).
+RUN pip wheel --wheel-dir /wheels -c constraints.txt ".[${INSTALL_EXTRAS}]" google-genai 'mcp>=1.2' 'openai>=1.40' 'anthropic>=0.39.0'
 
 # ---------- Stage 2: runtime ----------
 FROM ${PYTHON_IMAGE} AS runtime
