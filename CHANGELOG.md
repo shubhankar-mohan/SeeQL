@@ -4,6 +4,24 @@ All notable changes to SeeQL will be documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] — 2026-09-04
+
+### Security
+- Patched all fixable HIGH/CRITICAL CVEs Trivy flagged in the 0.2.0 image and
+  pinned dependency set: `starlette` → 1.6.0, `cryptography` → 50.0.1, `mcp` →
+  1.28.1 (still on the v1 FastMCP API), `PyJWT` → 2.13.0, `pyasn1` → 0.6.4,
+  `python-multipart` → 0.0.32, `msgpack` → 1.2.1; `pip` and `setuptools`
+  upgraded to patched versions in the Docker image. `fastapi` moved to 0.141.1
+  to carry the patched Starlette.
+- Two remaining findings (setuptools/msgpack inside pip's vendored `_vendor`
+  build machinery) are documented and ignored in `.trivyignore` — they are not
+  reachable at container runtime.
+
+### Changed
+- CI and the Docker build now install with `-c constraints.txt` (reproducible,
+  pinned dependency set), and the container image scan (Trivy, HIGH/CRITICAL,
+  gating) now runs on pull requests too — previously only on release tags.
+
 ## [0.2.0] — 2026-07-25
 
 ### Changed
