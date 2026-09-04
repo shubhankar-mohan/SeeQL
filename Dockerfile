@@ -94,12 +94,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Upgrade pip + setuptools first (the base image's copies carry known CVEs
-# Trivy flags), then install the app from the pre-built wheels.
+# Install the app from the pre-built wheels (offline), THEN upgrade pip +
+# setuptools last — doing it first lets the wheel install pull an older
+# setuptools back in from /wheels (a build dep), which is exactly the CVE
+# Trivy flags. Upgrading after pins the secure copies into the final image.
 COPY --from=builder /wheels /wheels
-RUN pip install --upgrade pip setuptools \
-    && pip install --no-index --find-links=/wheels "seeql[${INSTALL_EXTRAS}]" google-genai 'mcp>=1.2' 'openai>=1.40' 'anthropic>=0.39.0' \
+RUN pip install --no-index --find-links=/wheels "seeql[${INSTALL_EXTRAS}]" google-genai 'mcp>=1.2' 'openai>=1.40' 'anthropic>=0.39.0' \
     && rm -rf /wheels \
+    && pip install --upgrade pip setuptools \
     && find /usr/local/lib/python3.12 -type d -name '__pycache__' -prune -exec rm -rf {} +
 
 # Runtime code. Tests, scripts, and internal docs intentionally not shipped.
