@@ -101,7 +101,13 @@ WORKDIR /app
 COPY --from=builder /wheels /wheels
 RUN pip install --no-index --find-links=/wheels "seeql[${INSTALL_EXTRAS}]" google-genai 'mcp>=1.2' 'openai>=1.40' 'anthropic>=0.39.0' \
     && rm -rf /wheels \
-    && pip install --upgrade pip setuptools \
+    && pip install --upgrade pip \
+    # Purge every residual setuptools/pkg_resources copy (the base image ships
+    # an old system one pip won't uninstall, which Trivy flags) and reinstall a
+    # single secure setuptools so exactly one, patched copy remains in the image.
+    && pip uninstall -y setuptools 2>/dev/null || true \
+    && find /usr /usr/local -depth \( -name 'setuptools' -o -name 'setuptools-*.dist-info' -o -name 'pkg_resources' -o -name '_distutils_hack' -o -name 'distutils-precedence.pth' \) -exec rm -rf {} + 2>/dev/null || true \
+    && pip install 'setuptools>=78.1.1' \
     && find /usr/local/lib/python3.12 -type d -name '__pycache__' -prune -exec rm -rf {} +
 
 # Runtime code. Tests, scripts, and internal docs intentionally not shipped.
