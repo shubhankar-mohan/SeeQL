@@ -200,7 +200,7 @@ defaults to `default` and `--server` defaults to the primary server.
 Runs the SeeQL [Model Context Protocol](https://modelcontextprotocol.io/)
 server so external MCP clients (Claude Desktop, Claude Code, custom HTTP
 clients) can use SeeQL as a root-cause-analysis surface. Requires the
-`mcp` extra: `pip install 'seeql[mcp]'` (or `pip install 'mcp>=1.2'`).
+`mcp` extra (bundled in the Docker image; from a clone: `pip install -e ".[mcp]"`).
 
 ```bash
 seeql mcp                          # stdio transport (default)

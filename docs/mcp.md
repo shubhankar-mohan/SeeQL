@@ -26,9 +26,10 @@ can see.
 
 ## Install
 
+SeeQL is distributed as a Docker image; the MCP server is included. To run it
+outside a container, install from a clone with the `mcp` extra:
+
 ```bash
-pip install 'seeql[mcp]'   # once 0.2.0 is on PyPI
-# from source:
 pip install -e ".[mcp]"
 ```
 

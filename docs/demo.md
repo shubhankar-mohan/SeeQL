@@ -21,8 +21,7 @@ The dashboard is a FastAPI app and needs the web extras (`fastapi`, `uvicorn`,
 `jinja2`). Either use the repo's `./venv` (already has them) or install them:
 
 ```bash
-pip install 'seeql[api]'   # once 0.2.0 is on PyPI; into whatever env runs seeql
-# from source:
+# From a clone (the repo's ./venv already has these):
 pip install -e ".[api]"
 ```
 
