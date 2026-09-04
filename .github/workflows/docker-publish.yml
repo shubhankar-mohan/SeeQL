@@ -127,6 +127,12 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: echo "ref=${REGISTRY}/${IMAGE_NAME,,}@${DIGEST}" >> "$GITHUB_OUTPUT"
 
+      # Report-only at publish: uploads findings to the Security tab for
+      # ongoing visibility but does NOT gate the release. The blocking gate
+      # runs at PR time in docker-test.yml (table format), which correctly
+      # honors .trivyignore. Publish uses SARIF, where Trivy still counts
+      # .trivyignore-suppressed findings toward --exit-code (a known quirk),
+      # so gating here would fail the release on already-accepted vendored CVEs.
       - name: Trivy vulnerability scan
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         uses: aquasecurity/trivy-action@master
@@ -135,7 +141,7 @@ jobs:
           format: sarif
           output: trivy-${{ matrix.variant }}.sarif
           severity: HIGH,CRITICAL
-          exit-code: '1'
+          exit-code: '0'
           ignore-unfixed: true
           trivyignores: .trivyignore
 
