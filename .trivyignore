@@ -1,0 +1,14 @@
+# Trivy ignore list — vendored build-tooling CVEs, not application dependencies.
+#
+# These two CVEs live only inside pip's / setuptools' bundled `_vendor` build
+# machinery (Trivy groups them under "Python (python-pkg)"). They are never
+# imported or executed by the running SeeQL container, which runs the app
+# (uvicorn / seeql) and never invokes pip or setuptools at runtime. The image's
+# top-level setuptools is patched (84.x); the 70.3.0 hit is a vendored copy that
+# cannot be removed without breaking pip itself.
+#
+# The application's own dependencies ARE patched — see constraints.txt
+# (starlette, cryptography, mcp, PyJWT, pyasn1, python-multipart, msgpack, etc.).
+# Re-evaluate when pip / setuptools ship updated vendored copies.
+CVE-2025-47273         # setuptools path traversal — pip-vendored copy only
+GHSA-6v7p-g79w-8964    # msgpack OOB read — pip-vendored copy only

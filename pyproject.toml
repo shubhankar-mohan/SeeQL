@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "seeql"
-version = "0.2.0"
+version = "0.2.1"
 description = "SeeQL — LLM-powered MySQL DBA agent with anomaly detection and incident replay"
 readme = "README.md"
 license = {text = "Apache-2.0"}

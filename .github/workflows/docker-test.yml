@@ -93,3 +93,17 @@ jobs:
           docker run -d --name seeql-smoke -p 8080:8080 seeql:pr-${{ matrix.variant }} seeql serve --no-scheduler
           for i in $(seq 1 20); do curl -fsS http://localhost:8080/health && exit 0 || sleep 3; done
           docker logs seeql-smoke; exit 1
+
+      # Scan the built image on PRs too (the publish workflow scans only on
+      # tags — so a fixable HIGH/CRITICAL CVE otherwise isn't caught until the
+      # release tag is already cut). Table output prints the offending
+      # packages; gates the same way the publish scan does.
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: seeql:pr-${{ matrix.variant }}
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+          trivyignores: .trivyignore

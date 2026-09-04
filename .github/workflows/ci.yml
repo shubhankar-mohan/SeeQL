@@ -29,6 +29,11 @@ jobs:
       - name: Install SeeQL (all extras, pinned to constraints.txt)
         run: pip install -e ".[dev,api,mcp,openai,gcp]" -c constraints.txt
 
+      # Prints the fully-resolved version set so a security bump that unpins
+      # a package in constraints.txt can be re-pinned to whatever CI resolved.
+      - name: Resolved versions (pip freeze)
+        run: pip freeze --exclude-editable
+
       # advisory until the pre-existing lint debt is cleared in a follow-up;
       # flip to a hard gate then.
       - name: Lint (ruff)
