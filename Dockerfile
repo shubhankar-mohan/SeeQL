@@ -94,10 +94,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Upgrade pip first (the base image's pip carries known CVEs Trivy flags),
-# then install the app from the pre-built wheels — no index needed for that.
+# Upgrade pip + setuptools first (the base image's copies carry known CVEs
+# Trivy flags), then install the app from the pre-built wheels.
 COPY --from=builder /wheels /wheels
-RUN pip install --upgrade pip \
+RUN pip install --upgrade pip setuptools \
     && pip install --no-index --find-links=/wheels "seeql[${INSTALL_EXTRAS}]" google-genai 'mcp>=1.2' 'openai>=1.40' 'anthropic>=0.39.0' \
     && rm -rf /wheels \
     && find /usr/local/lib/python3.12 -type d -name '__pycache__' -prune -exec rm -rf {} +
