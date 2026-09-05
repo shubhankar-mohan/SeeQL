@@ -29,7 +29,7 @@ docstring_parser==0.17.0
 fastapi==0.141.1
 google-api-core==2.30.0
 google-auth==2.49.0
-google-cloud-appengine-logging==1.8.0
+google-cloud-appengine-logging==1.10.0
 google-cloud-audit-log==0.4.0
 google-cloud-core==2.6.0
 google-cloud-logging==3.14.0
