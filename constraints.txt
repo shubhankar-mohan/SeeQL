@@ -51,7 +51,7 @@ jiter==0.13.0
 jsonschema-specifications==2025.9.1
 jsonschema==4.26.0
 MarkupSafe==3.0.3
-mcp==1.28.1
+mcp==2.1.1
 msgpack==1.2.1
 mysql-connector-python==9.6.0
 openai==2.44.0
